@@ -1,4 +1,4 @@
-import {createContext, useContext} from 'react'
+import {createContext, useContext, useEffect, useState} from 'react'
 import {useMutation, useQuery, useQueryClient} from '@tanstack/react-query'
 
 import {
@@ -20,35 +20,56 @@ import {isAppBusy, useToast} from './ui'
 export const BootstrapContext = createContext<Bootstrap | null>(null)
 export const useBootstrap = () => useContext(BootstrapContext)!
 
+export function usePageVisible() {
+	const [visible, setVisible] = useState(() => document.visibilityState === 'visible')
+	useEffect(() => {
+		const onChange = () => setVisible(document.visibilityState === 'visible')
+		document.addEventListener('visibilitychange', onChange)
+		return () => document.removeEventListener('visibilitychange', onChange)
+	}, [])
+	return visible
+}
+
+export const visibleInterval = (ms: number | false, visible: boolean) => (visible ? ms : false)
+
 export function useApps() {
+	const visible = usePageVisible()
 	return useQuery({
 		queryKey: ['apps.list'],
 		queryFn: () => query<UserApp[]>('apps.list'),
 		// Poll fast while anything is installing/starting/stopping so progress feels live.
-		refetchInterval: (q) => ((q.state.data ?? []).some((a) => isAppBusy(a.state)) ? 1500 : 6000),
+		refetchInterval: visible ? (q) => ((q.state.data ?? []).some((a) => isAppBusy(a.state)) ? 1500 : 6000) : false,
 	})
 }
-export const useUpdates = () =>
-	useQuery({queryKey: ['apps.updates'], queryFn: () => query<{id: string; version: string}[]>('apps.updates'), refetchInterval: 5 * 60_000})
+export const useUpdates = () => {
+	const visible = usePageVisible()
+	return useQuery({queryKey: ['apps.updates'], queryFn: () => query<{id: string; version: string}[]>('apps.updates'), refetchInterval: visibleInterval(5 * 60_000, visible)})
+}
 export const useUser = () => useQuery({queryKey: ['user.get'], queryFn: () => query<User>('user.get'), staleTime: 5 * 60_000})
 export const useRecent = () =>
 	useQuery({queryKey: ['apps.recentlyOpened'], queryFn: () => query<string[]>('apps.recentlyOpened'), staleTime: 30_000, retry: false})
 
-const live = (key: string, ms = 3000) => ({queryKey: [key], queryFn: () => query(key), refetchInterval: ms})
-export const useCpu = () => useQuery({...live('system.cpuUsage'), queryFn: () => query<CpuUsage>('system.cpuUsage')})
-export const useMemory = () => useQuery({...live('system.memoryUsage'), queryFn: () => query<MemoryUsage>('system.memoryUsage')})
-export const useDisk = () => useQuery({...live('system.diskUsage', 30_000), queryFn: () => query<DiskUsage>('system.diskUsage')})
-export const useTemp = () =>
-	useQuery({...live('system.cpuTemperature', 10_000), queryFn: () => query<Temperature>('system.cpuTemperature')})
-export const useUptime = () => useQuery({...live('system.uptime', 60_000), queryFn: () => query<number>('system.uptime')})
-export const useNotifications = () =>
-	useQuery({queryKey: ['notifications.get'], queryFn: () => query<string[]>('notifications.get'), refetchInterval: 30_000})
-export const useMachines = () =>
-	useQuery({
+function useLive<T>(key: string, ms = 3000) {
+	const visible = usePageVisible()
+	return useQuery({queryKey: [key], queryFn: () => query<T>(key), refetchInterval: visibleInterval(ms, visible)})
+}
+export const useCpu = () => useLive<CpuUsage>('system.cpuUsage')
+export const useMemory = () => useLive<MemoryUsage>('system.memoryUsage')
+export const useDisk = () => useLive<DiskUsage>('system.diskUsage', 30_000)
+export const useTemp = () => useLive<Temperature>('system.cpuTemperature', 10_000)
+export const useUptime = () => useLive<number>('system.uptime', 60_000)
+export const useNotifications = () => {
+	const visible = usePageVisible()
+	return useQuery({queryKey: ['notifications.get'], queryFn: () => query<string[]>('notifications.get'), refetchInterval: visibleInterval(30_000, visible), staleTime: 15_000})
+}
+export const useMachines = () => {
+	const visible = usePageVisible()
+	return useQuery({
 		queryKey: ['machines.list'],
 		queryFn: () => query<Machine[]>('machines.list'),
-		refetchInterval: (q) => ((q.state.data ?? []).some((m) => !['running', 'stopped', 'error', 'suspended', 'hibernated'].includes(m.state)) ? 2000 : 8000),
+		refetchInterval: visible ? (q) => ((q.state.data ?? []).some((m) => !['running', 'stopped', 'error', 'suspended', 'hibernated'].includes(m.state)) ? 2000 : 8000) : false,
 	})
+}
 export const useRegistry = (enabled = true) =>
 	useQuery({queryKey: ['appStore.registry'], queryFn: () => query<Registry>('appStore.registry'), staleTime: 10 * 60_000, enabled})
 export const useInstallReview = (appId: string | null) =>

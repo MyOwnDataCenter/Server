@@ -3,7 +3,7 @@ import {useContext, useEffect, useState, type CSSProperties, type FormEvent, typ
 import {useMutation, useQuery, useQueryClient} from '@tanstack/react-query'
 
 import {logout, mutate, query, type ActiveSession} from '../api'
-import {useBootstrap, useUser} from '../data'
+import {useBootstrap, usePageVisible, useUser, visibleInterval} from '../data'
 import {Icon, type IconName} from '../icons'
 import {InWindow, Segmented, Sheet, SheetHeader, haptic, initials, setLayoutPref, useConfirm, useLayout, useOmarchyThemes, useToast, type LayoutPref, type Prefs} from '../ui'
 import {Appearance} from './More'
@@ -651,7 +651,8 @@ function HostnameSheet({open, current, onClose}: {open: boolean; current: string
 function WifiSheet({onClose, connected}: {onClose: () => void; connected?: string}) {
 	const save = useSave()
 	const confirm = useConfirm()
-	const networks = useQ<{ssid: string; signal: number; authenticated: boolean; active: boolean}[]>('wifi.networks', undefined, {refetchInterval: 10_000})
+	const visible = usePageVisible()
+	const networks = useQ<{ssid: string; signal: number; authenticated: boolean; active: boolean}[]>('wifi.networks', undefined, {refetchInterval: visibleInterval(10_000, visible)})
 	const [target, setTarget] = useState<{ssid: string; authenticated: boolean} | null>(null)
 	const [password, setPassword] = useState('')
 	const connect = (ssid: string, pw?: string) =>

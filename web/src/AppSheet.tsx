@@ -3,7 +3,7 @@ import {useQuery} from '@tanstack/react-query'
 
 import {askApp, explainProbe, openApp, webStatus} from './openApp'
 import {query, type UserApp} from './api'
-import {appUrl, useAction, useBootstrap} from './data'
+import {appUrl, useAction, useBootstrap, usePageVisible} from './data'
 import {useDesktop} from './desktop/Desktop'
 import {Icon, type IconName} from './icons'
 import {AppIcon, KV, Sheet, SheetHeader, StatusPill, appStatus, haptic, isAppBusy, useConfirm, useToast} from './ui'
@@ -21,6 +21,7 @@ export function AppSheet({app, update, onClose, onTerminal}: Props) {
 	const [waiting, setWaiting] = useState<number | null>(null)
 	const [problem, setProblem] = useState<string | null>(null)
 	const waitCtrl = useRef<AbortController | null>(null)
+	const visible = usePageVisible()
 	useEffect(() => () => waitCtrl.current?.abort(), [])
 	useEffect(() => (waitCtrl.current?.abort(), setWaiting(null), setProblem(null)), [app?.id, app?.state])
 	// "Running" only says its containers run. Whether its web page answers is asked separately.
@@ -28,7 +29,7 @@ export function AppSheet({app, update, onClose, onTerminal}: Props) {
 		queryKey: ['apps.probe', app?.id],
 		queryFn: () => askApp(app!),
 		enabled: !!app && app.state === 'running' && !!app.port,
-		refetchInterval: (q) => (q.state.data?.readiness === 'ready' ? 30_000 : 4000),
+		refetchInterval: visible ? (q) => (q.state.data?.readiness === 'ready' ? 30_000 : 4000) : false,
 		retry: false,
 	})
 	useEffect(() => setLogsOpen(false), [app?.id])

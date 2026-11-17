@@ -5,6 +5,7 @@ import {useMutation, useQuery, useQueryClient} from '@tanstack/react-query'
 import {useEffect, useMemo, useState, type CSSProperties, type ReactNode} from 'react'
 
 import {mutate, query} from '../api'
+import {usePageVisible, visibleInterval} from '../data'
 import {Console} from '../Console'
 import {Icon, type IconName} from '../icons'
 import {osLook} from '../screens/Machines'
@@ -63,7 +64,10 @@ const rootDisk = (a: Agent) => a.metrics?.disks?.find((d) => d.mount === '/') ??
 const look = (a: Agent) => osLook(a.info?.omarchy ? 'omarchy' : (a.info?.osId ?? ''))
 const ago = (t: number | null) => (!t ? 'never' : Date.now() - t < 60_000 ? 'just now' : `${duration((Date.now() - t) / 1000)} ago`)
 
-export const useSwarm = () => useQuery({queryKey: ['swarm.list'], queryFn: () => query<Agent[]>('swarm.list'), refetchInterval: 5000})
+export const useSwarm = () => {
+	const visible = usePageVisible()
+	return useQuery({queryKey: ['swarm.list'], queryFn: () => query<Agent[]>('swarm.list'), refetchInterval: visibleInterval(5000, visible)})
+}
 
 function useSwarmAction() {
 	const qc = useQueryClient()

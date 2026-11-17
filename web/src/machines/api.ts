@@ -2,6 +2,7 @@
 import {useMutation, useQuery, useQueryClient} from '@tanstack/react-query'
 
 import {mutate, query, type PortForward} from '../api'
+import {usePageVisible, visibleInterval} from '../data'
 import {useToast} from '../ui'
 
 export type Drive = {
@@ -63,13 +64,26 @@ export type StatPoint = {t: number; cpu: number; memMb: number; netIn: number; n
 export type Stats = {memoryMb: number; vcpus: number; points: StatPoint[]}
 export type Backup = {id: string; name: string; vmid: number; sourceId: string; createdAt: number; notes: string; live: boolean; sizeBytes: number; path: string}
 
-export const useMachineDetails = (id: string | null) =>
-	useQuery({queryKey: ['machines.details', id], queryFn: () => query<MachineDetails>('machines.details', {id}), enabled: !!id, refetchInterval: 5000})
-export const useNode = () => useQuery({queryKey: ['machines.node'], queryFn: () => query<NodeInfo>('machines.node'), refetchInterval: 15_000, staleTime: 10_000})
-export const useStats = (id: string | null, enabled = true) =>
-	useQuery({queryKey: ['machines.stats', id], queryFn: () => query<Stats>('machines.stats', {id}), enabled: !!id && enabled, refetchInterval: 10_000})
-export const useBackups = (id?: string | null) => useQuery({queryKey: ['machines.backups', id ?? 'all'], queryFn: () => query<Backup[]>('machines.backups', id ? {id} : {}), refetchInterval: 15_000})
-export const useAllTasks = () => useQuery({queryKey: ['machines.tasks'], queryFn: () => query<Task[]>('machines.tasks'), refetchInterval: 5000})
+export const useMachineDetails = (id: string | null) => {
+	const visible = usePageVisible()
+	return useQuery({queryKey: ['machines.details', id], queryFn: () => query<MachineDetails>('machines.details', {id}), enabled: !!id, refetchInterval: visibleInterval(5000, visible)})
+}
+export const useNode = () => {
+	const visible = usePageVisible()
+	return useQuery({queryKey: ['machines.node'], queryFn: () => query<NodeInfo>('machines.node'), refetchInterval: visibleInterval(15_000, visible), staleTime: 10_000})
+}
+export const useStats = (id: string | null, enabled = true) => {
+	const visible = usePageVisible()
+	return useQuery({queryKey: ['machines.stats', id], queryFn: () => query<Stats>('machines.stats', {id}), enabled: !!id && enabled, refetchInterval: visibleInterval(10_000, visible)})
+}
+export const useBackups = (id?: string | null) => {
+	const visible = usePageVisible()
+	return useQuery({queryKey: ['machines.backups', id ?? 'all'], queryFn: () => query<Backup[]>('machines.backups', id ? {id} : {}), refetchInterval: visibleInterval(15_000, visible)})
+}
+export const useAllTasks = () => {
+	const visible = usePageVisible()
+	return useQuery({queryKey: ['machines.tasks'], queryFn: () => query<Task[]>('machines.tasks'), refetchInterval: visibleInterval(5000, visible)})
+}
 
 // Run a machine action; refresh everything that could have changed; toast the outcome.
 export function useMachineAction() {

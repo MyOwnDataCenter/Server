@@ -17,7 +17,8 @@ const client = new QueryClient({
 			// Don't hammer omarchyd with retries for auth or permission errors.
 			retry: (count, error) => !(error instanceof ApiError && error.status >= 400 && error.status < 500) && count < 2,
 			refetchOnWindowFocus: true,
-			staleTime: 2000,
+			staleTime: 15_000,
+			refetchIntervalInBackground: false,
 		},
 	},
 })

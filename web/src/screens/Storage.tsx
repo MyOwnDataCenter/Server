@@ -8,6 +8,7 @@ import {useState, type CSSProperties, type ReactNode} from 'react'
 import {useQuery, useQueryClient} from '@tanstack/react-query'
 
 import {mutate, query} from '../api'
+import {usePageVisible, visibleInterval} from '../data'
 import {Icon} from '../icons'
 import {KV, Segmented, Sheet, SheetHeader, bytes, haptic, useConfirm, useToast} from '../ui'
 
@@ -123,9 +124,10 @@ export function StoragePage({onBack}: {onBack: () => void}) {
 	const [importing, setImporting] = useState<Importable | null>(null)
 	const [busy, setBusy] = useState(false)
 
+	const visible = usePageVisible()
 	const status = useQuery({queryKey: ['storage.status'], queryFn: () => query<{helperAvailable: boolean; zfsAvailable?: boolean}>('storage.status')})
-	const disksQ = useQuery({queryKey: ['storage.disks'], queryFn: () => query<Drive[]>('storage.disks'), refetchInterval: 30_000})
-	const poolsQ = useQuery({queryKey: ['storage.pools'], queryFn: () => query<Pool[]>('storage.pools'), refetchInterval: 10_000})
+	const disksQ = useQuery({queryKey: ['storage.disks'], queryFn: () => query<Drive[]>('storage.disks'), refetchInterval: visibleInterval(30_000, visible)})
+	const poolsQ = useQuery({queryKey: ['storage.pools'], queryFn: () => query<Pool[]>('storage.pools'), refetchInterval: visibleInterval(10_000, visible)})
 	const importQ = useQuery({queryKey: ['storage.importable'], queryFn: () => query<Importable[]>('storage.importable')})
 	const drives = disksQ.data ?? []
 	const pools = poolsQ.data ?? []
