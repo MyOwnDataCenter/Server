@@ -214,6 +214,71 @@ function execP(cmd, args, {env, cwd, timeout = 10 * 60_000} = {}) {
 	})
 }
 const exists = (p) => access(p).then(() => true, () => false)
+const httpsUrl = (v) => (typeof v === 'string' && /^https:\/\//.test(v) ? v : undefined)
+
+// In-memory listing from catalog.json. Allow-listed fields only; folder is always the store subdir.
+function listingFromCatalog(raw, folder) {
+	const id = raw.id
+	const deps = Array.isArray(raw.dependencies) ? raw.dependencies.filter((x) => typeof x === 'string') : []
+	const needs = Array.isArray(raw.needs) ? raw.needs.filter((x) => typeof x === 'string') : []
+	const impl = Array.isArray(raw.implements) ? raw.implements.filter((x) => typeof x === 'string') : []
+	const folders = folderChoices(raw.folders)
+	const openPorts = Array.isArray(raw.openPorts) ? raw.openPorts.map(Number).filter((n) => Number.isInteger(n) && n >= 1 && n <= 65535 && n !== 22).slice(0, 16) : []
+	const web = raw.web && typeof raw.web.service === 'string' && Number.isInteger(Number(raw.web.port)) ? {service: raw.web.service, port: Number(raw.web.port), ...(raw.web.https === true ? {https: true} : {})} : null
+	return {
+		id,
+		name: String(raw.name ?? id),
+		tagline: raw.tagline,
+		icon: httpsUrl(raw.icon),
+		category: raw.category,
+		version: raw.version !== undefined ? String(raw.version) : undefined,
+		port: Number(raw.port) || undefined,
+		path: typeof raw.path === 'string' ? raw.path : '',
+		description: raw.description,
+		developer: raw.developer,
+		website: httpsUrl(raw.website),
+		gallery: Array.isArray(raw.gallery) ? raw.gallery.filter((f) => typeof f === 'string' && /^https:\/\//.test(f)) : [],
+		releaseNotes: raw.releaseNotes,
+		dependencies: deps,
+		...(needs.length ? {needs} : {}),
+		...(impl.length ? {implements: impl} : {}),
+		shared: raw.shared === true,
+		defaultUsername: raw.defaultUsername || undefined,
+		defaultPassword: raw.defaultPassword || undefined,
+		deterministicPassword: raw.deterministicPassword === true,
+		...(raw.requiresHttps === true ? {requiresHttps: true} : {}),
+		...(openPorts.length ? {openPorts} : {}),
+		...(folders.length ? {folders} : {}),
+		...(web ? {web} : {}),
+		...(typeof raw.unsupported === 'string' ? {unsupported: raw.unsupported} : {}),
+		...(typeof raw.caution === 'string' ? {caution: raw.caution} : {}),
+		folder,
+	}
+}
+
+async function appsFromCatalog(dir) {
+	let catalog
+	try {
+		catalog = JSON.parse(await readFile(join(dir, 'catalog.json'), 'utf8'))
+	} catch {
+		return null
+	}
+	if (!catalog || catalog.version !== 1 || !Array.isArray(catalog.apps) || !catalog.apps.length) return null
+	const root = await realpath(dir).catch(() => dir)
+	const apps = []
+	for (const raw of catalog.apps) {
+		if (!raw || typeof raw !== 'object' || typeof raw.id !== 'string' || !APP_ID.test(raw.id)) continue
+		const folder = join(dir, raw.id)
+		const st = await stat(folder).catch(() => null)
+		if (!st?.isDirectory()) continue
+		const real = await realpath(folder).catch(() => null)
+		if (!real || (real !== root && !real.startsWith(`${root}/`))) continue
+		if (!(await exists(join(folder, 'omarchy-compose.yml'))) && !(await exists(join(folder, 'docker-compose.yml')))) continue
+		apps.push(listingFromCatalog(raw, folder))
+	}
+	return apps
+}
+
 const portFree = (port) =>
 	new Promise((resolve) => {
 		const s = net.createServer()
@@ -593,6 +658,17 @@ export function createApps({dataDir, home = os.homedir(), webPort = 7780, run = 
 		const dir = storeDir(url)
 		let meta = (await readYaml(dir, STORE_FILES))?.data
 		const gallery = GALLERIES[url.toLowerCase().replace(/\.git$/, '')] ?? (typeof meta?.gallery === 'string' && /^https:\/\//.test(meta.gallery) ? meta.gallery.replace(/\/+$/, '') : null)
+		const apps = (await appsFromCatalog(dir)) ?? (await loadStoreYaml(dir, gallery))
+		if (!meta?.id) {
+			// No store manifest: a plain repository of app folders. Name it after the repository.
+			if (!apps.length) throw new RpcError('BAD_REQUEST', 'That repository isn’t an app store (no apps found in it)')
+			const slug = url.replace(/\.git$/, '').split('/').filter(Boolean).slice(-2).join('-').toLowerCase().replace(/[^a-z0-9-]/g, '-')
+			const repo = url.replace(/\.git$/, '').split('/').pop() ?? 'store'
+			meta = {id: slug, name: repo.replace(/[-_]+/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase())}
+		}
+		return {url, meta: {id: String(meta.id), name: String(meta.name ?? meta.id)}, apps}
+	}
+	async function loadStoreYaml(dir, gallery) {
 		const apps = []
 		// First pass: every app and the variables each one's exports.sh provides (apps that need
 		// another app read that app's variables, such as its address and passwords).
@@ -670,14 +746,7 @@ export function createApps({dataDir, home = os.homedir(), webPort = 7780, run = 
 				folder: join(dir, entry.name),
 			})
 		}
-		if (!meta?.id) {
-			// No store manifest: a plain repository of app folders. Name it after the repository.
-			if (!apps.length) throw new RpcError('BAD_REQUEST', 'That repository isn’t an app store (no apps found in it)')
-			const slug = url.replace(/\.git$/, '').split('/').filter(Boolean).slice(-2).join('-').toLowerCase().replace(/[^a-z0-9-]/g, '-')
-			const repo = url.replace(/\.git$/, '').split('/').pop() ?? 'store'
-			meta = {id: slug, name: repo.replace(/[-_]+/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase())}
-		}
-		return {url, meta: {id: String(meta.id), name: String(meta.name ?? meta.id)}, apps}
+		return apps
 	}
 	async function syncStore(url) {
 		const dir = storeDir(url)
