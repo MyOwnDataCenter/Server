@@ -426,8 +426,9 @@ function Field({id, label, hint, ...input}: {id: string; label: string; hint?: s
 }
 
 const PROVIDER_LABEL: Record<AssistantProvider, string> = {
-	spacexai: 'SpaceXAI',
-	'openai-compatible': 'OpenAI-compatible',
+	spacexai: 'Grok (SpaceXAI)',
+	openai: 'OpenAI API',
+	'openai-compatible': 'Custom endpoint',
 }
 
 function AssistantPage({onBack}: {onBack: () => void}) {
@@ -501,7 +502,7 @@ function AssistantPage({onBack}: {onBack: () => void}) {
 							<Icon name="sparkle" size={19} />
 						</span>
 						<span className="main">
-							<b style={{fontWeight: 550}}>{PROVIDER_LABEL[k.provider]}</b>
+							<b style={{fontWeight: 550}}>{PROVIDER_LABEL[k.provider] ?? k.provider}</b>
 							<span>
 								{k.model}
 								{k.last4 ? ` · …${k.last4}` : ''}
@@ -548,13 +549,13 @@ function AssistantPage({onBack}: {onBack: () => void}) {
 				</p>
 			)}
 
-			<AddKeySheet open={add} onClose={() => setAdd(false)} />
+			<AddKeySheet open={add} owner={owner} onClose={() => setAdd(false)} />
 			<ShareKeySheet open={!!share} keyRow={share} accounts={boot.accounts} self={self} onClose={() => setShare(null)} />
 		</div>
 	)
 }
 
-function AddKeySheet({open, onClose}: {open: boolean; onClose: () => void}) {
+function AddKeySheet({open, owner, onClose}: {open: boolean; owner: boolean; onClose: () => void}) {
 	const save = useSave()
 	const [provider, setProvider] = useState<AssistantProvider>('spacexai')
 	const [name, setName] = useState('')
@@ -569,7 +570,7 @@ function AddKeySheet({open, onClose}: {open: boolean; onClose: () => void}) {
 		setBaseUrl('')
 	}, [open])
 	const keyOk = provider === 'openai-compatible' || apiKey.trim().length >= 4
-	const ready = keyOk && !!model.trim() && (provider === 'spacexai' || /^https?:\/\/[^\s]+/i.test(baseUrl.trim()))
+	const ready = keyOk && !!model.trim() && (provider !== 'openai-compatible' || /^https?:\/\/[^\s]+/i.test(baseUrl.trim()))
 	return (
 		<FormSheet
 			open={open}
@@ -604,8 +605,10 @@ function AddKeySheet({open, onClose}: {open: boolean; onClose: () => void}) {
 					if (v === 'openai-compatible' && !baseUrl.trim()) setBaseUrl('http://127.0.0.1:11434/v1')
 				}}
 				options={[
-					{id: 'spacexai', label: 'SpaceXAI'},
-					{id: 'openai-compatible', label: 'OpenAI-compatible'},
+					{id: 'spacexai', label: 'Grok'},
+					{id: 'openai', label: 'OpenAI'},
+					// A custom address makes the server send requests anywhere it can reach: owner only.
+					...(owner ? [{id: 'openai-compatible' as const, label: 'Custom'}] : []),
 				]}
 			/>
 			<Field id="ask-name" label="Name" value={name} onChange={(e) => setName(e.target.value)} autoFocus />
@@ -614,7 +617,7 @@ function AddKeySheet({open, onClose}: {open: boolean; onClose: () => void}) {
 				label="Model"
 				value={model}
 				onChange={(e) => setModel(e.target.value)}
-				placeholder={provider === 'spacexai' ? 'grok-4.7' : 'llama3.2'}
+				placeholder={provider === 'spacexai' ? 'grok-4.7' : provider === 'openai' ? 'gpt-5.5' : 'llama3.2'}
 				hint={provider === 'openai-compatible' ? 'Must match a model id the endpoint serves.' : undefined}
 				autoCapitalize="off"
 				autoCorrect="off"

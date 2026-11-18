@@ -237,7 +237,7 @@ export type ActiveSession = {
 	client: {type: 'native'; id?: string; platform?: string; deviceClass?: string; appVersion?: string} | {type: 'browser'; userAgent?: string}
 }
 
-export type AssistantProvider = 'spacexai' | 'openai-compatible'
+export type AssistantProvider = 'spacexai' | 'openai' | 'openai-compatible'
 export type AssistantKey = {
 	id: string
 	name: string

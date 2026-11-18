@@ -1,5 +1,3 @@
-import {randomBytes} from 'node:crypto'
-
 import {createConversations} from './assistant/conversations.mjs'
 import {createKeyStore} from './assistant/keys.mjs'
 import {createLoop, publicAction} from './assistant/loop.mjs'
@@ -146,12 +144,15 @@ export function createAssistant({dataDir, accounts, now, runProcedure, fetchImpl
 				if (!/^[0-9a-f]{16}$/.test(chosen)) throw new RpcError('BAD_REQUEST', 'Pick a wallpaper first')
 				rpcInput.id = chosen
 			}
+			// A new machine's password is typed on the Approve card and passed only into the RPC: never
+			// stored, and the model never sees it. Checked before the step starts, so it stays open.
+			const vm = action.toolName === 'machines_create' || path === 'machines.create'
+			const secret = vm ? String(input?.password ?? '') : ''
+			if (vm && (secret.length < 1 || secret.length > 256 || /[\r\n]/.test(secret))) throw new RpcError('BAD_REQUEST', 'Enter a password for the machine')
 			const running = {...action, status: 'running', rpc: action.rpc ? {...action.rpc, input: {...rpcInput}} : action.rpc}
 			await conversations.saveAction(who.userId, running)
 			// Await so the in-flight lock stays until the MCP call finishes. A bare return would run finally first.
 			if (action.kind === 'mcp') return await approveMcp(who, action, running)
-			// Generated here, passed only into the RPC. The card and the model never see it.
-			const secret = action.toolName === 'machines_create' || path === 'machines.create' ? randomBytes(12).toString('base64url') : ''
 			if (secret) rpcInput.password = secret
 			let result
 			try {
@@ -229,7 +230,7 @@ export function createAssistant({dataDir, accounts, now, runProcedure, fetchImpl
 		handleStream,
 		procedures: {
 			'assistant.keys': {kind: 'query', run: (_i, {auth}) => keys.listPublic(auth.userId)},
-			'assistant.addKey': {kind: 'mutation', run: (input, {auth}) => keys.add(auth.userId, input)},
+			'assistant.addKey': {kind: 'mutation', run: (input, {auth}) => keys.add(actor(auth), input)},
 			'assistant.updateKey': {kind: 'mutation', run: (input, {auth}) => keys.update(actor(auth), input)},
 			'assistant.removeKey': {kind: 'mutation', run: (input, {auth}) => keys.remove(actor(auth), String(input?.id ?? ''))},
 			'assistant.conversations': {kind: 'query', run: (_i, {auth}) => conversations.list(userIdOf(auth))},

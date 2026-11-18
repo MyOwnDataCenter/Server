@@ -91,7 +91,7 @@ function cardFor(name, args) {
 		if (a.memoryGb != null && a.memoryGb !== '') bits.push(`${a.memoryGb} GB memory`)
 		if (a.diskSizeGb != null && a.diskSizeGb !== '') bits.push(`${a.diskSizeGb} GB disk`)
 		if (a.username) bits.push(`user ${a.username}`)
-		bits.push('Password will be set when you approve')
+		bits.push('You type its password when you approve')
 		return {title: vm ? `Create VM “${vm}”` : 'Create a virtual machine', detail: bits.join(' · ')}
 	}
 	const id = String(a.id ?? '').trim()

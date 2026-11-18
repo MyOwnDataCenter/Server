@@ -6,6 +6,7 @@ import {writeAtomic} from '../atomic.mjs'
 import {RpcError} from '../rpc.mjs'
 
 const SPACEXAI = 'https://api.x.ai/v1'
+const OPENAI = 'https://api.openai.com/v1'
 const ID = () => 'k_' + randomBytes(6).toString('hex')
 const last4 = (s) => String(s).slice(-4)
 const normalizeBaseUrl = (raw) => {
@@ -50,17 +51,21 @@ export function createKeyStore({dataDir, now = () => Date.now()}) {
 			await loaded
 			return state.keys.filter((k) => canUse(k, userId)).map((k) => publicOf(k, userId))
 		},
-		async add(ownerUserId, input) {
+		async add(actor, input) {
 			await loaded
-			const provider = input?.provider === 'openai-compatible' ? 'openai-compatible' : input?.provider === 'spacexai' ? 'spacexai' : null
-			if (!provider) throw new RpcError('BAD_REQUEST', 'Choose SpaceXAI or an OpenAI-compatible endpoint')
+			const ownerUserId = actor.userId
+			const provider = ['openai-compatible', 'spacexai', 'openai'].includes(input?.provider) ? input.provider : null
+			if (!provider) throw new RpcError('BAD_REQUEST', 'Choose Grok, OpenAI or an OpenAI-compatible endpoint')
+			// A custom endpoint makes omarchyd send requests to any address it can reach (your network
+			// included), so only the server's owner can add one.
+			if (provider === 'openai-compatible' && actor.role !== 'owner') throw new RpcError('FORBIDDEN', 'Only the server’s owner can add a custom endpoint')
 			const apiKey = String(input?.apiKey ?? '').trim()
 			if (apiKey.length > 512) throw new RpcError('BAD_REQUEST', 'Enter an API key')
-			if (provider === 'spacexai' && apiKey.length < 4) throw new RpcError('BAD_REQUEST', 'Enter an API key')
+			if (provider !== 'openai-compatible' && apiKey.length < 4) throw new RpcError('BAD_REQUEST', 'Enter an API key')
 			const model = String(input?.model ?? '').trim()
 			if (!model || model.length > 80) throw new RpcError('BAD_REQUEST', 'Enter a model id')
-			const name = String(input?.name ?? '').trim().slice(0, 48) || (provider === 'spacexai' ? 'SpaceXAI' : 'API')
-			let baseUrl = provider === 'spacexai' ? SPACEXAI : normalizeBaseUrl(input?.baseUrl)
+			const name = String(input?.name ?? '').trim().slice(0, 48) || ({spacexai: 'Grok', openai: 'OpenAI'}[provider] ?? 'API')
+			let baseUrl = provider === 'spacexai' ? SPACEXAI : provider === 'openai' ? OPENAI : normalizeBaseUrl(input?.baseUrl)
 			if (provider === 'openai-compatible') {
 				if (!/^https?:\/\/[^\s]+/i.test(baseUrl) || baseUrl.length > 200) throw new RpcError('BAD_REQUEST', 'Enter the API base URL')
 			}
@@ -93,13 +98,16 @@ export function createKeyStore({dataDir, now = () => Date.now()}) {
 				if (typeof input?.apiKey === 'string') {
 					const next = input.apiKey.trim()
 					if (next.length > 512) throw new RpcError('BAD_REQUEST', 'Enter an API key')
-					if (k.provider === 'spacexai' && next.length < 4) throw new RpcError('BAD_REQUEST', 'Enter an API key')
+					if (k.provider !== 'openai-compatible' && next.length < 4) throw new RpcError('BAD_REQUEST', 'Enter an API key')
 					if (k.provider === 'openai-compatible' || next.length >= 4) {
 						k.apiKey = next
 						k.last4 = last4(k.apiKey)
 					}
 				}
-				if (k.provider === 'openai-compatible' && typeof input?.baseUrl === 'string') k.baseUrl = normalizeBaseUrl(input.baseUrl)
+				if (k.provider === 'openai-compatible' && typeof input?.baseUrl === 'string') {
+					if (actor.role !== 'owner') throw new RpcError('FORBIDDEN', 'Only the server’s owner can change a custom endpoint')
+					k.baseUrl = normalizeBaseUrl(input.baseUrl)
+				}
 				if (Array.isArray(input?.sharedWith)) k.sharedWith = [...new Set(input.sharedWith.map((id) => String(id)).filter((id) => id && id !== k.ownerUserId))].slice(0, 32)
 			}
 			k.updatedAt = now()

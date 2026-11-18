@@ -8140,3 +8140,12 @@ html.page-locked body {
 	font-size: 14px;
 	font-weight: 700;
 }
+.assistant-password {
+	margin: 8px 0 0;
+}
+.assistant-password > span {
+	font-size: 13px;
+	font-weight: 600;
+	color: var(--fg-2);
+	padding-left: 4px;
+}
