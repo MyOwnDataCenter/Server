@@ -107,8 +107,11 @@ test('only the server owner can set systemDefault, and only on a key they own', 
 		const a = await keys.add({userId: 'owner', role: 'owner'}, {name: 'a', provider: 'spacexai', apiKey: 'aaaa', model: 'grok-4.7'})
 		// A member can't point omarchyd at an arbitrary address, but can add a key for a known provider.
 		await assert.rejects(() => keys.add({userId: 'sam', role: 'member'}, {name: 'b', provider: 'openai-compatible', apiKey: 'bbbb', model: 'llama', baseUrl: 'http://192.168.1.1/v1'}), /Only the server’s owner can add a custom endpoint/)
-		const b = await keys.add({userId: 'sam', role: 'member'}, {name: 'b', provider: 'openai', apiKey: 'bbbb', model: 'gpt-x'})
+		const b = await keys.add({userId: 'sam', role: 'member'}, {name: 'b', provider: 'openai', apiKey: 'bbbb', model: 'gpt-x', baseUrl: 'http://192.168.1.1/v1'})
 		assert.equal(b.baseUrl, 'https://api.openai.com/v1')
+		const leftover = await keys.add({userId: 'pat', role: 'owner'}, {name: 'lan', provider: 'openai-compatible', apiKey: '', model: 'llama', baseUrl: 'http://127.0.0.1:11434/v1'})
+		await assert.rejects(() => keys.update({userId: 'pat', role: 'member'}, {id: leftover.id, baseUrl: 'http://192.168.1.1/v1'}), /Only the server’s owner can change a custom endpoint/)
+		assert.equal((await keys.getSecret(leftover.id)).baseUrl, 'http://127.0.0.1:11434/v1')
 		await assert.rejects(() => keys.update({userId: 'sam', role: 'member'}, {id: b.id, systemDefault: true}), /owner/)
 		await keys.update({userId: 'owner', role: 'owner'}, {id: a.id, systemDefault: true})
 		await assert.rejects(() => keys.update({userId: 'owner', role: 'owner'}, {id: b.id, systemDefault: true}), /own/)

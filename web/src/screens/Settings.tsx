@@ -549,7 +549,7 @@ function AssistantPage({onBack}: {onBack: () => void}) {
 				</p>
 			)}
 
-			<AddKeySheet open={add} owner={owner} onClose={() => setAdd(false)} />
+			<AddKeySheet open={add} owner={user.data?.role === 'owner'} onClose={() => setAdd(false)} />
 			<ShareKeySheet open={!!share} keyRow={share} accounts={boot.accounts} self={self} onClose={() => setShare(null)} />
 		</div>
 	)
