@@ -319,7 +319,7 @@ export function createConnector({dataDir, tlsDir, plugins = null, source = async
 					const buf = Buffer.from(data)
 					if (buf.length < 4) return
 					const ch = l.channels.get(buf.readUInt32BE(0))
-					if (ch?.ws.readyState === ch?.ws.OPEN) ch.ws.send(buf.subarray(4), {binary: true})
+					if (ch && ch.ws.readyState === ch.ws.OPEN) ch.ws.send(buf.subarray(4), {binary: true})
 					return
 				}
 				let msg

@@ -448,4 +448,36 @@ describe('swarm close reasons', () => {
 			}
 		})
 	})
+
+	test('a binary frame for a closed channel is ignored', async () => {
+		const rejections = []
+		const onReject = (err) => rejections.push(err)
+		process.on('unhandledRejection', onReject)
+		try {
+			await withAgent({name: 'pc', allowed: {...abilities, terminal: true}, on: {...abilities, terminal: true}}, async ({c, id, agentWs}) => {
+				agentWs.send(Buffer.from([0, 0, 0, 9, 65, 66]))
+				await new Promise((r) => setTimeout(r, 50))
+				assert.equal(rejections.length, 0)
+				assert.equal(agentWs.readyState, WebSocket.OPEN)
+
+				const browser = await browserSocket()
+				try {
+					const opened = new Promise((r) => agentWs.once('message', (d) => r(JSON.parse(String(d)))))
+					c.openChannel(id, 'pty', browser.serverSide, {cols: 80, rows: 24})
+					const open = await opened
+					assert.equal(open.op, 'open')
+					const payload = new Promise((r) => browser.client.once('message', (d) => r(Buffer.from(d))))
+					const head = Buffer.alloc(4)
+					head.writeUInt32BE(open.ch)
+					agentWs.send(Buffer.concat([head, Buffer.from('AB')]))
+					assert.equal((await payload).toString(), 'AB')
+				} finally {
+					browser.client.terminate()
+					await browser.close()
+				}
+			})
+		} finally {
+			process.off('unhandledRejection', onReject)
+		}
+	})
 })
