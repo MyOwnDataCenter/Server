@@ -1363,13 +1363,51 @@ def start_relay(cfg):
     return server, f"rest:http://127.0.0.1:{server.server_address[1]}/{secret}/"
 
 
+# RESTIC_PASSWORD_FILE paths this process created. SIGTERM and forget() never reach
+# _run_restic's finally, and a crash leaves the previous file in the runtime directory.
+_password_files = []
+_BACKUP_PASSWORD_NAME = re.compile(r"^backup-[0-9a-fA-F]+$")
+
+
+def _connector_runtime_dir():
+    return os.path.join(RUNTIME, "omarchy-connector") if os.path.isdir(RUNTIME) else DATA_DIR
+
+
+def cleanup_password_files(directory=None):
+    pending = list(_password_files)
+    _password_files.clear()
+    for path in pending:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+    runtime = _connector_runtime_dir() if directory is None else directory
+    try:
+        names = os.listdir(runtime)
+    except OSError:
+        return
+    for name in names:
+        if _BACKUP_PASSWORD_NAME.fullmatch(name) is None:
+            continue
+        try:
+            os.unlink(os.path.join(runtime, name))
+        except OSError:
+            pass
+
+
+def _on_sigterm(_signum, _frame):
+    cleanup_password_files()
+    os._exit(0)
+
+
 def _restic_env(repo, password):
-    runtime = os.path.join(RUNTIME, "omarchy-connector") if os.path.isdir(RUNTIME) else DATA_DIR
+    runtime = _connector_runtime_dir()
     os.makedirs(runtime, mode=0o700, exist_ok=True)
     pw = os.path.join(runtime, f"backup-{os.urandom(6).hex()}")
     fd = os.open(pw, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w") as f:
         f.write(password)
+    _password_files.append(pw)
     keep = ("PATH", "HOME", "USER", "LANG", "TMPDIR")
     env = {k: os.environ[k] for k in keep if k in os.environ}
     cache = os.path.join(os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache"), "omarchy-connector", "restic")
@@ -1580,6 +1618,7 @@ class Connection:
 
 
 def forget():
+    cleanup_password_files()
     try:
         os.unlink(CONFIG)
     except OSError:
@@ -1608,6 +1647,7 @@ def enroll(server, token, abilities):
 
 
 def main():
+    signal.signal(signal.SIGTERM, _on_sigterm)
     args = sys.argv[1:]
     if args[:1] == ["enroll"]:
         server, token = args[1], args[2]
@@ -1628,6 +1668,7 @@ def main():
             cfg = json.load(f)
     except (OSError, ValueError):
         sys.exit("Not joined to a server yet. Run the install command from Machines → Local swarm → Add a computer.")
+    cleanup_password_files()
     delay = 2
     while True:
         try:
