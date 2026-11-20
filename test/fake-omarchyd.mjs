@@ -485,6 +485,7 @@ export async function startFakeserverd({
 		'notifications.get': {kind: 'query', run: () => notifications},
 		'notifications.clear': {kind: 'mutation', run: (id) => ((notifications = notifications.filter((n) => n !== id)), true)},
 		'system.factoryReset': {kind: 'mutation', run: (input) => (input?.password === password ? true : {error: ['UNAUTHORIZED', 'Invalid password']})},
+		'system.desktopSignIn': {kind: 'mutation', run: (input) => (input?.password === password ? {result: 'ok'} : {error: ['UNAUTHORIZED', 'Incorrect password']})},
 		'machines.capabilities': {kind: 'query', run: () => ({hostArchitecture: 'amd64', libvirtAvailable: true, kvmAvailable: true})},
 		'machines.osImages': {
 			kind: 'query',

@@ -783,6 +783,48 @@ describe('Omarchy Server server against an omarchyd stand-in', () => {
 	})
 })
 
+describe('a wrong password is one try', () => {
+	test('a wrong password is sent once and the session stays', async () => {
+		const fake = await startFakeserverd()
+		const touch = await startTouch({backendUrl: fake.url})
+		try {
+			assert.equal((await touch.req('POST', '/api/auth/login', {username: 'Chris', password: 'correct horse'})).status, 200)
+			assert.equal(touch.store.sessionCount(), 1)
+			const change = await touch.req('POST', '/api/rpc/user.changePassword', {input: {oldPassword: 'nope', newPassword: 'longer-secret'}})
+			assert.equal(change.status, 401)
+			assert.equal(fake.calls.filter((c) => c.path === 'user.changePassword').length, 1)
+			assert.equal(fake.calls.filter((c) => c.path === 'user.refreshNativeAccess').length, 0)
+			assert.equal(touch.store.sessionCount(), 1)
+			const reset = await touch.req('POST', '/api/rpc/system.factoryReset', {input: {password: 'nope'}})
+			assert.equal(reset.status, 401)
+			assert.equal(fake.calls.filter((c) => c.path === 'system.factoryReset').length, 1)
+			assert.equal(touch.store.sessionCount(), 1)
+			const desk = await touch.req('POST', '/api/rpc/system.desktopSignIn', {input: {password: 'nope'}})
+			assert.equal(desk.status, 401)
+			assert.equal(fake.calls.filter((c) => c.path === 'system.desktopSignIn').length, 1)
+			assert.equal(touch.store.sessionCount(), 1)
+		} finally {
+			await touch.close()
+			await fake.close()
+		}
+	})
+
+	test('a wrong password on a legacy session is sent once and the session stays', async () => {
+		const fake = await startFakeserverd({legacy: true})
+		const touch = await startTouch({backendUrl: fake.url})
+		try {
+			assert.equal((await touch.req('POST', '/api/auth/login', {username: 'Chris', password: 'correct horse'})).status, 200)
+			const change = await touch.req('POST', '/api/rpc/user.changePassword', {input: {oldPassword: 'nope', newPassword: 'longer-secret'}})
+			assert.equal(change.status, 401)
+			assert.equal(fake.calls.filter((c) => c.path === 'user.changePassword').length, 1)
+			assert.equal(touch.store.sessionCount(), 1)
+		} finally {
+			await touch.close()
+			await fake.close()
+		}
+	})
+})
+
 describe('older Omarchy Server without native login', () => {
 	test('falls back to user.login bearer tokens', async () => {
 		const fake = await startFakeserverd({legacy: true})

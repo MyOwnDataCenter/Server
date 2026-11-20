@@ -15,7 +15,9 @@ async function handle<T>(res: Response): Promise<T> {
 	if (!res.ok || body?.error) {
 		const err = body?.error ?? {}
 		const error = new ApiError(err.message ?? `Request failed (${res.status})`, err.code ?? 'ERROR', res.status)
-		if (res.status === 401 && err.code === 'UNAUTHORIZED') window.dispatchEvent(new Event('touch:signed-out'))
+		// A mistyped password is also 401. Leave the person on the form instead of signing them out.
+		const passwordMiss = err.message === 'Incorrect password' || err.message === 'Invalid password' || err.message === 'Incorrect 2FA code'
+		if (res.status === 401 && err.code === 'UNAUTHORIZED' && !passwordMiss) window.dispatchEvent(new Event('touch:signed-out'))
 		throw error
 	}
 	return body as T

@@ -545,6 +545,8 @@ export function createApp({store, staticDir, fetchImpl = fetch, secureCookies = 
 			return await run(await accessTokenFor(req.sid, session))
 		} catch (error) {
 			if (!(error instanceof BackendError) || error.code !== 'UNAUTHORIZED') throw error
+			// A wrong password is UNAUTHORIZED too. Only an expired access token is refreshed and retried.
+			if (error.message !== 'Invalid token') throw error
 			if (session.mode === 'legacy') {
 				await store.deleteSession(req.sid)
 				throw error
