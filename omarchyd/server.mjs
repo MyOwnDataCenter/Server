@@ -28,6 +28,7 @@ import {createConnector} from './connector.mjs'
 import {createStorage} from './storage.mjs'
 import {createUsb, listHostUsb} from './usb.mjs'
 import {createTerminalSessions} from './terminal.mjs'
+import {attachRdcCleanPathBridge} from './rdcleanpath.mjs'
 import {createUpdater} from './updater.mjs'
 import {createSystemApps} from './system-apps.mjs'
 import {authorityInfo, readPolicy, rotateAuthority, tlsContext, writePolicy} from './tls.mjs'
@@ -214,7 +215,7 @@ export async function startOmarchyd({port = 2021, host = '127.0.0.1', dataDir, t
 		'user.createWebSocketTicket': {
 			kind: 'mutation',
 			run: (input, {auth}) => {
-				if (input?.target !== 'machines' && input?.target !== 'terminal') throw new RpcError('BAD_REQUEST', 'Unknown console')
+				if (input?.target !== 'machines' && input?.target !== 'terminal' && input?.target !== 'rdp') throw new RpcError('BAD_REQUEST', 'Unknown console')
 				const now = Date.now()
 				for (const [t, v] of tickets) if (v.expires < now) tickets.delete(t)
 				const ticket = randomBytes(24).toString('base64url')
@@ -885,12 +886,31 @@ WantedBy=graphical-session.target
 			const url = new URL(req.url ?? '/', 'http://localhost')
 			// A connector on another computer (it signs in with its own key, checked in connector.mjs).
 			if (url.pathname === '/connector/ws') return await connector.upgradeAgent(req, socket, head)
-			const route = {'/machines/console': 'machines', '/terminal': 'terminal'}[url.pathname]
+			const route = {'/machines/console': 'machines', '/terminal': 'terminal', '/rdp': 'rdp'}[url.pathname]
 			if (!route) return refuse('404 Not Found')
 			const t = tickets.get(url.searchParams.get('ticket') ?? '')
 			tickets.delete(url.searchParams.get('ticket') ?? '')
 			if (!t || t.expires < Date.now() || t.target !== route) return refuse('401 Unauthorized')
 			const owner = (t.role ?? accounts.getUser(t.userId)?.role) === 'owner'
+			// RDP over RDCleanPath v3390: owner-only, strictly scoped to an online swarm computer with Desktop enabled.
+			if (route === 'rdp') {
+				if (!owner) return refuse('403 Forbidden')
+				const agentId = url.searchParams.get('agentId') ?? ''
+				if (!/^[0-9a-f]{12}$/.test(agentId)) return refuse('400 Bad Request')
+				let tunnel
+				try {
+					tunnel = await connector.openRdpTunnel(agentId)
+				} catch {
+					return refuse('409 Conflict')
+				}
+				return wss.handleUpgrade(req, socket, head, (ws) =>
+					attachRdcCleanPathBridge(ws, {
+						host: '127.0.0.1',
+						port: tunnel.localPort,
+						onClose: () => connector.closeRdpTunnel(agentId),
+					}),
+				)
+			}
 			// A shell: your own, or one inside an installed app's container.
 			if (route === 'terminal') {
 				// This process runs as the owner’s user, and a swarm computer’s terminal is the

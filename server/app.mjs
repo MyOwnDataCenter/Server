@@ -2040,7 +2040,7 @@ export function createApp({store, staticDir, fetchImpl = fetch, secureCookies = 
 					})
 					return
 				}
-				const route = {'/api/console': 'machines', '/api/terminal': 'terminal'}[url.pathname]
+				const route = {'/api/console': 'machines', '/api/terminal': 'terminal', '/api/rdp': 'rdp'}[url.pathname]
 				if (!route) return refuse('404 Not Found')
 				// Browsers always send Origin on WebSocket handshakes: refuse other sites.
 				const origin = req.headers.origin
@@ -2055,6 +2055,11 @@ export function createApp({store, staticDir, fetchImpl = fetch, secureCookies = 
 					if (!/^[A-Za-z0-9_-]{1,64}$/.test(machineId)) return refuse('400 Bad Request')
 					target.pathname = '/machines/console'
 					params = {machineId, sessionId: randomUUID()}
+				} else if (route === 'rdp') {
+					const agentId = url.searchParams.get('agentId') ?? ''
+					if (!/^[0-9a-f]{12}$/.test(agentId)) return refuse('400 Bad Request')
+					params = {agentId}
+					target.pathname = '/rdp'
 				} else {
 					const appId = url.searchParams.get('appId') ?? ''
 					const agentId = url.searchParams.get('agentId') ?? ''
@@ -2068,7 +2073,7 @@ export function createApp({store, staticDir, fetchImpl = fetch, secureCookies = 
 					if (session && !/^[A-Za-z0-9._-]{1,40}$/.test(session)) return refuse('400 Bad Request')
 					params = {...(appId ? {appId} : {}), ...(agentId ? {agentId} : {}), ...(session ? {session} : {}), cols: String(cols), rows: String(rows), ...(url.searchParams.get('fresh') === '1' ? {fresh: '1'} : {})}
 				}
-				const needsOwner = route === 'terminal' || params.machineId === 'desktop' || /^agent-[0-9a-f]{12}$/.test(params.machineId ?? '')
+				const needsOwner = route === 'terminal' || route === 'rdp' || params.machineId === 'desktop' || /^agent-[0-9a-f]{12}$/.test(params.machineId ?? '')
 				if (needsOwner) {
 					let owner
 					try {

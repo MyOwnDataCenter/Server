@@ -386,8 +386,10 @@ function AgentSheet({a, onClose, onTerminal, onDesktop, onStorage}: {a: Agent; o
 	const [reauth, setReauth] = useState(false)
 	const [services, setServices] = useState(false)
 	const [filesOpen, setFilesOpen] = useState(false)
+	const [rdpOpen, setRdpOpen] = useState(false)
 	const m = a.metrics
 	const desk = a.info?.desktop
+	const isRdp = desk?.kind === 'rdp'
 	const offline = !a.online
 	const manage = may(a, 'manage') && a.online
 	const action = (input: Record<string, unknown>, done: string) => act.mutate({path: 'swarm.action', input: {id: a.id, ...input}, done})
@@ -411,8 +413,8 @@ function AgentSheet({a, onClose, onTerminal, onDesktop, onStorage}: {a: Agent; o
 				<button className="btn primary" disabled={offline || !may(a, 'terminal')} onClick={() => (haptic(8), onTerminal())}>
 					<Icon name="terminal" size={20} /> Terminal
 				</button>
-				<button className="btn" disabled={offline || !may(a, 'desktop') || desk?.ok === false} onClick={() => (haptic(8), onDesktop())}>
-					<Icon name="devices" size={20} /> Desktop
+				<button className="btn" disabled={offline || !may(a, 'desktop') || desk?.ok === false} onClick={() => (haptic(8), isRdp ? setRdpOpen(true) : onDesktop())}>
+					<Icon name="devices" size={20} /> {isRdp ? 'RDP' : 'Desktop'}
 				</button>
 			</div>
 			{a.online && may(a, 'desktop') && desk && !desk.ok && <p className="muted" style={{fontSize: 13, margin: '8px 4px 0'}}>{desk.why}</p>}
@@ -607,6 +609,71 @@ function AgentSheet({a, onClose, onTerminal, onDesktop, onStorage}: {a: Agent; o
 			{reauth && <ReauthorizeComputer a={a} onClose={() => setReauth(false)} />}
 			{services && <AgentServices a={a} onClose={() => setServices(false)} />}
 			{filesOpen && <AgentFiles a={a} onClose={() => setFilesOpen(false)} />}
+			{rdpOpen && <RdpBridgeSheet a={a} onClose={() => setRdpOpen(false)} />}
+		</Sheet>
+	)
+}
+
+function RdpBridgeSheet({a, onClose}: {a: Agent; onClose: () => void}) {
+	const toast = useToast()
+	const [probe, setProbe] = useState<'idle' | 'testing' | 'ok' | 'error'>('idle')
+	const [probeMsg, setProbeMsg] = useState('')
+	const wsProto = location.protocol === 'https:' ? 'wss:' : 'ws:'
+	const rdpUrl = `${wsProto}//${location.host}/api/rdp?agentId=${encodeURIComponent(a.id)}`
+
+	const testBridge = () => {
+		setProbe('testing')
+		setProbeMsg('')
+		const ws = new WebSocket(rdpUrl)
+		const timer = setTimeout(() => {
+			ws.close()
+			setProbe('error')
+			setProbeMsg('Timed out connecting to the RDP bridge')
+		}, 8000)
+		ws.onopen = () => {
+			clearTimeout(timer)
+			setProbe('ok')
+			setProbeMsg('RDCleanPath v3390 bridge connected and ready for IronRDP')
+			ws.close(1000)
+		}
+		ws.onerror = () => {
+			clearTimeout(timer)
+			setProbe('error')
+			setProbeMsg('Couldn’t open the RDP bridge (make sure Remote Desktop is enabled on Windows)')
+		}
+	}
+
+	return (
+		<Sheet open onClose={onClose} label={`RDP bridge for ${a.name}`}>
+			<SheetHeader icon={<Icon name="devices" size={30} />} title={`RDP · ${a.name}`} subtitle="RDCleanPath v3390 WebSocket bridge (tunneled via connector)" onClose={onClose} />
+			<p className="muted" style={{fontSize: 13.5, margin: '0 4px 12px'}}>
+				Connect an IronRDP-compatible client to this authenticated RDCleanPath v3390 endpoint. Traffic tunnels over the Swarm connector to 127.0.0.1:3389 on {a.name} without opening RDP to the network.
+			</p>
+			<code className="swarm-cmd mono">{rdpUrl}</code>
+			<div style={{display: 'flex', gap: 8, marginTop: 10}}>
+				<button
+					type="button"
+					className="btn small primary"
+					onClick={async () => {
+						try {
+							await navigator.clipboard.writeText(rdpUrl)
+							toast('Copied RDP bridge URL')
+						} catch {
+							toast('Couldn’t copy URL', true)
+						}
+					}}
+				>
+					<Icon name="copy" size={15} /> Copy URL
+				</button>
+				<button type="button" className="btn small" disabled={probe === 'testing'} onClick={testBridge}>
+					{probe === 'testing' ? <span className="spinner" /> : <Icon name="pulse" size={15} />} Test bridge
+				</button>
+			</div>
+			{probeMsg && (
+				<p style={{fontSize: 13, marginTop: 10, color: probe === 'ok' ? 'var(--green)' : 'var(--red)'}}>
+					{probeMsg}
+				</p>
+			)}
 		</Sheet>
 	)
 }
@@ -727,14 +794,22 @@ function AddComputer({before, onClose, onJoined}: {before: string[]; onClose: ()
 	// The new computer, once it shows up. beforeIds is frozen at open so a live swarm.list cannot hide it.
 	const joined = newlyJoined(swarm.data ?? [], beforeIds)
 	const left = pairing ? Math.max(0, Math.round((pairing.expiresAt - now) / 1000)) : 0
+	const [platform, setPlatform] = useState<'unix' | 'windows'>('unix')
 	const list = (Object.keys(allow) as Ability[]).filter((k) => allow[k]).join(',')
 	const command = useMemo(() => {
 		if (!pairing) return ''
 		const server = `https://${host.includes(':') && !host.startsWith('[') ? `[${host}]` : host}:${pairing.port}`
 		const src = pairing.source.replace(/\/+$/, '')
+		if (platform === 'windows') {
+			return `$s = irm '${src}/main/connector/install.ps1'; & ([scriptblock]::Create($s)) -Server '${server}' -Ca '${pairing.ca}' -Token '${pairing.token}'${list ? ` -Allow '${list}'` : ''} -Source '${src}'`
+		}
 		return `curl -fsSL ${src}/main/connector/install.sh | bash -s -- --server ${server} --ca ${pairing.ca} --token ${pairing.token}${list ? ` --allow ${list}` : ''} --source ${src}`
-	}, [pairing, host, list])
-	const uninstall = pairing ? `curl -fsSL ${pairing.source.replace(/\/+$/, '')}/main/connector/install.sh | bash -s -- --uninstall` : ''
+	}, [pairing, host, list, platform])
+	const uninstall = pairing
+		? platform === 'windows'
+			? `$s = irm '${pairing.source.replace(/\/+$/, '')}/main/connector/install.ps1'; & ([scriptblock]::Create($s)) -Uninstall`
+			: `curl -fsSL ${pairing.source.replace(/\/+$/, '')}/main/connector/install.sh | bash -s -- --uninstall`
+		: ''
 	const copy = async (text: string, what: string) => {
 		try {
 			await navigator.clipboard.writeText(text)
@@ -749,7 +824,7 @@ function AddComputer({before, onClose, onJoined}: {before: string[]; onClose: ()
 
 	return (
 		<Sheet open onClose={onClose} label="Add a computer" tall>
-			<SheetHeader icon={<Icon name="devices" size={30} />} title="Add a computer" subtitle="Any Linux computer with systemd. Not Windows or macOS." onClose={onClose} />
+			<SheetHeader icon={<Icon name="devices" size={30} />} title="Add a computer" subtitle="Linux or Windows computers." onClose={onClose} />
 			{!pairing ? (
 				<>
 					<p className="muted" style={{fontSize: 14, margin: '0 4px 12px'}}>
@@ -780,8 +855,19 @@ function AddComputer({before, onClose, onJoined}: {before: string[]; onClose: ()
 				<>
 					<ol className="swarm-steps">
 						<li>
-							<b>On the other computer, open a terminal</b>
-							<span>Signed in as the person who uses it, not root. It needs to reach this server on your network (or your tailnet).</span>
+							<b>Choose the operating system</b>
+							<span className="chips" style={{marginTop: 8}}>
+								<button type="button" className={`chip${platform === 'unix' ? ' on' : ''}`} aria-pressed={platform === 'unix'} onClick={() => setPlatform('unix')}>
+									Linux / macOS
+								</button>
+								<button type="button" className={`chip${platform === 'windows' ? ' on' : ''}`} aria-pressed={platform === 'windows'} onClick={() => setPlatform('windows')}>
+									Windows (PowerShell)
+								</button>
+							</span>
+						</li>
+						<li>
+							<b>{platform === 'windows' ? 'On the Windows computer, open PowerShell' : 'On the other computer, open a terminal'}</b>
+							<span>{platform === 'windows' ? 'Requires Python 3.8+ on PATH. Installs as a user Scheduled Task — no Administrator prompt needed.' : 'Signed in as the person who uses it, not root. It needs to reach this server on your network (or your tailnet).'}</span>
 						</li>
 						{hosts.length > 1 && (
 							<li>

@@ -260,5 +260,29 @@ class PostureTests(unittest.TestCase):
         self.assertFalse(needed3)
 
 
+class WindowsConnectorTests(unittest.TestCase):
+    def test_windows_os_release_and_rdp_channel_gating(self):
+        with mock.patch.object(agent, "IS_WINDOWS", True):
+            rel = agent.os_release()
+            self.assertEqual(rel["ID"], "windows")
+            self.assertEqual(agent.update_command("winget", False), "winget upgrade --all")
+
+        # __rdp__ port 3389 requires desktop ability, not apps ability
+        conn = agent.Connection.__new__(agent.Connection)
+        conn.allowed = {"desktop": False, "apps": True}
+        conn.channels = {}
+        sent = []
+        conn.send = sent.append
+        conn.handle({"op": "open", "ch": 9, "kind": "tcp", "appId": "__rdp__", "port": 3389})
+        self.assertEqual(sent[0]["op"], "closed")
+        self.assertIn("desktop", sent[0]["reason"].lower())
+
+        # Any other port with __rdp__ is refused even if desktop is on
+        conn.allowed = {"desktop": True, "apps": False}
+        sent.clear()
+        conn.handle({"op": "open", "ch": 10, "kind": "tcp", "appId": "__rdp__", "port": 22})
+        self.assertEqual(sent[0]["op"], "closed")
+
+
 if __name__ == "__main__":
     unittest.main()

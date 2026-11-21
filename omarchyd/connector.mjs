@@ -15,6 +15,7 @@
 import {X509Certificate, createHash, randomBytes, timingSafeEqual} from 'node:crypto'
 import dgram from 'node:dgram'
 import {readFile, stat} from 'node:fs/promises'
+import net from 'node:net'
 import os from 'node:os'
 import {basename, join} from 'node:path'
 import {fileURLToPath} from 'node:url'
@@ -304,8 +305,72 @@ export function createConnector({dataDir, tlsDir, connectorDir = fileURLToPath(n
 	const pairings = new Map() // sha(token) -> {abilities, expires}
 	const live = new Map() // agentId -> {ws, metrics, info, channels: Map, nextCh, calls: Map, nextCall}
 	const history = new Map() // agentId -> {fine: Point[], coarse: Point[]}
+	const tunnels = new Map() // `${agentId}:${appId}` -> {server, localPort, remotePort, refs, close}
 	const wss = new WebSocketServer({noServer: true, maxPayload: 16 * 1024 * 1024})
 
+	function closeAgentTunnels(agentId, appId = null) {
+		for (const [key, t] of [...tunnels]) {
+			if (key.startsWith(`${agentId}:`) && (!appId || key === `${agentId}:${appId}`)) {
+				tunnels.delete(key)
+				t.close()
+			}
+		}
+	}
+
+	async function openAppTunnel(agentId, appId, remotePort, requiredAbility = 'desktop') {
+		const key = `${agentId}:${appId}`
+		const existing = tunnels.get(key)
+		if (existing && existing.remotePort === remotePort) return existing
+		if (existing) {
+			tunnels.delete(key)
+			existing.close()
+		}
+		const sockets = new Set()
+		const server = net.createServer((sock) => {
+			const a = find(agentId)
+			const l = live.get(agentId)
+			if (!a || !l || !may(a, requiredAbility) || l.ws.readyState !== l.ws.OPEN) {
+				sock.destroy()
+				return
+			}
+			sockets.add(sock)
+			const ch = ++l.nextCh
+			l.channels.set(ch, {kind: 'tcp', sock})
+			l.ws.send(JSON.stringify({op: 'open', ch, kind: 'tcp', appId, port: remotePort}))
+			const head = Buffer.alloc(4)
+			head.writeUInt32BE(ch)
+			sock.on('data', (chunk) => {
+				if (l.ws.readyState === l.ws.OPEN) l.ws.send(Buffer.concat([head, chunk]), {binary: true})
+			})
+			const end = () => {
+				sockets.delete(sock)
+				if (!l.channels.delete(ch)) return
+				if (l.ws.readyState === l.ws.OPEN) l.ws.send(JSON.stringify({op: 'close', ch}))
+			}
+			sock.on('close', end)
+			sock.on('error', end)
+		})
+		await new Promise((resolve, reject) => {
+			server.once('error', reject)
+			server.listen(0, '127.0.0.1', resolve)
+		})
+		const localPort = server.address().port
+		const rec = {
+			server,
+			localPort,
+			remotePort,
+			refs: 0,
+			close: () => {
+				for (const s of sockets) s.destroy()
+				sockets.clear()
+				try {
+					server.close()
+				} catch {}
+			},
+		}
+		tunnels.set(key, rec)
+		return rec
+	}
 	function recordHistory(agentId, m) {
 		const root = m.disks?.find((d) => d.mount === '/') ?? m.disks?.[0]
 		const pt = {
@@ -761,6 +826,10 @@ export function createConnector({dataDir, tlsDir, connectorDir = fileURLToPath(n
 							ch.onBinary(buf.subarray(4))
 							return
 						}
+						if (ch?.kind === 'tcp') {
+							if (!ch.sock.destroyed) ch.sock.write(buf.subarray(4))
+							return
+						}
 						if (ch && ch.ws.readyState === ch.ws.OPEN) {
 							if (ch.ws.bufferedAmount > VIEWER_BUFFER_LIMIT) closeLiveChannel(l, id, 'The viewer fell behind')
 							else ch.ws.send(buf.subarray(4), {binary: true})
@@ -804,7 +873,8 @@ export function createConnector({dataDir, tlsDir, connectorDir = fileURLToPath(n
 							return
 						}
 						l.channels.delete(Number(msg.ch))
-						closeSocket(ch.ws, msg.code === 1011 ? 1011 : 1000, msg.reason)
+						if (ch.kind === 'tcp') ch.sock.end()
+						else closeSocket(ch.ws, msg.code === 1011 ? 1011 : 1000, msg.reason)
 					} else if (msg.op === 'progress') {
 						// A long call (a backup) saying how far it's got. A report for a call that
 						// already finished must not become the next call's progress.
@@ -830,8 +900,10 @@ export function createConnector({dataDir, tlsDir, connectorDir = fileURLToPath(n
 				if (live.get(a.id)?.ws !== ws) return
 				l.progress = null
 				live.delete(a.id)
+				closeAgentTunnels(a.id)
 				for (const ch of [...l.channels.values()]) {
 					if (ch.kind === 'file') ch.end(new RpcError('BAD_GATEWAY', 'The computer went offline'))
+					else if (ch.sock) ch.sock.destroy()
 					else closeSocket(ch.ws, 1000, 'The computer went offline')
 				}
 				for (const c of l.calls.values()) (clearTimeout(c.timer), c.reject(new RpcError('BAD_GATEWAY', 'The computer went offline')))
@@ -1437,10 +1509,27 @@ export function createConnector({dataDir, tlsDir, connectorDir = fileURLToPath(n
 			await loaded
 			return {total: state.agents.length, online: state.agents.filter((a) => live.has(a.id)).length}
 		},
+		openRdpTunnel: async (agentId) => {
+			await loaded
+			const a = find(agentId)
+			const l = live.get(agentId)
+			if (!a || !l || !may(a, 'desktop')) throw new RpcError('PRECONDITION_FAILED', !a ? 'Unknown computer' : !l ? 'That computer is offline' : switchedOff(a.name, 'desktop'))
+			const t = await openAppTunnel(agentId, '__rdp__', 3389, 'desktop')
+			t.refs = (t.refs ?? 0) + 1
+			return t
+		},
+		closeRdpTunnel: (agentId) => {
+			const t = tunnels.get(`${agentId}:__rdp__`)
+			if (!t) return
+			t.refs = Math.max(0, (t.refs ?? 1) - 1)
+			if (t.refs === 0) closeAgentTunnels(agentId, '__rdp__')
+		},
 		upgradeAgent,
 		openChannel,
 		isAgentMachine: (machineId) => /^agent-[0-9a-f]{12}$/.test(machineId),
 		close: () => {
+			for (const t of tunnels.values()) t.close()
+			tunnels.clear()
 			for (const l of live.values()) l.ws.terminate()
 		},
 	}

@@ -24,14 +24,14 @@ Standard library only, so it runs on any distribution with Python 3.8+.
 import ast
 import base64
 import bz2
+import ctypes
+import getpass
 import http.client
 import http.server
-import fcntl
 import hashlib
 import json
 import os
-import pty
-import pwd
+import platform
 import re
 import select
 import shutil
@@ -42,12 +42,19 @@ import stat
 import struct
 import subprocess
 import sys
-import termios
 import threading
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
+
+try:
+    import fcntl
+    import pty
+    import pwd
+    import termios
+except ImportError:
+    fcntl = pty = pwd = termios = None
 
 VERSION = "1"
 ABILITY_NAMES = ("terminal", "desktop", "manage", "storage", "backup", "services", "files")
@@ -56,11 +63,18 @@ ABILITY_NAMES = ("terminal", "desktop", "manage", "storage", "backup", "services
 FILE_CHUNK = 64 * 1024
 FILE_WINDOW = 4
 IS_MACOS = sys.platform == "darwin"
-CONFIG_DIR = os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"), "omarchy-connector")
+IS_WINDOWS = sys.platform == "win32"
+if IS_WINDOWS:
+    _WIN_APP = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
+    CONFIG_DIR = os.path.join(_WIN_APP, "omarchy-connector")
+    DATA_DIR = CONFIG_DIR
+    RUNTIME = CONFIG_DIR
+else:
+    CONFIG_DIR = os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"), "omarchy-connector")
+    RUNTIME = os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"
+    DATA_DIR = os.path.join(os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share"), "omarchy-connector")
 CONFIG = os.path.join(CONFIG_DIR, "config.json")
 CA_FILE = os.path.join(CONFIG_DIR, "server-ca.crt")
-RUNTIME = os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"
-DATA_DIR = os.path.join(os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share"), "omarchy-connector")
 
 # restic, the backup engine: this computer's own if it's new enough, otherwise its official build,
 # downloaded once and checked against these SHA-256s (from restic's SHA256SUMS for 0.18.1).
@@ -217,6 +231,10 @@ def read(path, default=""):
 
 
 def os_release():
+    if IS_WINDOWS:
+        ver = platform.release()
+        pretty = f"Windows {ver}".strip()
+        return {"PRETTY_NAME": pretty, "NAME": "Windows", "ID": "windows"}
     out = {}
     for line in read("/etc/os-release").splitlines():
         if "=" in line:
@@ -226,6 +244,8 @@ def os_release():
 
 
 def package_manager():
+    if IS_WINDOWS:
+        return "winget" if shutil.which("winget") else ""
     for name in ("apt", "dnf", "pacman", "zypper"):
         if shutil.which(name if name != "apt" else "apt-get"):
             return name
@@ -235,7 +255,7 @@ def package_manager():
 def update_command(pkg, omarchy):
     if omarchy:
         return "omarchy update"
-    return {"apt": "sudo apt update && sudo apt upgrade", "dnf": "sudo dnf upgrade --refresh", "pacman": "sudo pacman -Syu", "zypper": "sudo zypper update"}.get(pkg, "")
+    return {"apt": "sudo apt update && sudo apt upgrade", "dnf": "sudo dnf upgrade --refresh", "pacman": "sudo pacman -Syu", "zypper": "sudo zypper update", "winget": "winget upgrade --all"}.get(pkg, "")
 
 
 def omarchy_facts():
@@ -278,6 +298,21 @@ def _file_sha256(path):
 
 def lan_macs(list_dir=os.listdir, read_file=read, root="/sys/class/net"):
     """Non-virtual network adapter MAC addresses for Wake-on-LAN."""
+    if IS_WINDOWS and list_dir is os.listdir and read_file is read and root == "/sys/class/net":
+        try:
+            out = subprocess.run(["getmac", "/fo", "csv", "/nh"], capture_output=True, text=True, timeout=5, creationflags=_WIN_NO_WINDOW).stdout
+        except (OSError, subprocess.SubprocessError):
+            return []
+        seen, macs = set(), []
+        for line in out.splitlines():
+            m = re.search(r"([0-9A-Fa-f]{2}(?:-[0-9A-Fa-f]{2}){5})", line)
+            if not m:
+                continue
+            mac = m.group(1).replace("-", ":").lower()
+            if mac != "00:00:00:00:00:00" and mac not in seen:
+                seen.add(mac)
+                macs.append(mac)
+        return macs[:8]
     try:
         names = sorted(list_dir(root))
     except OSError:
@@ -298,7 +333,7 @@ def lan_macs(list_dir=os.listdir, read_file=read, root="/sys/class/net"):
 
 def _listening_ports(read_file=read):
     """Non-loopback TCP listening ports from /proc/net/tcp{,6} (zero root, stdlib only)."""
-    if IS_MACOS and read_file is read:
+    if (IS_MACOS or IS_WINDOWS) and read_file is read:
         return []
     seen, out = set(), []
     for path, proto in (("/proc/net/tcp", "tcp"), ("/proc/net/tcp6", "tcp6")):
@@ -335,11 +370,11 @@ def _listening_ports(read_file=read):
 
 def _reboot_required(read_file=read, list_dir=os.listdir, exists=os.path.exists, kernel=None):
     """Detect whether a kernel/system update requires a reboot (Debian/Ubuntu/Arch/Omarchy)."""
-    if IS_MACOS and read_file is read and list_dir is os.listdir:
+    if (IS_MACOS or IS_WINDOWS) and read_file is read and list_dir is os.listdir:
         return False, ""
     if exists("/var/run/reboot-required"):
         return True, "System updates require a restart"
-    rel = kernel if kernel is not None else os.uname().release
+    rel = kernel if kernel is not None else (os.uname().release if hasattr(os, "uname") else platform.release())
     if rel and exists("/usr/lib/modules"):
         try:
             mods = list_dir("/usr/lib/modules")
@@ -379,13 +414,16 @@ def info():
     rel = os_release()
     pkg = package_manager()
     om = omarchy_facts()
+    kernel = os.uname().release if hasattr(os, "uname") else platform.release()
+    arch = os.uname().machine if hasattr(os, "uname") else platform.machine()
+    user = pwd.getpwuid(os.getuid()).pw_name if pwd is not None else getpass.getuser()
     return {
         "hostname": socket.gethostname(),
         "os": rel.get("PRETTY_NAME") or rel.get("NAME") or "Linux",
         "osId": rel.get("ID", ""),
-        "kernel": os.uname().release,
-        "arch": os.uname().machine,
-        "user": pwd.getpwuid(os.getuid()).pw_name,
+        "kernel": kernel,
+        "arch": arch,
+        "user": user,
         "version": VERSION,
         "agentSha": _file_sha256(__file__),
         "helperSha": _file_sha256(HELPER),
@@ -401,7 +439,84 @@ def info():
 _cpu_last = None
 
 
+def _windows_meminfo():
+    class _MemStatus(ctypes.Structure):
+        _fields_ = [
+            ("dwLength", ctypes.c_ulong),
+            ("dwMemoryLoad", ctypes.c_ulong),
+            ("ullTotalPhys", ctypes.c_ulonglong),
+            ("ullAvailPhys", ctypes.c_ulonglong),
+            ("ullTotalPageFile", ctypes.c_ulonglong),
+            ("ullAvailPageFile", ctypes.c_ulonglong),
+            ("ullTotalVirtual", ctypes.c_ulonglong),
+            ("ullAvailVirtual", ctypes.c_ulonglong),
+            ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+        ]
+
+    try:
+        st = _MemStatus()
+        st.dwLength = ctypes.sizeof(_MemStatus)
+        if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(st)):
+            total = int(st.ullTotalPhys)
+            used = max(0, total - int(st.ullAvailPhys))
+            ptotal = int(st.ullTotalPageFile)
+            pused = max(0, ptotal - int(st.ullAvailPageFile))
+            return {"total": total, "used": used}, {"total": ptotal, "used": pused}
+    except Exception:
+        pass
+    return {"total": 0, "used": 0}, {"total": 0, "used": 0}
+
+
+def _windows_disks():
+    rows = []
+    for letter in "ABCDEFGHIJKLMNOPQRSTUVWXYZ":
+        root = f"{letter}:\\"
+        if not os.path.exists(root):
+            continue
+        try:
+            u = shutil.disk_usage(root)
+            if u.total > 0:
+                rows.append({"mount": f"{letter}:", "total": int(u.total), "used": int(u.used)})
+        except OSError:
+            continue
+    return rows[:12]
+
+
+def _windows_uptime():
+    try:
+        return float(ctypes.windll.kernel32.GetTickCount64()) / 1000.0
+    except Exception:
+        return 0.0
+
+
+_WIN_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0) if IS_WINDOWS else 0
+_win_cpu_last = None
+
+
+def _windows_cpu_percent():
+    global _win_cpu_last
+
+    class _FileTime(ctypes.Structure):
+        _fields_ = [("dwLowDateTime", ctypes.c_ulong), ("dwHighDateTime", ctypes.c_ulong)]
+
+    try:
+        idle_t, kern_t, user_t = _FileTime(), _FileTime(), _FileTime()
+        if not ctypes.windll.kernel32.GetSystemTimes(ctypes.byref(idle_t), ctypes.byref(kern_t), ctypes.byref(user_t)):
+            return None
+        to_int = lambda ft: (ft.dwHighDateTime << 32) | ft.dwLowDateTime
+        idle = to_int(idle_t)
+        total = to_int(kern_t) + to_int(user_t)
+        prev, _win_cpu_last = _win_cpu_last, (idle, total)
+        if not prev or total <= prev[1]:
+            return None
+        return round(max(0.0, min(100.0, 100.0 * (1.0 - (idle - prev[0]) / (total - prev[1])))), 1)
+    except Exception:
+        return None
+
+
 def cpu_percent():
+    if IS_WINDOWS:
+        return _windows_cpu_percent()
     global _cpu_last
     parts = read("/proc/stat").split("\n", 1)[0].split()[1:]
     vals = [int(x) for x in parts] if parts else []
@@ -416,6 +531,8 @@ def cpu_percent():
 
 
 def meminfo():
+    if IS_WINDOWS:
+        return _windows_meminfo()
     m = {}
     for line in read("/proc/meminfo").splitlines():
         k, _, rest = line.partition(":")
@@ -458,6 +575,8 @@ def _begin_stat(mount):
 
 
 def disks():
+    if IS_WINDOWS:
+        return _windows_disks()
     out, seen, mounts = [], set(), []
     for line in read("/proc/mounts").splitlines():
         p = line.split()
@@ -890,7 +1009,7 @@ def default_reads():
         "temp": temperature,
         "battery": batteries,
         "disk": disks,
-        "uptime": lambda: float(read("/proc/uptime", "0").split()[0] or 0),
+        "uptime": _windows_uptime if IS_WINDOWS else (lambda: float(read("/proc/uptime", "0").split()[0] or 0)),
     }
 
 
@@ -955,7 +1074,7 @@ class Sampler:
                 disk_rows = None
         if take_disk and disk_rows is not None:
             self._snap["disks"] = disk_rows
-        self._take("cpu", lambda v: self._snap.update(cpu=v, cores=os.cpu_count(), load=list(os.getloadavg())), t)
+        self._take("cpu", lambda v: self._snap.update(cpu=v, cores=os.cpu_count(), load=list(os.getloadavg()) if hasattr(os, "getloadavg") else []), t)
         def mem(v):
             if isinstance(v, tuple):
                 self._snap["mem"], self._snap["swap"] = v
@@ -1127,6 +1246,14 @@ def _xauthority():
 
 
 def desktop_kind():
+    if IS_WINDOWS:
+        ok = False
+        try:
+            with socket.create_connection(("127.0.0.1", 3389), timeout=0.5):
+                ok = True
+        except OSError:
+            ok = False
+        return {"kind": "rdp", "ok": ok, "why": "" if ok else "Turn on Remote Desktop in Windows Settings to share this screen."}
     wl = _wayland_display()
     wlroots = _hypr_signature() or any(f.startswith("sway-ipc.") for f in (os.listdir(RUNTIME) if os.path.isdir(RUNTIME) else []))
     if wl and wlroots:
@@ -1650,6 +1777,46 @@ class Screen(Channel):
         vnc_release()
 
 
+class TcpChannel(Channel):
+    """Loopback-only TCP tunnel to 127.0.0.1 (used for Windows RDP over Swarm)."""
+
+    def __init__(self, conn, ch, port):
+        super().__init__(conn, ch)
+        self.sock = socket.create_connection(("127.0.0.1", int(port)), timeout=10)
+        self.sock.settimeout(None)
+        threading.Thread(target=self.pump, daemon=True).start()
+
+    def pump(self):
+        while not self.closed:
+            try:
+                data = self.sock.recv(65536)
+            except OSError:
+                break
+            if not data:
+                break
+            self.out(data)
+        self.ended("Tunnel closed")
+
+    def write(self, data):
+        try:
+            self.sock.sendall(data)
+        except OSError:
+            self.ended("Tunnel closed")
+
+    def close(self):
+        if self.closed:
+            return
+        self.closed = True
+        try:
+            self.sock.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+        try:
+            self.sock.close()
+        except OSError:
+            pass
+
+
 # ---------------------------------------------------------------------------------------------
 # Files: a channel for the clip book. Paths stay inside the home folder. The connector's own
 # configuration and data (its key and the server certificate) are not part of that folder here,
@@ -2091,17 +2258,78 @@ def theme_set(args):
     return True
 
 
+class WindowsShell(Channel):
+    """Unbuffered piped PowerShell / cmd.exe shell channel for Windows where POSIX pty is unavailable."""
+
+    def __init__(self, conn, ch):
+        super().__init__(conn, ch)
+        exe = shutil.which("powershell.exe") or shutil.which("pwsh.exe") or os.environ.get("COMSPEC") or "cmd.exe"
+        args = [exe, "-NoLogo", "-NoProfile"] if "powershell" in exe.lower() or "pwsh" in exe.lower() else [exe]
+        self.proc = subprocess.Popen(
+            args,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            bufsize=0,
+            cwd=os.path.expanduser("~"),
+            creationflags=_WIN_NO_WINDOW,
+        )
+        threading.Thread(target=self.pump, daemon=True).start()
+
+    def resize(self, _cols, _rows):
+        pass
+
+    def pump(self):
+        try:
+            fd = self.proc.stdout.fileno() if self.proc.stdout else -1
+            while not self.closed and fd >= 0:
+                chunk = os.read(fd, 4096)
+                if not chunk:
+                    break
+                self.out(chunk)
+        except OSError:
+            pass
+        self.ended("Shell ended")
+
+    def write(self, data):
+        if self.closed or not self.proc.stdin:
+            return
+        try:
+            self.proc.stdin.write(data)
+            self.proc.stdin.flush()
+        except OSError:
+            self.ended("Shell ended")
+
+    def close(self):
+        if self.closed:
+            return
+        self.closed = True
+        try:
+            self.proc.terminate()
+        except OSError:
+            pass
+
+
 def reboot(_args):
+    if IS_WINDOWS:
+        run(["shutdown", "/r", "/t", "0"], timeout=30, creationflags=_WIN_NO_WINDOW)
+        return True
     run(["systemctl", "reboot"], timeout=30)
     return True
 
 
 def shutdown(_args):
+    if IS_WINDOWS:
+        run(["shutdown", "/s", "/t", "0"], timeout=30, creationflags=_WIN_NO_WINDOW)
+        return True
     run(["systemctl", "poweroff"], timeout=30)
     return True
 
 
 def suspend(_args):
+    if IS_WINDOWS:
+        run(["rundll32.exe", "powrprof.dll,SetSuspendState", "0,1,0"], timeout=30, creationflags=_WIN_NO_WINDOW)
+        return True
     run(["systemctl", "suspend"], timeout=30)
     return True
 
@@ -3122,15 +3350,24 @@ class Connection:
                 except Exception as e:  # noqa: BLE001 - said back to the person, in plain words
                     self.send({"op": "closed", "ch": ch, "code": 1011, "reason": str(e)[:200]})
                 return
-            ability = "terminal" if kind == "pty" else "desktop" if kind == "vnc" else None
+            is_rdp_tcp = kind == "tcp" and str(msg.get("appId") or "") == "__rdp__" and int(msg.get("port") or 0) == 3389
+            ability = "terminal" if kind == "pty" else "desktop" if (kind == "vnc" or is_rdp_tcp) else None
             if not ability or not self.allowed.get(ability):
                 return self.send({"op": "closed", "ch": ch, "code": 1011, "reason": f"This computer doesn’t allow the {ability or 'that'}"})
             if kind == "vnc":
                 # vnc_start sleeps until the socket exists. That wait used to sit on this thread.
                 self._open_vnc(ch)
                 return
+            if is_rdp_tcp:
+                try:
+                    self.channels[ch] = TcpChannel(self, ch, 3389)
+                except Exception as e:  # noqa: BLE001
+                    self.send({"op": "closed", "ch": ch, "code": 1011, "reason": str(e)[:200]})
+                return
             try:
-                if msg.get("session"):
+                if pty is None:
+                    self.channels[ch] = WindowsShell(self, ch)
+                elif msg.get("session"):
                     self.channels[ch] = open_shell_session(self, ch, msg.get("cols"), msg.get("rows"), name=msg.get("session"), fresh=bool(msg.get("fresh")))
                 else:
                     self.channels[ch] = Shell(self, ch, msg.get("cols"), msg.get("rows"))
@@ -3232,9 +3469,12 @@ def forget():
     except OSError:
         pass
     try:
-        # --now so systemd stops the unit instead of restarting it (Restart=always) every 5 seconds;
-        # --no-block so this process isn't waiting on its own stop.
-        subprocess.run(["systemctl", "--user", "disable", "--now", "--no-block", "omarchy-connector.service"], capture_output=True, timeout=30)
+        if IS_WINDOWS:
+            subprocess.run(["schtasks", "/Delete", "/TN", "OmarchyConnector", "/F"], capture_output=True, timeout=30, creationflags=_WIN_NO_WINDOW)
+        else:
+            # --now so systemd stops the unit instead of restarting it (Restart=always) every 5 seconds;
+            # --no-block so this process isn't waiting on its own stop.
+            subprocess.run(["systemctl", "--user", "disable", "--now", "--no-block", "omarchy-connector.service"], capture_output=True, timeout=30)
     except (OSError, subprocess.SubprocessError):
         pass  # not run by systemd (or no systemd): stopping is enough
     _backup_password_dir(True)
