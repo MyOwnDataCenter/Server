@@ -75,3 +75,37 @@ self.addEventListener('fetch', (e) => {
 		)
 	}
 })
+
+// Web Push notifications (RFC 8291/8292 from omarchyd/alerts.mjs).
+self.addEventListener('push', (e) => {
+	let data = {title: 'Omarchy Server', body: 'A server alert needs attention.', tag: 'omarchy-alert', url: '/'}
+	try {
+		const parsed = e.data?.json()
+		if (parsed && typeof parsed === 'object') data = {...data, ...parsed}
+	} catch {
+		const text = e.data?.text?.()
+		if (text) data.body = text
+	}
+	e.waitUntil(
+		self.registration.showNotification(String(data.title || 'Omarchy Server'), {
+			body: String(data.body || ''),
+			tag: String(data.tag || 'omarchy-alert'),
+			icon: '/icon-192.png',
+			badge: '/favicon-64.png',
+			data: {url: String(data.url || '/')},
+		}),
+	)
+})
+
+self.addEventListener('notificationclick', (e) => {
+	e.notification.close()
+	const target = e.notification.data?.url || '/'
+	e.waitUntil(
+		self.clients.matchAll({type: 'window', includeUncontrolled: true}).then((list) => {
+			for (const client of list) {
+				if ('focus' in client) return client.focus()
+			}
+			return self.clients.openWindow(target)
+		}),
+	)
+})

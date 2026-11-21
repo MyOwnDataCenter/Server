@@ -10,9 +10,12 @@ import os from 'node:os'
 import {dirname, extname, join} from 'node:path'
 
 import {openAccounts} from './accounts.mjs'
+import {createAlerts} from './alerts.mjs'
 import {writeAtomic} from './atomic.mjs'
 import {createAssistant} from './assistant.mjs'
+import {createAudit} from './audit.mjs'
 import {createBackups} from './backups.mjs'
+import {createHealth} from './health.mjs'
 import {createUnraid} from './unraid.mjs'
 import {APP_COOKIE, createApps} from './apps.mjs'
 import {createFiles} from './files.mjs'
@@ -35,7 +38,7 @@ import {WebSocketServer} from 'ws'
 
 export const OMARCHYD_VERSION = '0.9.60'
 
-export async function startOmarchyd({port = 2021, host = '127.0.0.1', dataDir, tlsDir: sharedTlsDir = null, home = os.homedir(), webPort = 7780, machineOptions = {}, appOptions = {}, storageOptions = {}, updaterOptions = {}, pluginOptions = {}, themeOptions = {}, assistantOptions = {}, usbOptions = {}, backupOptions = {}, unraidOptions = {}, desktopVncPort = 5900, desktopVncSocket = join(process.env.XDG_RUNTIME_DIR || `/run/user/${process.getuid?.() ?? ''}`, 'omarchy-server', 'desktop-vnc.sock')}) {
+export async function startOmarchyd({port = 2021, host = '127.0.0.1', dataDir, tlsDir: sharedTlsDir = null, home = os.homedir(), webPort = 7780, machineOptions = {}, appOptions = {}, storageOptions = {}, updaterOptions = {}, pluginOptions = {}, themeOptions = {}, assistantOptions = {}, usbOptions = {}, backupOptions = {}, unraidOptions = {}, alertOptions = {}, healthOptions = {}, desktopVncPort = 5900, desktopVncSocket = join(process.env.XDG_RUNTIME_DIR || `/run/user/${process.getuid?.() ?? ''}`, 'omarchy-server', 'desktop-vnc.sock')}) {
 	const sourceDir = localGitDir('OMARCHY_SERVER_SOURCE', process.env.OMARCHY_SERVER_SOURCE)
 	const storeDir = localGitDir('OMARCHY_SERVER_APP_STORE', process.env.OMARCHY_SERVER_APP_STORE)
 	const appDir = fileURLToPath(new URL('..', import.meta.url))
@@ -47,6 +50,9 @@ export async function startOmarchyd({port = 2021, host = '127.0.0.1', dataDir, t
 		})
 	})
 	const accounts = await openAccounts(dataDir)
+	const audit = createAudit({dataDir})
+	const logAudit = (auth, action, target = '', detail = null) =>
+		audit.record({actor: accounts.getUser(auth?.userId)?.name || auth?.userId || 'owner', action, target, ok: true, detail}).catch(() => {})
 	// Security settings kept by omarchyd itself (the https setting lives with the certificates,
 	// where the web server reads it too). Only a plain object is settings: a string or array is
 	// valid JSON, but spreading it would pollute this object and the next save would overwrite the
@@ -183,10 +189,21 @@ export async function startOmarchyd({port = 2021, host = '127.0.0.1', dataDir, t
 		'omarchy.plugins': {kind: 'query', run: (input) => themeCall(() => omarchyPlugins.list(input ?? {}))},
 		// Local swarm (connector.mjs): owner only.
 		...Object.fromEntries(
-			['swarm.list', 'swarm.history', 'swarm.alerts', 'swarm.wake', 'swarm.pair', 'swarm.reauthorize', 'swarm.updateConnector', 'swarm.updateAllConnectors', 'swarm.remove', 'swarm.rename', 'swarm.setAbilities', 'swarm.action', 'swarm.fleetAction', 'swarm.desktopCheck', 'swarm.storage.status', 'swarm.storage.disks', 'swarm.storage.pools', 'swarm.storage.importable', 'swarm.storage.unmount', 'swarm.storage.mount', 'swarm.storage.format', 'swarm.storage.createPool', 'swarm.storage.addToPool', 'swarm.storage.importPool', 'swarm.storage.forgetPool', 'swarm.storage.scrub', 'swarm.storage.setSleep', 'swarm.services.list', 'swarm.services.logs', 'swarm.services.control', 'swarm.files.list', 'swarm.files.mkdir', 'swarm.files.rename', 'swarm.files.trash', 'swarm.files.copyToServer', 'swarm.files.copyFromServer'].map((name) => [
-				name,
-				{kind: ['swarm.list', 'swarm.history', 'swarm.alerts', 'swarm.desktopCheck', 'swarm.storage.status', 'swarm.storage.disks', 'swarm.storage.pools', 'swarm.storage.importable', 'swarm.services.list', 'swarm.services.logs', 'swarm.files.list'].includes(name) ? 'query' : 'mutation', run: (input, {auth}) => (ownerOnly(auth, 'manage the local swarm'), connector.procedures[name].run(input))},
-			]),
+			['swarm.list', 'swarm.history', 'swarm.alerts', 'swarm.wake', 'swarm.pair', 'swarm.reauthorize', 'swarm.updateConnector', 'swarm.updateAllConnectors', 'swarm.remove', 'swarm.rename', 'swarm.setAbilities', 'swarm.action', 'swarm.fleetAction', 'swarm.desktopCheck', 'swarm.storage.status', 'swarm.storage.disks', 'swarm.storage.pools', 'swarm.storage.importable', 'swarm.storage.unmount', 'swarm.storage.mount', 'swarm.storage.format', 'swarm.storage.createPool', 'swarm.storage.addToPool', 'swarm.storage.importPool', 'swarm.storage.forgetPool', 'swarm.storage.scrub', 'swarm.storage.setSleep', 'swarm.services.list', 'swarm.services.logs', 'swarm.services.control', 'swarm.files.list', 'swarm.files.mkdir', 'swarm.files.rename', 'swarm.files.trash', 'swarm.files.copyToServer', 'swarm.files.copyFromServer'].map((name) => {
+				const kind = ['swarm.list', 'swarm.history', 'swarm.alerts', 'swarm.desktopCheck', 'swarm.storage.status', 'swarm.storage.disks', 'swarm.storage.pools', 'swarm.storage.importable', 'swarm.services.list', 'swarm.services.logs', 'swarm.files.list'].includes(name) ? 'query' : 'mutation'
+				return [
+					name,
+					{
+						kind,
+						run: async (input, {auth}) => {
+							ownerOnly(auth, 'manage the local swarm')
+							const res = await connector.procedures[name].run(input)
+							if (kind === 'mutation') logAudit(auth, name, String(input?.id ?? input?.action ?? ''), input && typeof input === 'object' ? {action: input.action, appId: input.appId, unit: input.unit} : null)
+							return res
+						},
+					},
+				]
+			}),
 		),
 		'omarchy.installPlugin': {kind: 'mutation', run: (input, {auth}) => (ownerOnly(auth, 'install Omarchy plugins'), themeCall(() => omarchyPlugins.install(input)))},
 		'omarchy.removePlugin': {kind: 'mutation', run: (input, {auth}) => (ownerOnly(auth, 'remove Omarchy plugins'), themeCall(() => omarchyPlugins.remove(input)))},
@@ -220,8 +237,8 @@ export async function startOmarchyd({port = 2021, host = '127.0.0.1', dataDir, t
 		'system.device': {kind: 'query', run: async () => ({device: await system.deviceName(), os: release.pretty})},
 
 		// ---- Settings: power, logs, device name, two-factor, sessions, reset ----------------------
-		'system.restart': {kind: 'mutation', run: (_i, {auth}) => (ownerOnly(auth, 'restart the server'), power('reboot'))},
-		'system.shutdown': {kind: 'mutation', run: (_i, {auth}) => (ownerOnly(auth, 'shut down the server'), power('poweroff'))},
+		'system.restart': {kind: 'mutation', run: (_i, {auth}) => (ownerOnly(auth, 'restart the server'), logAudit(auth, 'system.restart', 'server'), power('reboot'))},
+		'system.shutdown': {kind: 'mutation', run: (_i, {auth}) => (ownerOnly(auth, 'shut down the server'), logAudit(auth, 'system.shutdown', 'server'), power('poweroff'))},
 		'system.logs': {
 			kind: 'query',
 			run: async (input, {auth}) => {
@@ -260,6 +277,7 @@ export async function startOmarchyd({port = 2021, host = '127.0.0.1', dataDir, t
 			run: async (input, {auth}) => {
 				ownerOnly(auth, 'reset Omarchy Server')
 				await accounts.confirmPassword(auth.userId, input?.password)
+				logAudit(auth, 'system.factoryReset', 'server')
 				// Answer first; the reset carries on by itself. The next owner must not inherit
 				// assistant keys and chats, swarm computers, backup secrets or network shares.
 				setTimeout(async () => {
@@ -348,6 +366,7 @@ export async function startOmarchyd({port = 2021, host = '127.0.0.1', dataDir, t
 					await writeAtomic(securityFile, JSON.stringify(next), {mode: 0o600})
 					security = next
 				}
+				logAudit(auth, 'system.setSecurity', 'security', {alwaysHttps: input?.alwaysHttps, lockAfterRemote: input?.lockAfterRemote})
 				return true
 			},
 		},
@@ -358,6 +377,7 @@ export async function startOmarchyd({port = 2021, host = '127.0.0.1', dataDir, t
 				ownerOnly(auth, 'replace the certificate')
 				await rotateAuthority({dir: tlsDir})
 				await secure.refresh?.()
+				logAudit(auth, 'system.replaceCertificate', 'tls')
 				return authorityInfo(tlsDir)
 			},
 		},
@@ -367,6 +387,7 @@ export async function startOmarchyd({port = 2021, host = '127.0.0.1', dataDir, t
 			run: async (input, {auth}) => {
 				ownerOnly(auth)
 				await accounts.confirmPassword(auth.userId, input?.password)
+				logAudit(auth, 'system.desktopSignIn', 'desktop')
 				const r = await storage.helper('desktop-sign-in')
 				signedInAt = Date.now()
 				remoteSignIn = true
@@ -480,6 +501,44 @@ export async function startOmarchyd({port = 2021, host = '127.0.0.1', dataDir, t
 		urlUser: (token, req) => accounts.checkUrlToken(token, req),
 	})
 	Object.assign(procedures, clips.procedures)
+	const alerts = createAlerts({
+		dataDir,
+		collectAlerts: async () => connector.procedures['swarm.alerts'].run().catch(() => []),
+		autoStart: !machineOptions.run,
+		audit,
+		...alertOptions,
+	})
+	const health = createHealth({
+		dataDir,
+		version: OMARCHYD_VERSION,
+		startedAt,
+		autoStart: !machineOptions.run,
+		audit,
+		checks: [
+			async () => {
+				const s = await connector.summary().catch(() => ({total: 0, online: 0}))
+				return {name: 'swarm', ok: true, detail: s.total ? `${s.online}/${s.total} computers online` : 'No swarm computers paired'}
+			},
+		],
+		...healthOptions,
+	})
+	Object.assign(
+		procedures,
+		Object.fromEntries(Object.entries(alerts.procedures).map(([name, p]) => [name, {kind: p.kind, run: (input, {auth}) => (ownerOnly(auth, 'manage alerts'), p.run(input))}])),
+		Object.fromEntries(Object.entries(audit.procedures).map(([name, p]) => [name, {kind: p.kind, run: (input, {auth}) => (ownerOnly(auth, 'read the activity log'), p.run(input))}])),
+		Object.fromEntries(Object.entries(health.procedures).map(([name, p]) => [name, {kind: p.kind, run: (input, {auth}) => (ownerOnly(auth, 'check server health'), p.run(input))}])),
+	)
+	const origApprove = procedures['assistant.approve']
+	if (origApprove) {
+		procedures['assistant.approve'] = {
+			kind: origApprove.kind,
+			run: async (input, ctx) => {
+				const res = await origApprove.run(input, ctx)
+				logAudit(ctx.auth, 'assistant.approve', String(input?.callId ?? ''))
+				return res
+			},
+		}
+	}
 	let signedInAt = 0
 	// After a sign-in from the web, lock the desktop again once nobody is viewing it (Settings →
 	// Security), so the screen isn't left signed in at the server itself. A short wait lets a page
@@ -686,6 +745,23 @@ WantedBy=graphical-session.target
 	const server = http.createServer(async (req, res) => {
 		const url = new URL(req.url ?? '/', 'http://localhost')
 		try {
+			if (url.pathname === '/api/health' && req.method === 'GET') {
+				const h = await health.check()
+				return sendJson(res, h.ok ? 200 : 503, {ok: h.ok, status: h.status, version: OMARCHYD_VERSION})
+			}
+			if (url.pathname === '/api/audit/export' && req.method === 'GET') {
+				const auth = accounts.authenticate(req) || accounts.checkUrlToken(url.searchParams.get('token'), req)
+				if (!auth) return sendJson(res, 401, {error: 'unauthorized'})
+				ownerOnly(auth, 'export the activity log')
+				const body = Buffer.from(await audit.exportNdjson(), 'utf8')
+				res.writeHead(200, {
+					'content-type': 'application/x-ndjson; charset=utf-8',
+					'content-length': body.length,
+					'content-disposition': 'attachment; filename="omarchy-server-audit.ndjson"',
+					'cache-control': 'no-store',
+				})
+				return res.end(body)
+			}
 			if (url.pathname === '/assistant/stream' && req.method === 'POST') {
 				const auth = accounts.authenticate(req)
 				if (!auth) return sendError(res, new RpcError('UNAUTHORIZED', 'Invalid token'))
@@ -900,7 +976,7 @@ WantedBy=graphical-session.target
 		}
 	}, 20_000).unref?.()
 
-	return {url: `http://${host}:${server.address().port}`, accounts, terminals, close: () => (sampler.stop(), apps.close(), backups.close(), unraid.close(), updater.stop(), connector.close(), assistant.chatgpt.close(), terminals.close(), new Promise((r) => server.close(r)))}
+	return {url: `http://${host}:${server.address().port}`, accounts, terminals, alerts, audit, health, close: () => (sampler.stop(), alerts.close(), health.close(), apps.close(), backups.close(), unraid.close(), updater.stop(), connector.close(), assistant.chatgpt.close(), terminals.close(), new Promise((r) => server.close(r)))}
 }
 
 // The "always use the secure address" choice made while omarchyd kept its own certificate folder.

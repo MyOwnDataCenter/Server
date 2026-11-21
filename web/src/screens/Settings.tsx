@@ -88,7 +88,7 @@ function describeSession(s: ActiveSession) {
 	return {icon: 'browser' as IconName, name: `${browser}${os ? ` on ${os}` : ''}`, detail: ''}
 }
 
-type SheetId = null | 'name' | 'password' | '2fa' | 'hostname' | 'wifi' | 'logs' | 'reset'
+type SheetId = null | 'name' | 'password' | '2fa' | 'hostname' | 'wifi' | 'logs' | 'reset' | 'alerts' | 'health' | 'audit'
 
 export function Settings({prefs, setPrefs, onBack, onSignedOut}: {prefs: Prefs; setPrefs: (p: Prefs) => void; onBack: () => void; onSignedOut: () => void}) {
 	const boot = useBootstrap()
@@ -392,6 +392,9 @@ export function Settings({prefs, setPrefs, onBack, onSignedOut}: {prefs: Prefs; 
 			{owner && <SecurityGroup />}
 
 			<Group title="More">
+				{owner && <Row icon="bell" color="var(--orange, #f59e0b)" label="Alerts & push" onClick={() => setSheet('alerts')} />}
+				{owner && <Row icon="pulse" color="var(--green)" label="Server health" onClick={() => setSheet('health')} />}
+				{owner && <Row icon="history" color="var(--blue)" label="Activity log" onClick={() => setSheet('audit')} />}
 				{owner && <Row icon="logfile" color="#8e8e93" label="System logs" onClick={() => setSheet('logs')} />}
 				{owner && <Row icon="restart" color="var(--peach)" label="Restart server" onClick={() => power('restart')} />}
 				{owner && <Row icon="power" color="var(--red)" label="Shut down server" onClick={() => power('shutdown')} />}
@@ -406,6 +409,9 @@ export function Settings({prefs, setPrefs, onBack, onSignedOut}: {prefs: Prefs; 
 			<TwoFactorSheet open={sheet === '2fa'} enabled={!!twoFactor.data} onClose={close} />
 			<HostnameSheet open={sheet === 'hostname'} current={hostname.data ?? ''} onClose={close} />
 			{sheet === 'wifi' && <WifiSheet onClose={close} connected={wifi.data?.status === 'connected' ? wifi.data.ssid : undefined} />}
+			{sheet === 'alerts' && <AlertsSheet onClose={close} />}
+			{sheet === 'health' && <HealthSheet onClose={close} />}
+			{sheet === 'audit' && <AuditSheet onClose={close} />}
 			{sheet === 'logs' && <LogsSheet onClose={close} />}
 			<ResetSheet
 				open={sheet === 'reset'}
@@ -1514,5 +1520,335 @@ function SecurityGroup() {
 			<Row icon="key" color="var(--blue)" label="Always use the secure address" trailing={<Switch on={!!s?.alwaysHttps} disabled={!s} label="Always use the secure address" onChange={(v) => set({alwaysHttps: v}, v ? 'Pages now open over https://' : 'http:// pages allowed again')} />} />
 			<Row icon="clock" color="var(--peach)" label="Lock after viewing remotely" trailing={<Switch on={s?.lockAfterRemote !== false} disabled={!s} label="Lock after viewing remotely" onChange={(v) => set({lockAfterRemote: v}, v ? 'The screen locks after remote viewing' : 'The screen stays signed in')} />} />
 		</Group>
+	)
+}
+
+function b64urlToBytes(s: string) {
+	const pad = '='.repeat((4 - (s.length % 4)) % 4)
+	const raw = atob((s + pad).replace(/-/g, '+').replace(/_/g, '/'))
+	return Uint8Array.from(raw, (c) => c.charCodeAt(0))
+}
+
+function bytesToB64url(buf: ArrayBuffer | null) {
+	if (!buf) return ''
+	let s = ''
+	for (const b of new Uint8Array(buf)) s += String.fromCharCode(b)
+	return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
+}
+
+type AlertsSettings = {
+	pushEnabled: boolean
+	subscriptions: {id: string; label: string; createdAt: number}[]
+	vapidPublicKey: string | null
+	smtp: {enabled: boolean; host: string; port: number; secure: boolean; starttls: boolean; username: string; hasPassword: boolean; from: string; to: string}
+	quietHours: {enabled: boolean; startHour: number; endHour: number}
+	dailyCap: number
+}
+type AlertHistoryItem = {id: string; severity: string; title: string; message: string; at: number; channels: string[]}
+
+function AlertsSheet({onClose}: {onClose: () => void}) {
+	const cfg = useQ<AlertsSettings>('alerts.settings')
+	const history = useQ<AlertHistoryItem[]>('alerts.history')
+	const save = useSave()
+	const toast = useToast()
+	const qc = useQueryClient()
+	const [pushBusy, setPushBusy] = useState(false)
+	const [smtpEnabled, setSmtpEnabled] = useState(false)
+	const [host, setHost] = useState('')
+	const [port, setPort] = useState('587')
+	const [secure, setSecure] = useState(false)
+	const [starttls, setStarttls] = useState(true)
+	const [username, setUsername] = useState('')
+	const [password, setPassword] = useState('')
+	const [from, setFrom] = useState('')
+	const [to, setTo] = useState('')
+	const [quietEnabled, setQuietEnabled] = useState(false)
+	const [quietStart, setQuietStart] = useState('22')
+	const [quietEnd, setQuietEnd] = useState('7')
+
+	useEffect(() => {
+		if (!cfg.data) return
+		setSmtpEnabled(cfg.data.smtp.enabled)
+		setHost(cfg.data.smtp.host)
+		setPort(String(cfg.data.smtp.port || 587))
+		setSecure(!!cfg.data.smtp.secure)
+		setStarttls(cfg.data.smtp.starttls !== false)
+		setUsername(cfg.data.smtp.username)
+		setPassword('')
+		setFrom(cfg.data.smtp.from)
+		setTo(cfg.data.smtp.to)
+		setQuietEnabled(cfg.data.quietHours.enabled)
+		setQuietStart(String(cfg.data.quietHours.startHour))
+		setQuietEnd(String(cfg.data.quietHours.endHour))
+	}, [cfg.data])
+
+	const enablePush = async () => {
+		if (!('serviceWorker' in navigator) || !('PushManager' in window)) {
+			toast('Push notifications need a browser with Push support over HTTPS', true)
+			return
+		}
+		setPushBusy(true)
+		try {
+			const perm = await Notification.requestPermission()
+			if (perm !== 'granted') throw new Error('Notification permission wasn’t granted')
+			const {publicKey} = await query<{publicKey: string}>('alerts.vapidKey')
+			const reg = await navigator.serviceWorker.ready
+			const existing = await reg.pushManager.getSubscription()
+			const sub = existing ?? (await reg.pushManager.subscribe({userVisibleOnly: true, applicationServerKey: b64urlToBytes(publicKey)}))
+			await mutate('alerts.subscribePush', {
+				endpoint: sub.endpoint,
+				p256dh: bytesToB64url(sub.getKey('p256dh')),
+				auth: bytesToB64url(sub.getKey('auth')),
+				label: navigator.platform || 'This device',
+			})
+			qc.invalidateQueries({queryKey: ['alerts.settings']})
+			toast('Push notifications enabled on this device')
+		} catch (e) {
+			toast((e as Error).message, true)
+		} finally {
+			setPushBusy(false)
+		}
+	}
+
+	const saveForm = (e: FormEvent) => {
+		e.preventDefault()
+		save.mutate({
+			path: 'alerts.saveSettings',
+			input: {
+				smtp: {enabled: smtpEnabled, host, port: Number(port) || 587, secure, starttls, username, ...(password ? {password} : {}), from, to},
+				quietHours: {
+					enabled: quietEnabled,
+					startHour: Number.isFinite(Number(quietStart)) && quietStart.trim() !== '' ? Number(quietStart) : 22,
+					endHour: Number.isFinite(Number(quietEnd)) && quietEnd.trim() !== '' ? Number(quietEnd) : 7,
+				},
+			},
+			done: 'Alert settings saved',
+			refresh: ['alerts.settings'],
+		})
+	}
+
+	return (
+		<Sheet open onClose={onClose} label="Alerts & push" tall>
+			<SheetHeader title="Alerts & push" subtitle="Get notified when a server or computer needs attention" onClose={onClose} />
+			<Group title="Browser push" footer="Requires HTTPS. Critical alerts bypass quiet hours.">
+				<Row
+					icon="bell"
+					color="var(--orange, #f59e0b)"
+					label="Push on this device"
+					value={cfg.data?.subscriptions.length ? `${cfg.data.subscriptions.length} subscribed` : 'Off'}
+					trailing={
+						<button className="btn small primary" disabled={pushBusy} onClick={enablePush}>
+							{pushBusy ? <span className="spinner" /> : 'Enable'}
+						</button>
+					}
+				/>
+				{(cfg.data?.subscriptions ?? []).map((s) => (
+					<Row
+						key={s.id}
+						icon="phone"
+						color="var(--blue)"
+						label={s.label}
+						sub={`Added ${ago(s.createdAt)}`}
+						trailing={
+							<button className="btn get" style={{color: 'var(--red)'}} onClick={() => save.mutate({path: 'alerts.unsubscribePush', input: {id: s.id}, done: 'Device removed', refresh: ['alerts.settings']})}>
+								Remove
+							</button>
+						}
+					/>
+				))}
+				{(cfg.data?.subscriptions.length ?? 0) > 0 && (
+					<Row
+						icon="check"
+						color="var(--green)"
+						label="Send test push"
+						onClick={() => save.mutate({path: 'alerts.testPush', done: 'Test push sent'})}
+					/>
+				)}
+			</Group>
+
+			<form onSubmit={saveForm}>
+				<Group title="Quiet hours">
+					<Row icon="clock" color="var(--purple)" label="Mute non-critical alerts at night" trailing={<Switch on={quietEnabled} label="Mute non-critical alerts at night" onChange={setQuietEnabled} />} />
+					{quietEnabled && (
+						<div className="row static" style={{gap: 10}}>
+							<Field id="qh-start" label="Start hour (0–23)" value={quietStart} onChange={(e) => setQuietStart(e.target.value)} />
+							<Field id="qh-end" label="End hour (0–23)" value={quietEnd} onChange={(e) => setQuietEnd(e.target.value)} />
+						</div>
+					)}
+				</Group>
+
+				<Group title="Email (SMTP)">
+					<Row icon="share" color="var(--blue)" label="Email alerts" trailing={<Switch on={smtpEnabled} label="Email alerts" onChange={setSmtpEnabled} />} />
+					<div style={{padding: '10px 14px'}}>
+						<Field id="smtp-host" label="SMTP host" placeholder="smtp.fastmail.com" value={host} onChange={(e) => setHost(e.target.value)} autoCapitalize="off" autoCorrect="off" />
+						<Field id="smtp-port" label="Port" placeholder="587" value={port} onChange={(e) => setPort(e.target.value)} />
+						<Field id="smtp-from" label="From" placeholder="server@example.com" value={from} onChange={(e) => setFrom(e.target.value)} autoCapitalize="off" />
+						<Field id="smtp-to" label="To" placeholder="you@example.com" value={to} onChange={(e) => setTo(e.target.value)} autoCapitalize="off" />
+						<Field id="smtp-user" label="Username (optional)" value={username} onChange={(e) => setUsername(e.target.value)} autoCapitalize="off" />
+						<Field id="smtp-pass" label="Password (optional)" type="password" placeholder={cfg.data?.smtp.hasPassword ? 'Saved — leave blank to keep' : ''} value={password} onChange={(e) => setPassword(e.target.value)} />
+					</div>
+					<Row icon="shield" color="var(--green)" label="Implicit TLS (port 465)" trailing={<Switch on={secure} label="Implicit TLS (port 465)" onChange={(v) => (setSecure(v), v && setStarttls(false))} />} />
+					<Row icon="shield" color="var(--teal)" label="Require STARTTLS (port 587)" trailing={<Switch on={starttls} label="Require STARTTLS (port 587)" disabled={secure} onChange={setStarttls} />} />
+				</Group>
+
+				<div style={{display: 'flex', gap: 8, marginTop: 10}}>
+					<button className="btn primary" style={{flex: 1}} disabled={save.isPending}>
+						Save settings
+					</button>
+					<button
+						type="button"
+						className="btn"
+						disabled={save.isPending || !host || !from || !to}
+						onClick={() => save.mutate({path: 'alerts.testEmail', done: 'Test email sent'})}
+					>
+						Test email
+					</button>
+				</div>
+			</form>
+
+			{(history.data?.length ?? 0) > 0 && (
+				<Group title="Recent alerts">
+					{(history.data ?? []).slice(0, 15).map((h) => (
+						<div className="row static" key={h.id}>
+							<span className="row-ico" style={{'--c': h.severity === 'critical' ? 'var(--red)' : 'var(--orange, #f59e0b)'} as CSSProperties}>
+								<Icon name="alert" size={18} />
+							</span>
+							<span className="main">
+								<b>{h.title}</b>
+								<span>{h.message} · {ago(h.at)}</span>
+							</span>
+						</div>
+					))}
+				</Group>
+			)}
+		</Sheet>
+	)
+}
+
+type HealthDetail = {
+	ok: boolean
+	status: string
+	version: string
+	uptimeSeconds: number
+	checks: {name: string; ok: boolean; detail: string}[]
+	deadman: {enabled: boolean; configured: boolean; host: string; intervalMinutes: number; allowHttp: boolean; lastOkAt: number | null; lastError: string | null}
+}
+
+function HealthSheet({onClose}: {onClose: () => void}) {
+	const health = useQ<HealthDetail>('health.detail', undefined, {refetchInterval: 15_000})
+	const save = useSave()
+	const [enabled, setEnabled] = useState(false)
+	const [url, setUrl] = useState('')
+	const [intervalMinutes, setIntervalMinutes] = useState('5')
+	useEffect(() => {
+		if (!health.data) return
+		setEnabled(health.data.deadman.enabled)
+		setIntervalMinutes(String(health.data.deadman.intervalMinutes || 5))
+	}, [health.data])
+
+	const submit = (e: FormEvent) => {
+		e.preventDefault()
+		save.mutate({
+			path: 'health.setDeadman',
+			input: {enabled, ...(url.trim() ? {url: url.trim()} : {}), intervalMinutes: Number(intervalMinutes) || 5},
+			done: 'Heartbeat saved',
+			refresh: ['health.detail'],
+		})
+		setUrl('')
+	}
+
+	return (
+		<Sheet open onClose={onClose} label="Server health" tall>
+			<SheetHeader title="Server health" subtitle="Self-check status and outbound heartbeat" onClose={onClose} />
+			<Group title="Status" footer="External monitors can also poll GET /api/health without signing in.">
+				<Row
+					icon={health.data?.ok ? 'check' : 'alert'}
+					color={health.data?.ok ? 'var(--green)' : 'var(--red)'}
+					label="Overall health"
+					value={health.data ? (health.data.ok ? 'Healthy' : 'Degraded') : 'Checking…'}
+				/>
+				{(health.data?.checks ?? []).map((c) => (
+					<Row key={c.name} icon={c.ok ? 'check' : 'alert'} color={c.ok ? 'var(--green)' : 'var(--red)'} label={c.name} sub={c.detail} />
+				))}
+			</Group>
+
+			<form onSubmit={submit}>
+				<Group
+					title="Dead-man heartbeat"
+					footer="Pings an external monitor like Healthchecks.io on a timer while this server is healthy. If the server goes down, the monitor alerts you."
+				>
+					<Row icon="pulse" color="var(--green)" label="Enable heartbeat ping" trailing={<Switch on={enabled} label="Enable heartbeat ping" onChange={setEnabled} />} />
+					{health.data?.deadman.configured && (
+						<Row
+							icon="network"
+							color="var(--blue)"
+							label="Configured target"
+							value={health.data.deadman.host}
+							sub={health.data.deadman.lastError ? `Last error: ${health.data.deadman.lastError}` : health.data.deadman.lastOkAt ? `Last ping ${ago(health.data.deadman.lastOkAt)}` : 'Not pinged yet'}
+						/>
+					)}
+					<div style={{padding: '10px 14px'}}>
+						<Field
+							id="dm-url"
+							label="Heartbeat URL (HTTPS)"
+							type="url"
+							placeholder={health.data?.deadman.configured ? 'Saved (hidden) — paste to replace' : 'https://hc-ping.com/...'}
+							value={url}
+							onChange={(e) => setUrl(e.target.value)}
+							autoCapitalize="off"
+							autoCorrect="off"
+						/>
+						<Field id="dm-int" label="Interval (minutes)" value={intervalMinutes} onChange={(e) => setIntervalMinutes(e.target.value)} />
+					</div>
+				</Group>
+				<div style={{display: 'flex', gap: 8, marginTop: 10}}>
+					<button className="btn primary" style={{flex: 1}} disabled={save.isPending}>
+						Save heartbeat
+					</button>
+					{health.data?.deadman.configured && (
+						<button type="button" className="btn" disabled={save.isPending} onClick={() => save.mutate({path: 'health.testDeadman', done: 'Heartbeat ping succeeded', refresh: ['health.detail']})}>
+							Test ping
+						</button>
+					)}
+				</div>
+			</form>
+		</Sheet>
+	)
+}
+
+type AuditRow = {seq: number; at: number; actor: string; action: string; target?: string; ok: boolean}
+type AuditVerify = {ok: boolean; count: number; brokenAt?: number; reason?: string}
+
+function AuditSheet({onClose}: {onClose: () => void}) {
+	const verify = useQ<AuditVerify>('audit.verify')
+	const rows = useQ<AuditRow[]>('audit.list', {limit: 100})
+	return (
+		<Sheet open onClose={onClose} label="Activity log" tall>
+			<SheetHeader title="Activity log" subtitle="Tamper-evident hash-chained record of owner actions" onClose={onClose} />
+			<Group title="Integrity">
+				<Row
+					icon={verify.data?.ok ? 'shield' : 'alert'}
+					color={verify.data?.ok ? 'var(--green)' : 'var(--red)'}
+					label={verify.data ? (verify.data.ok ? `Chain verified · ${verify.data.count} entries` : `Chain broken at #${verify.data.brokenAt}`) : 'Verifying…'}
+					sub={verify.data && !verify.data.ok ? verify.data.reason : 'Each entry hashes the previous entry so edits can be detected.'}
+					trailing={
+						<a className="btn small" href="/api/audit/export" download="omarchy-server-audit.ndjson">
+							Export
+						</a>
+					}
+				/>
+			</Group>
+			<Group title="Recent events">
+				{(rows.data ?? []).map((r) => (
+					<div className="row static" key={r.seq}>
+						<span className="main">
+							<b style={{fontWeight: 550}}>{r.action}{r.target ? ` · ${r.target}` : ''}</b>
+							<span>#{r.seq} · {r.actor} · {ago(r.at)}</span>
+						</span>
+					</div>
+				))}
+				{rows.isSuccess && (rows.data?.length ?? 0) === 0 && <div className="row static muted">No recorded actions yet.</div>}
+			</Group>
+		</Sheet>
 	)
 }

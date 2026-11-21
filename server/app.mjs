@@ -282,6 +282,20 @@ export const ALLOWED = {
 	// Settings: advanced (omarchyd itself re-checks the password for factory reset)
 	'system.logs': 'query',
 	'system.factoryReset': 'mutation',
+	// Alerts, health & audit log (owner only, checked in omarchyd)
+	'alerts.settings': 'query',
+	'alerts.saveSettings': 'mutation',
+	'alerts.vapidKey': 'query',
+	'alerts.subscribePush': 'mutation',
+	'alerts.unsubscribePush': 'mutation',
+	'alerts.testPush': 'mutation',
+	'alerts.testEmail': 'mutation',
+	'alerts.history': 'query',
+	'audit.list': 'query',
+	'audit.verify': 'query',
+	'health.detail': 'query',
+	'health.setDeadman': 'mutation',
+	'health.testDeadman': 'mutation',
 	// Files (NAS)
 	'files.list': 'query',
 	'files.search': 'query',
@@ -330,7 +344,7 @@ export const ALLOWED = {
 }
 
 // Long-running mutations: omarchyd answers when the operation finishes.
-export const SLOW = new Set(['unraid.connect', 'unraid.scan', 'backups.configure', 'backups.shares', 'backups.restoreApp', 'backups.connectExisting', 'backups.snapshots', 'backups.computerSnapshots', 'backups.setComputer', 'backups.computerFolders', 'storage.growSystem', 'system.replaceCertificate', 'system.desktopSignIn', 'system.desktopShare', 'omarchy.removeTheme', 'storage.disks', 'storage.createPool', 'storage.addToPool', 'storage.importPool', 'storage.forgetPool', 'files.addShare', 'files.removeShare', 'files.copy', 'files.unarchive', 'files.getThumbnail', 'files.move', 'files.delete', 'files.emptyTrash', 'files.search', 'files.list', 'apps.install', 'apps.update', 'apps.uninstall', 'appStore.registry', 'appStore.app', 'appStore.addRepository', 'appStore.refresh', 'omarchy.plugins', 'omarchy.installPlugin', 'files.updateShare', 'files.setSharePassword', 'apps.logs', 'swarm.action', 'swarm.fleetAction', 'swarm.updateConnector', 'swarm.updateAllConnectors', 'system.update', 'system.logs', 'machines.create', 'machines.uninstall', 'machines.snapshot', 'machines.revertSnapshot', 'machines.deleteSnapshot', 'machines.resizeDisk', 'machines.addDisk', 'machines.restart', 'machines.updateCloudInit', 'machines.details', 'machines.node', 'wifi.connect', 'wifi.networks', 'system.setHostname', 'hardware.internalStorage.getDevices', 'hardware.raid.addDevice', 'hardware.raid.addMirror', 'hardware.raid.addAccelerator', 'hardware.raid.replaceDevice', 'hardware.raid.transitionToFailsafeRaidz', 'storage.unmount', 'storage.mount', 'storage.format', 'swarm.storage.disks', 'swarm.storage.unmount', 'swarm.storage.mount', 'swarm.storage.format', 'swarm.storage.pools', 'swarm.storage.importable', 'swarm.storage.createPool', 'swarm.storage.addToPool', 'swarm.storage.importPool', 'swarm.storage.forgetPool', 'swarm.storage.scrub', 'swarm.services.list', 'swarm.services.logs', 'swarm.services.control', 'swarm.files.list', 'swarm.files.copyToServer', 'swarm.files.copyFromServer', 'assistant.approve', 'clips.paste', 'clips.addFile', 'clips.fleetList'])
+export const SLOW = new Set(['alerts.testPush', 'alerts.testEmail', 'health.testDeadman', 'unraid.connect', 'unraid.scan', 'backups.configure', 'backups.shares', 'backups.restoreApp', 'backups.connectExisting', 'backups.snapshots', 'backups.computerSnapshots', 'backups.setComputer', 'backups.computerFolders', 'storage.growSystem', 'system.replaceCertificate', 'system.desktopSignIn', 'system.desktopShare', 'omarchy.removeTheme', 'storage.disks', 'storage.createPool', 'storage.addToPool', 'storage.importPool', 'storage.forgetPool', 'files.addShare', 'files.removeShare', 'files.copy', 'files.unarchive', 'files.getThumbnail', 'files.move', 'files.delete', 'files.emptyTrash', 'files.search', 'files.list', 'apps.install', 'apps.update', 'apps.uninstall', 'appStore.registry', 'appStore.app', 'appStore.addRepository', 'appStore.refresh', 'omarchy.plugins', 'omarchy.installPlugin', 'files.updateShare', 'files.setSharePassword', 'apps.logs', 'swarm.action', 'swarm.fleetAction', 'swarm.updateConnector', 'swarm.updateAllConnectors', 'system.update', 'system.logs', 'machines.create', 'machines.uninstall', 'machines.snapshot', 'machines.revertSnapshot', 'machines.deleteSnapshot', 'machines.resizeDisk', 'machines.addDisk', 'machines.restart', 'machines.updateCloudInit', 'machines.details', 'machines.node', 'wifi.connect', 'wifi.networks', 'system.setHostname', 'hardware.internalStorage.getDevices', 'hardware.raid.addDevice', 'hardware.raid.addMirror', 'hardware.raid.addAccelerator', 'hardware.raid.replaceDevice', 'hardware.raid.transitionToFailsafeRaidz', 'storage.unmount', 'storage.mount', 'storage.format', 'swarm.storage.disks', 'swarm.storage.unmount', 'swarm.storage.mount', 'swarm.storage.format', 'swarm.storage.pools', 'swarm.storage.importable', 'swarm.storage.createPool', 'swarm.storage.addToPool', 'swarm.storage.importPool', 'swarm.storage.forgetPool', 'swarm.storage.scrub', 'swarm.services.list', 'swarm.services.logs', 'swarm.services.control', 'swarm.files.list', 'swarm.files.copyToServer', 'swarm.files.copyFromServer', 'assistant.approve', 'clips.paste', 'clips.addFile', 'clips.fleetList'])
 export const timeoutFor = (path) => (SLOW.has(path) ? 30 * 60 * 1000 : 20_000)
 
 // An IPv6 address in a URL needs brackets; req.hostname and URL.hostname may already have them.
@@ -432,6 +446,18 @@ export function createApp({store, staticDir, fetchImpl = fetch, secureCookies = 
 		res.send(ca)
 	})
 	app.get('/api/tls/status', (_req, res) => res.json({available: !!tls?.get(), alwaysHttps: !!tls?.policy?.().alwaysHttps}))
+	// Public minimal health endpoint for external monitors (never exposes internal details).
+	app.get('/api/health', async (_req, res) => {
+		const backend = getClient()
+		if (!backend) return res.status(200).json({ok: true, status: 'unconfigured', version: VERSION})
+		try {
+			const r = await fetchImpl(`${backend.baseUrl}/api/health`, {signal: AbortSignal.timeout(5_000)})
+			const body = await r.json().catch(() => ({ok: r.ok, status: r.ok ? 'ok' : 'degraded'}))
+			res.status(r.ok ? 200 : 503).json({ok: !!body.ok, status: body.status || (r.ok ? 'ok' : 'degraded'), version: body.version || VERSION})
+		} catch {
+			res.status(503).json({ok: false, status: 'unreachable', version: VERSION})
+		}
+	})
 	// "Always use the secure address" (Settings → Security): page loads over http:// go to https://.
 	// The certificate download above stays reachable either way.
 	app.use((req, res, next) => {
@@ -816,6 +842,30 @@ export function createApp({store, staticDir, fetchImpl = fetch, secureCookies = 
 			res.send(Buffer.from(await r.arrayBuffer()))
 		} catch {
 			res.status(404).end()
+		}
+	})
+
+	// Owner-only audit log export (NDJSON attachment).
+	api.get('/audit/export', async (req, res) => {
+		const session = requireSession(req, res)
+		if (!session) return
+		const backend = getClient()
+		try {
+			const token = await accessTokenFor(req.sid, session)
+			const r = await fetchImpl(`${backend.baseUrl}/api/audit/export`, {
+				method: 'GET',
+				headers: {authorization: `Bearer ${token}`},
+				signal: AbortSignal.timeout(30_000),
+			})
+			const buf = Buffer.from(await r.arrayBuffer())
+			res.status(r.status)
+			for (const h of ['content-type', 'content-disposition', 'cache-control']) {
+				const v = r.headers.get(h)
+				if (v) res.set(h, v)
+			}
+			res.end(buf)
+		} catch {
+			res.status(502).json({error: {code: 'UNAVAILABLE', message: 'Couldn’t export the activity log'}})
 		}
 	})
 
