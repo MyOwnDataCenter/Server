@@ -582,6 +582,34 @@ export function createConnector({dataDir, tlsDir, connectorDir = fileURLToPath(n
 		if (name === 'suspend') return call(a.id, 'suspend', {}, 30_000)
 		throw new RpcError('BAD_REQUEST', 'Unknown action')
 	}
+	async function fleetAction(input = {}) {
+		await loaded
+		const name = String(input?.name ?? '')
+		if (!['theme-set', 'plugin-install', 'plugin-remove', 'update-connector'].includes(name)) throw new RpcError('BAD_REQUEST', 'Unknown fleet action')
+		const wanted = Array.isArray(input?.ids) && input.ids.length ? new Set(input.ids.map(String)) : null
+		const targets = wanted ? state.agents.filter((a) => wanted.has(a.id)) : [...state.agents]
+		const ok = []
+		const skipped = []
+		const failed = []
+		for (const a of targets) {
+			if (!live.has(a.id)) {
+				skipped.push({id: a.id, name: a.name, reason: 'Offline'})
+				continue
+			}
+			if (!may(a, 'manage')) {
+				skipped.push({id: a.id, name: a.name, reason: 'Manage isn’t switched on'})
+				continue
+			}
+			try {
+				if (name === 'update-connector') await updateConnector({id: a.id})
+				else await action({id: a.id, name, theme: input?.theme, pluginId: input?.pluginId})
+				ok.push({id: a.id, name: a.name})
+			} catch (e) {
+				failed.push({id: a.id, name: a.name, error: String(e?.message ?? 'Action failed')})
+			}
+		}
+		return {ok, skipped, failed}
+	}
 
 	// ---- connector side (HTTP enroll + WebSocket) ----------------------------------------------
 	const enrollTries = []
@@ -1096,6 +1124,7 @@ export function createConnector({dataDir, tlsDir, connectorDir = fileURLToPath(n
 			'swarm.rename': {kind: 'mutation', run: rename},
 			'swarm.setAbilities': {kind: 'mutation', run: setAbilities},
 			'swarm.action': {kind: 'mutation', run: action},
+			'swarm.fleetAction': {kind: 'mutation', run: fleetAction},
 			'swarm.storage.status': {
 				kind: 'query',
 				run: async (input) => {

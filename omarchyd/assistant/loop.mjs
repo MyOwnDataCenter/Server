@@ -206,13 +206,61 @@ export function cardFor(name, args, names = {}) {
 		const n = Array.isArray(a.portForwards) ? a.portForwards.length : 0
 		return {title: `Change port forwards on ${vm}`, detail: n ? `${n} port forward${n === 1 ? '' : 's'}` : ''}
 	}
-	if (name === 'swarm_action') {
+	if (name === 'swarm_action' || name === 'swarm_power') {
 		const host = lookup(maps.swarm, a.id, 'this computer')
 		if (a.name === 'reboot') return {title: `Restart ${host}`, detail: ''}
+		if (a.name === 'shutdown') return {title: `Shut down ${host}`, detail: ''}
+		if (a.name === 'suspend') return {title: `Suspend ${host}`, detail: ''}
 		if (a.name === 'theme-set') return {title: `Set ${slugLabel(a.theme, 'a theme')} on ${host}`, detail: ''}
 		if (a.name === 'plugin-install') return {title: `Install ${slugLabel(a.pluginId, 'a plugin')} on ${host}`, detail: ''}
 		if (a.name === 'plugin-remove') return {title: `Remove ${slugLabel(a.pluginId, 'a plugin')} from ${host}`, detail: ''}
 		return {title: `Manage ${host}`, detail: ''}
+	}
+	if (name === 'swarm_wake') {
+		const host = lookup(maps.swarm, a.id, 'this computer')
+		return {title: `Wake ${host}`, detail: a.mac ? `Wake-on-LAN to ${a.mac}` : 'Wake-on-LAN'}
+	}
+	if (name === 'swarm_update_connector') {
+		const host = lookup(maps.swarm, a.id, 'this computer')
+		return {title: `Update the connector on ${host}`, detail: ''}
+	}
+	if (name === 'swarm_update_all_connectors') {
+		return {title: 'Update all outdated swarm connectors', detail: ''}
+	}
+	if (name === 'swarm_storage_mount') {
+		const host = lookup(maps.swarm, a.id, 'this computer')
+		return {title: `Mount ${a.device || 'drive'} on ${host}`, detail: ''}
+	}
+	if (name === 'swarm_storage_unmount') {
+		const host = lookup(maps.swarm, a.id, 'this computer')
+		return {title: `Unmount ${a.device || 'drive'} on ${host}`, detail: ''}
+	}
+	if (name === 'swarm_storage_scrub') {
+		const host = lookup(maps.swarm, a.id, 'this computer')
+		return {title: `Scrub pool ${a.name || ''} on ${host}`.trim(), detail: a.kind ? String(a.kind).toUpperCase() : ''}
+	}
+	if (name === 'swarm_storage_setSleep') {
+		const host = lookup(maps.swarm, a.id, 'this computer')
+		const mins = Number(a.minutes)
+		return {title: `Set drive sleep on ${host}`, detail: `${a.device || 'drive'} · ${mins > 0 ? `${mins} min` : 'never sleep'}`}
+	}
+	if (name === 'swarm_service_control') {
+		const host = lookup(maps.swarm, a.id, 'this computer')
+		const verb = a.action === 'stop' ? 'Stop' : a.action === 'restart' ? 'Restart' : 'Start'
+		return {title: `${verb} ${a.name || 'service'} on ${host}`, detail: a.kind === 'container' ? 'Container' : 'User service'}
+	}
+	if (name === 'swarm_backup_run') {
+		const host = lookup(maps.swarm, a.id, 'this computer')
+		return {title: `Back up ${host} now`, detail: ''}
+	}
+	if (name === 'swarm_fleet_action') {
+		const ids = Array.isArray(a.ids) ? a.ids : []
+		const target = ids.length ? ids.map((x) => lookup(maps.swarm, x, 'a computer')).join(', ') : 'all online computers'
+		if (a.name === 'theme-set') return {title: `Set ${slugLabel(a.theme, 'a theme')} across the swarm`, detail: target}
+		if (a.name === 'plugin-install') return {title: `Install ${slugLabel(a.pluginId, 'a plugin')} across the swarm`, detail: target}
+		if (a.name === 'plugin-remove') return {title: `Remove ${slugLabel(a.pluginId, 'a plugin')} across the swarm`, detail: target}
+		if (a.name === 'update-connector') return {title: 'Update connectors across the swarm', detail: target}
+		return {title: 'Run a swarm fleet action', detail: target}
 	}
 	if (name === 'swarm_rename') {
 		const host = lookup(maps.swarm, a.id, 'this computer')
@@ -599,7 +647,7 @@ export function createLoop({keys, conversations, runProcedure, fetchImpl, mcpTar
 	async function runTool(tool, auth, signal) {
 		if (signal?.aborted) throw abortError()
 		const read = lookupTool(tool.name)
-		if (!read) return toolOutcome('unknown tool', 'done')
+		if (!read || (read.ownerOnly && auth.role !== 'owner')) return toolOutcome('unknown tool', 'done')
 		let args
 		try {
 			args = parseArgs(tool.arguments)

@@ -31,9 +31,34 @@ export const READ_TOOLS = [
 	tool('machines_capabilities', 'machines.capabilities', 'What this server can give a virtual machine'),
 	tool('usb_list', 'usb.list', 'USB serial and Zigbee sticks plugged into this server, and which app or virtual machine holds each one'),
 	tool('swarm_list', 'swarm.list', 'Computers in the Local swarm', {}, true),
+	tool('swarm_alerts', 'swarm.alerts', 'Active health alerts across computers in the Local swarm (offline nodes, high disk usage, high temperature, waiting updates, outdated connectors)', {}, true),
+	tool('swarm_history', 'swarm.history', 'Recent CPU, memory, disk, GPU and temperature history for one Local swarm computer', {
+		id: {type: 'string', description: 'Computer id from swarm_list'},
+		range: {type: 'string', enum: ['1h', '24h'], description: 'Time window: 1h or 24h'},
+	}, true),
+	tool('swarm_storage_status', 'swarm.storage.status', 'Whether storage helper and ZFS are available on a Local swarm computer', {
+		id: {type: 'string', description: 'Computer id from swarm_list'},
+	}, true),
 	tool('swarm_storage_disks', 'swarm.storage.disks', 'Live disks on a Local swarm computer, including unmounted extra drives. Use this for mount state; swarm_list metrics only show mounted filesystems.', {
 		id: {type: 'string', description: 'Computer id from swarm_list'},
 	}, true),
+	tool('swarm_storage_pools', 'swarm.storage.pools', 'Storage pools (Btrfs/ZFS) on a Local swarm computer', {
+		id: {type: 'string', description: 'Computer id from swarm_list'},
+	}, true),
+	tool('swarm_services_list', 'swarm.services.list', 'User systemd services, failed system units, and containers on a Local swarm computer', {
+		id: {type: 'string', description: 'Computer id from swarm_list'},
+	}, true),
+	tool('swarm_service_logs', 'swarm.services.logs', 'Recent logs for a service or container on a Local swarm computer', {
+		id: {type: 'string', description: 'Computer id from swarm_list'},
+		kind: {type: 'string', enum: ['user', 'system', 'container']},
+		name: {type: 'string', description: 'Unit or container name'},
+		lines: {type: 'integer', description: 'Number of lines (10-1000)'},
+	}, true),
+	tool('swarm_files_list', 'swarm.files.list', 'List files and folders inside /Home or /Pools on a Local swarm computer', {
+		id: {type: 'string', description: 'Computer id from swarm_list'},
+		path: {type: 'string', description: 'Virtual path such as /Home or /Pools'},
+	}, true),
+	tool('swarm_backups_status', 'backups.computers', 'Backup schedule and status for Local swarm computers', {}, true),
 	tool('omarchy_plugins', 'omarchy.plugins', 'Omarchy plugins that can be installed', {
 		q: {type: 'string'},
 		limit: {type: 'integer'},
@@ -92,11 +117,56 @@ export const WRITE_TOOLS = [
 	mutation('usb_detach', 'usb.detach', 'Unbind a host USB stick from the app or virtual machine that holds it. A running app may need a restart.', {
 		deviceId: {type: 'string', description: 'Stable USB id from usb_list'},
 	}, true),
-	mutation('swarm_action', 'swarm.action', 'Install a plugin, set a theme, or reboot another Local swarm computer — not this server’s Ubuntu vs Hyprland layout', {
+	mutation('swarm_action', 'swarm.action', 'Install a plugin, set a theme, or restart/suspend/shut down another Local swarm computer — not this server’s Ubuntu vs Hyprland layout', {
 		id: {type: 'string'},
-		name: {type: 'string', enum: ['plugin-install', 'plugin-remove', 'theme-set', 'reboot']},
+		name: {type: 'string', enum: ['plugin-install', 'plugin-remove', 'theme-set', 'reboot', 'shutdown', 'suspend']},
 		pluginId: {type: 'string'},
 		theme: {type: 'string'},
+	}, true),
+	mutation('swarm_power', 'swarm.action', 'Restart, suspend, or shut down a Local swarm computer', {
+		id: {type: 'string', description: 'Computer id from swarm_list'},
+		name: {type: 'string', enum: ['reboot', 'suspend', 'shutdown']},
+	}, true),
+	mutation('swarm_wake', 'swarm.wake', 'Send a Wake-on-LAN packet to wake an offline Local swarm computer', {
+		id: {type: 'string', description: 'Computer id from swarm_list'},
+		mac: {type: 'string', description: 'Optional MAC address override'},
+	}, true),
+	mutation('swarm_update_connector', 'swarm.updateConnector', 'Update the connector on one Local swarm computer', {
+		id: {type: 'string', description: 'Computer id from swarm_list'},
+	}, true),
+	mutation('swarm_update_all_connectors', 'swarm.updateAllConnectors', 'Update outdated connectors across all online manageable Local swarm computers', {}, true),
+	mutation('swarm_storage_mount', 'swarm.storage.mount', 'Mount an extra drive on a Local swarm computer', {
+		id: {type: 'string', description: 'Computer id from swarm_list'},
+		device: {type: 'string', description: 'Device path such as /dev/sdb1'},
+	}, true),
+	mutation('swarm_storage_unmount', 'swarm.storage.unmount', 'Unmount an extra drive on a Local swarm computer', {
+		id: {type: 'string', description: 'Computer id from swarm_list'},
+		device: {type: 'string', description: 'Device path such as /dev/sdb1'},
+	}, true),
+	mutation('swarm_storage_scrub', 'swarm.storage.scrub', 'Run a health scrub on a storage pool on a Local swarm computer', {
+		id: {type: 'string', description: 'Computer id from swarm_list'},
+		name: {type: 'string', description: 'Pool name'},
+		kind: {type: 'string', enum: ['btrfs', 'zfs']},
+	}, true),
+	mutation('swarm_storage_setSleep', 'swarm.storage.setSleep', 'Set idle spin-down timer (minutes) for a drive on a Local swarm computer', {
+		id: {type: 'string', description: 'Computer id from swarm_list'},
+		device: {type: 'string', description: 'Device path'},
+		minutes: {type: 'integer', description: 'Idle minutes (0 disables sleep)'},
+	}, true),
+	mutation('swarm_service_control', 'swarm.services.control', 'Start, stop, or restart a user systemd service or container on a Local swarm computer', {
+		id: {type: 'string', description: 'Computer id from swarm_list'},
+		kind: {type: 'string', enum: ['user', 'container']},
+		name: {type: 'string', description: 'Unit or container name'},
+		action: {type: 'string', enum: ['start', 'stop', 'restart']},
+	}, true),
+	mutation('swarm_backup_run', 'backups.runComputer', 'Start a manual backup for a Local swarm computer', {
+		id: {type: 'string', description: 'Computer id from swarm_list'},
+	}, true),
+	mutation('swarm_fleet_action', 'swarm.fleetAction', 'Apply a theme, plugin change, or connector update across multiple Local swarm computers at once', {
+		ids: {type: 'array', items: {type: 'string'}, description: 'Computer ids from swarm_list; omit for all eligible computers'},
+		name: {type: 'string', enum: ['theme-set', 'plugin-install', 'plugin-remove', 'update-connector']},
+		theme: {type: 'string'},
+		pluginId: {type: 'string'},
 	}, true),
 	mutation('swarm_rename', 'swarm.rename', 'Rename a swarm computer', {id: {type: 'string'}, name: {type: 'string'}}, true),
 	mutation('desktop_setLayout', 'desktop.setLayout', 'Set this Omarchy Server’s desktop layout on this machine: Ubuntu (gnome: floating, rounded corners) or Hyprland (hyprland: tiling, square corners). Not a swarm theme and not omarchy_setTheme.', {
