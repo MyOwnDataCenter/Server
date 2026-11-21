@@ -104,7 +104,7 @@ describe('assistant swarm fleet tools', () => {
 		after(async () => {
 			c?.close()
 			await new Promise((r) => server?.close(r))
-			await rm(root, {recursive: true, force: true})
+			await rm(root, {recursive: true, force: true, maxRetries: 5, retryDelay: 50})
 		})
 
 		test('applies fleet theme-set to online manageable nodes and skips offline/unmanageable ones', async () => {

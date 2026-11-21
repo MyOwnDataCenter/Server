@@ -55,6 +55,7 @@ ABILITY_NAMES = ("terminal", "desktop", "manage", "storage", "backup", "services
 # read loop stays free to take acks, so a large file cannot stall the terminal or the desktop.
 FILE_CHUNK = 64 * 1024
 FILE_WINDOW = 4
+IS_MACOS = sys.platform == "darwin"
 CONFIG_DIR = os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"), "omarchy-connector")
 CONFIG = os.path.join(CONFIG_DIR, "config.json")
 CA_FILE = os.path.join(CONFIG_DIR, "server-ca.crt")
@@ -295,6 +296,85 @@ def lan_macs(list_dir=os.listdir, read_file=read, root="/sys/class/net"):
     return out[:8]
 
 
+def _listening_ports(read_file=read):
+    """Non-loopback TCP listening ports from /proc/net/tcp{,6} (zero root, stdlib only)."""
+    if IS_MACOS and read_file is read:
+        return []
+    seen, out = set(), []
+    for path, proto in (("/proc/net/tcp", "tcp"), ("/proc/net/tcp6", "tcp6")):
+        raw = read_file(path)
+        for line in (raw or "").splitlines()[1:]:
+            parts = line.split()
+            if len(parts) < 4 or parts[3] != "0A":  # 0A = TCP_LISTEN
+                continue
+            local = parts[1]
+            if ":" not in local:
+                continue
+            hex_ip, hex_port = local.split(":", 1)
+            try:
+                port = int(hex_port, 16)
+            except ValueError:
+                continue
+            if port <= 0 or port > 65535:
+                continue
+            if proto == "tcp":
+                if hex_ip.endswith("7F"):  # 127.x.x.x in little-endian hex
+                    continue
+                addr = "0.0.0.0" if hex_ip == "00000000" else "lan"
+            else:
+                if hex_ip == "00000000000000000000000001000000" or hex_ip == "0000000000000000FFFF00000100007F":
+                    continue
+                addr = "::" if hex_ip == "0" * 32 else "lan"
+            key = (port, proto, addr)
+            if key not in seen:
+                seen.add(key)
+                out.append({"port": port, "proto": proto, "addr": addr})
+    out.sort(key=lambda x: (x["port"], x["proto"]))
+    return out[:50]
+
+
+def _reboot_required(read_file=read, list_dir=os.listdir, exists=os.path.exists, kernel=None):
+    """Detect whether a kernel/system update requires a reboot (Debian/Ubuntu/Arch/Omarchy)."""
+    if IS_MACOS and read_file is read and list_dir is os.listdir:
+        return False, ""
+    if exists("/var/run/reboot-required"):
+        return True, "System updates require a restart"
+    rel = kernel if kernel is not None else os.uname().release
+    if rel and exists("/usr/lib/modules"):
+        try:
+            mods = list_dir("/usr/lib/modules")
+        except OSError:
+            mods = []
+        if mods and rel not in mods:
+            return True, f"Kernel updated (running {rel})"
+    return False, ""
+
+
+_failed_units_cache = {"at": 0.0, "count": 0}
+
+
+def host_posture(read_file=read, list_dir=os.listdir, exists=os.path.exists, kernel=None):
+    reboot_needed, reboot_reason = _reboot_required(read_file=read_file, list_dir=list_dir, exists=exists, kernel=kernel)
+    failed = 0
+    if not IS_MACOS and shutil.which("systemctl") and read_file is read:
+        now_m = time.monotonic()
+        if now_m - _failed_units_cache["at"] >= 60.0 or _failed_units_cache["at"] == 0.0:
+            try:
+                r = subprocess.run(["systemctl", "--system", "list-units", "--type=service", "--state=failed", "--no-pager", "--no-legend", "--plain"], capture_output=True, text=True, timeout=2)
+                _failed_units_cache["count"] = len(_parse_systemd_units(r.stdout, "system"))
+            except (OSError, subprocess.SubprocessError):
+                pass
+            _failed_units_cache["at"] = now_m
+        failed = _failed_units_cache["count"]
+    return {
+        "rebootRequired": reboot_needed,
+        "rebootReason": reboot_reason,
+        "securityUpdates": _updates.get("sec"),
+        "listeningPorts": _listening_ports(read_file=read_file),
+        "failedUnits": failed,
+    }
+
+
 def info():
     rel = os_release()
     pkg = package_manager()
@@ -310,6 +390,7 @@ def info():
         "agentSha": _file_sha256(__file__),
         "helperSha": _file_sha256(HELPER),
         "macs": lan_macs(),
+        "posture": host_posture(),
         "pkg": pkg,
         "updateCommand": update_command(pkg, om.get("omarchy")),
         "desktop": desktop_kind(),
@@ -698,7 +779,7 @@ def temperature():
     return None if best is None else round(best, 1)
 
 
-_updates = {"at": 0, "n": None, "busy": False}
+_updates = {"at": 0, "n": None, "sec": None, "busy": False}
 
 
 def updates_waiting(pkg):
@@ -716,9 +797,18 @@ def _check_updates(pkg):
         if cmd:
             # English output, so the header lines below are recognised whatever the system language.
             r = subprocess.run(cmd, capture_output=True, text=True, timeout=300, env=dict(os.environ, LC_ALL="C", LANG="C"))
-            _updates["n"] = len([l for l in r.stdout.splitlines() if l.strip() and not l.startswith(("Listing", "Last metadata", "S |", "--+", "Loading", "Repository", "Obsoleting"))])
+            rows = [l for l in r.stdout.splitlines() if l.strip() and not l.startswith(("Listing", "Last metadata", "S |", "--+", "Loading", "Repository", "Obsoleting"))]
+            _updates["n"] = len(rows)
+            if pkg == "apt":
+                _updates["sec"] = sum(1 for l in rows if re.search(r"(^|[-/,])security(\s|,|$)", l, re.IGNORECASE))
+            elif pkg == "dnf":
+                sec_r = subprocess.run(["dnf", "-q", "check-update", "--security"], capture_output=True, text=True, timeout=120, env=dict(os.environ, LC_ALL="C", LANG="C"))
+                _updates["sec"] = len([l for l in sec_r.stdout.splitlines() if l.strip() and not l.startswith(("Last metadata", "Obsoleting"))])
+            else:
+                _updates["sec"] = None
     except (OSError, subprocess.SubprocessError):
         _updates["n"] = None
+        _updates["sec"] = None
     finally:
         _updates["busy"] = False
 

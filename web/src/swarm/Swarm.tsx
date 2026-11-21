@@ -41,6 +41,7 @@ export type Agent = {
 		agentSha?: string
 		helperSha?: string
 		macs?: string[]
+		posture?: {rebootRequired: boolean; rebootReason?: string; securityUpdates?: number | null; listeningPorts?: {port: number; proto: string; addr: string}[]; failedUnits?: number} | null
 		pkg?: string
 		updateCommand?: string
 		omarchy?: boolean
@@ -292,6 +293,11 @@ function AgentCard({a, onClick}: {a: Agent; onClick: () => void}) {
 							{m.updates} update{m.updates === 1 ? '' : 's'}
 						</StatChip>
 					)}
+					{a.info?.posture?.rebootRequired && (
+						<StatChip icon="restart" label="Restart needed">
+							Restart needed
+						</StatChip>
+					)}
 				</span>
 			)}
 		</button>
@@ -461,6 +467,16 @@ function AgentSheet({a, onClose, onTerminal, onDesktop, onStorage}: {a: Agent; o
 					)}
 					{typeof m.temp === 'number' && <Row icon="thermo" color="#ef5350" label="Temperature" trailing={<b>{Math.round(m.temp)}°C</b>} />}
 					{m.uptime !== undefined && <Row icon="clock" color="#8e8e93" label="Up for" trailing={<b>{duration(m.uptime)}</b>} />}
+					{a.info?.posture?.rebootRequired && <Row icon="restart" color="var(--yellow)" label="Restart needed" sub={a.info.posture.rebootReason || 'System updates require a restart'} />}
+					{!!a.info?.posture?.listeningPorts?.length && (
+						<Row
+							icon="network"
+							color="#8e8e93"
+							label="Exposed ports"
+							sub={a.info.posture.listeningPorts.slice(0, 8).map((p) => `${p.port}/${p.proto}`).join(', ')}
+							trailing={<b>{a.info.posture.listeningPorts.length}</b>}
+						/>
+					)}
 				</Group>
 			)}
 

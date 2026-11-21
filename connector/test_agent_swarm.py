@@ -239,5 +239,26 @@ class ServicesAndFilesTests(unittest.TestCase):
                     agent.files_read({"path": "/Home/.config/omarchy-connector/config.json"}, home=home)
 
 
+class PostureTests(unittest.TestCase):
+    def test_listening_ports_filters_loopback_and_non_listen(self):
+        proc_tcp = (
+            "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n"
+            "   0: 00000000:1F90 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1000 0 1\n"
+            "   1: 0100007F:07E5 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1000 0 2\n"
+            "   2: 00000000:0050 00000000:0000 01 00000000:00000000 00:00000000 00000000  1000 0 3\n"
+        )
+        ports = agent._listening_ports(read_file=lambda p: proc_tcp if p.endswith("/tcp") else "")
+        self.assertEqual(ports, [{"port": 8080, "proto": "tcp", "addr": "0.0.0.0"}])
+
+    def test_reboot_required_detects_debian_stamp_and_arch_kernel_mismatch(self):
+        needed, _ = agent._reboot_required(exists=lambda p: p == "/var/run/reboot-required", list_dir=lambda _: [], kernel="6.8.0")
+        self.assertTrue(needed)
+        needed2, reason2 = agent._reboot_required(exists=lambda p: p == "/usr/lib/modules", list_dir=lambda _: ["7.3.0-omarchy"], kernel="7.2.15-omarchy")
+        self.assertTrue(needed2)
+        self.assertIn("7.2.15-omarchy", reason2)
+        needed3, _ = agent._reboot_required(exists=lambda p: p == "/usr/lib/modules", list_dir=lambda _: ["7.2.15-omarchy"], kernel="7.2.15-omarchy")
+        self.assertFalse(needed3)
+
+
 if __name__ == "__main__":
     unittest.main()

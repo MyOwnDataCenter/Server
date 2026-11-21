@@ -186,6 +186,27 @@ export async function sendWolPacket(mac) {
 	}
 }
 
+function cleanPosture(p) {
+	if (!p || typeof p !== 'object') return null
+	const ports = Array.isArray(p.listeningPorts)
+		? p.listeningPorts
+				.slice(0, 50)
+				.map((x) => ({
+					port: num(x?.port),
+					proto: x?.proto === 'tcp6' ? 'tcp6' : 'tcp',
+					addr: clip(x?.addr, 32),
+				}))
+				.filter((x) => x.port && x.port > 0 && x.port <= 65535)
+		: []
+	return {
+		rebootRequired: !!p.rebootRequired,
+		rebootReason: clip(p.rebootReason, 120),
+		securityUpdates: num(p.securityUpdates),
+		listeningPorts: ports,
+		failedUnits: num(p.failedUnits) ?? 0,
+	}
+}
+
 function cleanInfo(i = {}) {
 	return {
 		hostname: clip(i.hostname, 64),
@@ -198,6 +219,7 @@ function cleanInfo(i = {}) {
 		agentSha: cleanSha(i.agentSha),
 		helperSha: cleanSha(i.helperSha),
 		macs: Array.isArray(i.macs) ? i.macs.filter((m) => MAC_RE.test(String(m ?? ''))).map((m) => String(m).toLowerCase()).slice(0, 8) : [],
+		posture: cleanPosture(i.posture),
 		pkg: clip(i.pkg, 16),
 		updateCommand: clip(i.updateCommand, 160),
 		omarchy: !!i.omarchy,
@@ -315,17 +337,24 @@ export function createConnector({dataDir, tlsDir, connectorDir = fileURLToPath(n
 		const l = live.get(a.id)
 		const agentSha = a.info?.agentSha || ''
 		const helperSha = a.info?.helperSha || ''
+		const t = now()
+		const m = l?.metrics ?? a.metrics ?? null
+		const lastSeen = l ? (l.lastActivity ?? t) : (a.lastSeen ?? null)
+		const activityAgeMs = l ? Math.max(0, t - (l.lastActivity ?? t)) : null
+		const freshness = !l ? 'offline' : activityAgeMs > 120_000 ? 'stale' : 'live'
 		return {
 			id: a.id,
 			name: a.name,
 			online: !!l,
-			lastSeen: l ? now() : (a.lastSeen ?? null),
+			lastSeen,
+			asOf: lastSeen,
+			freshness,
 			enrolledAt: a.enrolledAt,
 			// What it may do: allowed at pairing (and by the connector itself) and still switched on here.
 			allowed: a.allowed,
 			on: a.on,
 			info: a.info ?? null,
-			metrics: l?.metrics ?? a.metrics ?? null,
+			metrics: m,
 			updateAvailable: Boolean(a.info && bundledShas.agentSha && agentSha !== bundledShas.agentSha),
 			helperUpdateAvailable: Boolean(a.info && a.allowed?.storage && bundledShas.helperSha && helperSha && helperSha !== bundledShas.helperSha),
 		}
@@ -444,6 +473,16 @@ export function createConnector({dataDir, tlsDir, connectorDir = fileURLToPath(n
 			}
 			if (v.updateAvailable) {
 				out.push({id: `${a.id}:connector`, agentId: a.id, name: a.name, kind: 'connector-update', severity: 'info', message: `Connector update available for ${a.name}`})
+			}
+			const posture = a.info?.posture
+			if (posture?.rebootRequired) {
+				out.push({id: `${a.id}:reboot`, agentId: a.id, name: a.name, kind: 'reboot-required', severity: 'warning', message: `${a.name} needs a restart${posture.rebootReason ? ` (${posture.rebootReason})` : ''}`})
+			}
+			if (typeof posture?.securityUpdates === 'number' && posture.securityUpdates > 0) {
+				out.push({id: `${a.id}:security-updates`, agentId: a.id, name: a.name, kind: 'security-updates', severity: 'warning', message: `${a.name} has ${posture.securityUpdates} security update${posture.securityUpdates === 1 ? '' : 's'} waiting`})
+			}
+			if (typeof posture?.failedUnits === 'number' && posture.failedUnits > 0) {
+				out.push({id: `${a.id}:failed-units`, agentId: a.id, name: a.name, kind: 'failed-units', severity: 'warning', message: `${a.name} has ${posture.failedUnits} failed system service${posture.failedUnits === 1 ? '' : 's'}`})
 			}
 		}
 		return out
@@ -695,11 +734,12 @@ export function createConnector({dataDir, tlsDir, connectorDir = fileURLToPath(n
 				old.calls.clear()
 				old.ws.terminate()
 			}
-			const l = {ws, metrics: a.metrics ?? null, channels: new Map(), nextCh: 0, calls: new Map(), nextCall: 0}
+			const l = {ws, metrics: a.metrics ?? null, lastActivity: now(), channels: new Map(), nextCh: 0, calls: new Map(), nextCall: 0}
 			live.set(a.id, l)
 			let ponged = true
 			ws.on('pong', () => {
 				ponged = true
+				l.lastActivity = now()
 			})
 			const alive = setInterval(() => {
 				if (ws.readyState !== ws.OPEN) return
@@ -709,6 +749,7 @@ export function createConnector({dataDir, tlsDir, connectorDir = fileURLToPath(n
 			}, pingInterval)
 			alive.unref?.()
 			ws.on('message', async (data, isBinary) => {
+				l.lastActivity = now()
 				try {
 					if (isBinary) {
 						const buf = Buffer.from(data)
@@ -1392,6 +1433,10 @@ export function createConnector({dataDir, tlsDir, connectorDir = fileURLToPath(n
 		readAgentScript,
 		readRemoteFile,
 		writeRemoteFile,
+		summary: async () => {
+			await loaded
+			return {total: state.agents.length, online: state.agents.filter((a) => live.has(a.id)).length}
+		},
 		upgradeAgent,
 		openChannel,
 		isAgentMachine: (machineId) => /^agent-[0-9a-f]{12}$/.test(machineId),
