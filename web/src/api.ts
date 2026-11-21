@@ -67,6 +67,11 @@ const SLOW_RPC = new Set([
 	'clips.addFile',
 	'clips.fleetList',
 	'apps.setOidc',
+	'swarm.apps.install',
+	'swarm.apps.start',
+	'swarm.apps.stop',
+	'swarm.apps.restart',
+	'swarm.apps.uninstall',
 ])
 
 const RESTARTING_MESSAGE = 'Omarchy Server is restarting or not answering. Wait a moment and try again.'

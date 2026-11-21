@@ -284,6 +284,11 @@ export function cardFor(name, args, names = {}) {
 		const verb = a.action === 'stop' ? 'Stop' : a.action === 'restart' ? 'Restart' : 'Start'
 		return {title: `${verb} ${a.name || 'service'} on ${host}`, detail: a.kind === 'container' ? 'Container' : 'User service'}
 	}
+	if (name === 'swarm_app_control') {
+		const host = lookup(maps.swarm, a.id, 'this computer')
+		const verb = a.action === 'stop' ? 'Stop' : a.action === 'restart' ? 'Restart' : 'Start'
+		return {title: `${verb} ${slugLabel(a.appId, 'app')} on ${host}`, detail: 'Remote app'}
+	}
 	if (name === 'swarm_backup_run') {
 		const host = lookup(maps.swarm, a.id, 'this computer')
 		return {title: `Back up ${host} now`, detail: ''}

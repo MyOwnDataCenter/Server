@@ -1,4 +1,5 @@
 import hashlib
+import json
 import os
 import tempfile
 import threading
@@ -282,6 +283,171 @@ class WindowsConnectorTests(unittest.TestCase):
         sent.clear()
         conn.handle({"op": "open", "ch": 10, "kind": "tcp", "appId": "__rdp__", "port": 22})
         self.assertEqual(sent[0]["op"], "closed")
+
+
+class RemoteAppsAndMacOSTests(unittest.TestCase):
+    def test_apps_install_list_control_and_port_allowlist(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ran = []
+
+            def fake_run(cmd, cwd=None):
+                ran.append(cmd)
+                return "mock output"
+
+            res = agent.apps_install(
+                {
+                    "id": "ollama",
+                    "name": "Ollama",
+                    "port": 11434,
+                    "compose": (
+                        "services:\n"
+                        "  app:\n"
+                        "    image: ollama/ollama\n"
+                        "    restart: unless-stopped\n"
+                        "    environment:\n"
+                        "      OLLAMA_HOST: 0.0.0.0\n"
+                        "      LITERAL: $SECRET\n"
+                        "    ports:\n"
+                        "      - '127.0.0.1:11434:11434'\n"
+                        "    volumes:\n"
+                        "      - ollama_data:/root/.ollama\n"
+                        "      - ./cache:/tmp/cache:rw\n"
+                        "volumes:\n"
+                        "  ollama_data: {}\n"
+                    ),
+                },
+                data_dir=tmp,
+                run_cmd=fake_run,
+            )
+            self.assertEqual(res["id"], "ollama")
+            self.assertEqual(res["port"], 11434)
+            self.assertEqual(agent._allowed_app_ports(tmp), {"ollama": 11434})
+
+            # Canonical re-emitted compose file escapes '$' to '$$' and is mode 0600.
+            compose_path = os.path.join(tmp, "apps", "ollama", "docker-compose.yml")
+            with open(compose_path, encoding="utf-8") as f:
+                emitted = f.read()
+            self.assertIn("$$SECRET", emitted)
+            self.assertIn('"127.0.0.1:11434:11434"', emitted)
+            if not agent.IS_WINDOWS:
+                self.assertEqual(os.stat(compose_path).st_mode & 0o777, 0o600)
+
+            listed = agent.apps_list({}, data_dir=tmp)
+            self.assertEqual(len(listed), 1)
+            self.assertEqual(listed[0]["name"], "Ollama")
+
+            logs = agent.apps_control({"id": "ollama", "action": "logs", "lines": 50}, data_dir=tmp, run_cmd=fake_run)
+            self.assertEqual(logs["logs"], "mock output")
+
+            agent.apps_control({"id": "ollama", "action": "uninstall"}, data_dir=tmp, run_cmd=fake_run)
+            self.assertEqual(agent._allowed_app_ports(tmp), {})
+
+    def test_apps_install_rejects_dangerous_compose_options(self):
+        cases = [
+            ("privileged", "services:\n  app:\n    image: alpine\n    privileged: true\n"),
+            ("cap_add", "services:\n  app:\n    image: alpine\n    cap_add:\n      - SYS_ADMIN\n"),
+            ("devices", "services:\n  app:\n    image: alpine\n    devices:\n      - /dev/sda:/dev/sda\n"),
+            ("host network", "services:\n  app:\n    image: alpine\n    network_mode: host\n"),
+            ("host pid", "services:\n  app:\n    image: alpine\n    pid: host\n"),
+            ("host ipc", "services:\n  app:\n    image: alpine\n    ipc: host\n"),
+            ("security_opt", "services:\n  app:\n    image: alpine\n    security_opt:\n      - apparmor:unconfined\n"),
+            ("docker.sock mount", "services:\n  app:\n    image: alpine\n    volumes:\n      - /var/run/docker.sock:/var/run/docker.sock\n"),
+            ("root host mount", "services:\n  app:\n    image: alpine\n    volumes:\n      - /:/host\n"),
+            ("parent traversal mount", "services:\n  app:\n    image: alpine\n    volumes:\n      - ./../escape:/escape\n"),
+            ("home tilde mount", "services:\n  app:\n    image: alpine\n    volumes:\n      - ~/secrets:/secrets\n"),
+            ("var interpolation mount", "services:\n  app:\n    image: alpine\n    volumes:\n      - ${HOME}:/host\n"),
+            ("undeclared named volume", "services:\n  app:\n    image: alpine\n    volumes:\n      - ghost:/data\n"),
+            ("driver_opts volume smuggling", "services:\n  app:\n    image: alpine\n    volumes:\n      - sneaky:/data\nvolumes:\n  sneaky:\n    driver_opts:\n      device: /\n"),
+            ("all-interface port", "services:\n  app:\n    image: alpine\n    ports:\n      - '8080:80'\n"),
+            ("0.0.0.0 port", "services:\n  app:\n    image: alpine\n    ports:\n      - '0.0.0.0:8080:80'\n"),
+            ("low host port", "services:\n  app:\n    image: alpine\n    ports:\n      - '127.0.0.1:80:80'\n"),
+            ("yaml anchor/alias", "services:\n  app: &a\n    image: alpine\n"),
+            ("build directive", "services:\n  app:\n    image: alpine\n    build: .\n"),
+            ("env_file directive", "services:\n  app:\n    image: alpine\n    env_file: .env\n"),
+            ("top-level include", "include:\n  - other.yml\nservices:\n  app:\n    image: alpine\n"),
+            ("mount meta.json", "services:\n  app:\n    image: alpine\n    volumes:\n      - ./meta.json:/meta.json\n"),
+            ("case-variant docker-compose.yml", "services:\n  app:\n    image: alpine\n    volumes:\n      - ./Docker-Compose.yml:/c\n"),
+            ("case-variant META.JSON", "services:\n  app:\n    image: alpine\n    volumes:\n      - ./META.JSON:/m\n"),
+            ("nested bind mounts", "services:\n  app:\n    image: alpine\n    volumes:\n      - ./data:/data\n      - ./data/x:/host\n"),
+            ("case-folded nested bind mounts", "services:\n  app:\n    image: alpine\n    volumes:\n      - ./data:/data\n      - ./DATA/x:/host\n"),
+            ("duplicate bind mounts across services", "services:\n  a:\n    image: alpine\n    volumes:\n      - ./shared:/a\n  b:\n    image: alpine\n    volumes:\n      - ./shared:/b\n"),
+            ("object-form relative bind with colon", "services:\n  app:\n    image: alpine\n    volumes:\n      - type: bind\n        source: ./a:/b\n        target: /c\n"),
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            called = []
+            for label, compose in cases:
+                with self.assertRaises(RuntimeError, msg=f"should reject {label}"):
+                    agent.apps_install({"id": "badapp", "compose": compose, "port": 0}, data_dir=tmp, run_cmd=lambda c, cwd=None: called.append(c))
+            # Long >80-char JSON-encoded values and apostrophes in plain scalars must pass.
+            long_val = "it's " + ("x" * 120)
+            ok_json = json.dumps({"services": {"on": {"image": "alpine", "environment": {"NOTE": long_val}}}})
+            emitted, _ = agent.validate_app_compose(ok_json, os.path.join(tmp, "apps", "okjson"), port=0)
+            self.assertIn('"on":', emitted)
+            self.assertIn('"NOTE":', emitted)
+            # Re-validation on start catches tampered docker-compose.yml on disk.
+            tamper_dir = os.path.join(tmp, "apps", "tampered")
+            os.makedirs(tamper_dir, exist_ok=True)
+            with open(os.path.join(tamper_dir, "docker-compose.yml"), "w", encoding="utf-8") as f:
+                f.write("services:\n  app:\n    image: alpine\n    privileged: true\n")
+            with self.assertRaises(RuntimeError):
+                agent.apps_control({"id": "tampered", "action": "start"}, data_dir=tmp, run_cmd=lambda c, cwd=None: called.append(c))
+            # Declared web port not published in compose must also be refused.
+            with self.assertRaises(RuntimeError):
+                agent.apps_install(
+                    {
+                        "id": "portmismatch",
+                        "port": 9999,
+                        "compose": "services:\n  app:\n    image: nginx:alpine\n    ports:\n      - '127.0.0.1:8080:80'\n",
+                    },
+                    data_dir=tmp,
+                    run_cmd=lambda c, cwd=None: called.append(c),
+                )
+            self.assertEqual(called, [])
+            self.assertEqual(agent._allowed_app_ports(tmp), {})
+
+            # Symlink inside app_dir escaping outside must be rejected.
+            if not agent.IS_WINDOWS:
+                app_dir = os.path.join(tmp, "apps", "symapp")
+                os.makedirs(app_dir, exist_ok=True)
+                os.symlink("/tmp", os.path.join(app_dir, "escape"))
+                with self.assertRaises(RuntimeError):
+                    agent.apps_install(
+                        {
+                            "id": "symapp",
+                            "port": 0,
+                            "compose": "services:\n  app:\n    image: alpine\n    volumes:\n      - ./escape:/host\n",
+                        },
+                        data_dir=tmp,
+                        run_cmd=lambda c, cwd=None: called.append(c),
+                    )
+                self.assertEqual(called, [])
+
+    def test_tcp_channel_refuses_uninstalled_ports_and_requires_apps_ability(self):
+        conn = agent.Connection.__new__(agent.Connection)
+        conn.allowed = {"apps": False}
+        conn.channels = {}
+        sent = []
+        conn.send = sent.append
+        conn.handle({"op": "open", "ch": 5, "kind": "tcp", "appId": "ollama", "port": 11434})
+        self.assertEqual(sent[0]["op"], "closed")
+        self.assertIn("apps", sent[0]["reason"].lower())
+
+        # Even with apps allowed, an unknown port/appId is rejected.
+        conn.allowed = {"apps": True}
+        sent.clear()
+        with mock.patch.object(agent, "_allowed_app_ports", return_value={"ollama": 11434}):
+            conn.handle({"op": "open", "ch": 6, "kind": "tcp", "appId": "ollama", "port": 22})
+        self.assertEqual(sent[0]["op"], "closed")
+        self.assertIn("installed app", sent[0]["reason"].lower())
+
+    def test_macos_info_and_metrics_paths(self):
+        if agent.IS_MACOS:
+            rel = agent.os_release()
+            self.assertEqual(rel["ID"], "macos")
+            mem, _swap = agent.meminfo()
+            self.assertGreater(mem["total"], 0)
+            self.assertGreaterEqual(len(agent.disks()), 1)
+            self.assertEqual(agent.desktop_kind()["ok"], False)
 
 
 if __name__ == "__main__":

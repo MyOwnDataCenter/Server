@@ -194,8 +194,8 @@ export async function startOmarchyd({port = 2021, host = '127.0.0.1', dataDir, t
 		'omarchy.plugins': {kind: 'query', run: (input) => themeCall(() => omarchyPlugins.list(input ?? {}))},
 		// Local swarm (connector.mjs): owner only.
 		...Object.fromEntries(
-			['swarm.list', 'swarm.history', 'swarm.alerts', 'swarm.wake', 'swarm.pair', 'swarm.reauthorize', 'swarm.updateConnector', 'swarm.updateAllConnectors', 'swarm.remove', 'swarm.rename', 'swarm.setAbilities', 'swarm.action', 'swarm.fleetAction', 'swarm.desktopCheck', 'swarm.storage.status', 'swarm.storage.disks', 'swarm.storage.pools', 'swarm.storage.importable', 'swarm.storage.unmount', 'swarm.storage.mount', 'swarm.storage.format', 'swarm.storage.createPool', 'swarm.storage.addToPool', 'swarm.storage.importPool', 'swarm.storage.forgetPool', 'swarm.storage.scrub', 'swarm.storage.setSleep', 'swarm.services.list', 'swarm.services.logs', 'swarm.services.control', 'swarm.files.list', 'swarm.files.mkdir', 'swarm.files.rename', 'swarm.files.trash', 'swarm.files.copyToServer', 'swarm.files.copyFromServer'].map((name) => {
-				const kind = ['swarm.list', 'swarm.history', 'swarm.alerts', 'swarm.desktopCheck', 'swarm.storage.status', 'swarm.storage.disks', 'swarm.storage.pools', 'swarm.storage.importable', 'swarm.services.list', 'swarm.services.logs', 'swarm.files.list'].includes(name) ? 'query' : 'mutation'
+			['swarm.list', 'swarm.history', 'swarm.alerts', 'swarm.wake', 'swarm.pair', 'swarm.reauthorize', 'swarm.updateConnector', 'swarm.updateAllConnectors', 'swarm.remove', 'swarm.rename', 'swarm.setAbilities', 'swarm.action', 'swarm.fleetAction', 'swarm.desktopCheck', 'swarm.storage.status', 'swarm.storage.disks', 'swarm.storage.pools', 'swarm.storage.importable', 'swarm.storage.unmount', 'swarm.storage.mount', 'swarm.storage.format', 'swarm.storage.createPool', 'swarm.storage.addToPool', 'swarm.storage.importPool', 'swarm.storage.forgetPool', 'swarm.storage.scrub', 'swarm.storage.setSleep', 'swarm.services.list', 'swarm.services.logs', 'swarm.services.control', 'swarm.files.list', 'swarm.files.mkdir', 'swarm.files.rename', 'swarm.files.trash', 'swarm.files.copyToServer', 'swarm.files.copyFromServer', 'swarm.apps.status', 'swarm.apps.list', 'swarm.apps.install', 'swarm.apps.start', 'swarm.apps.stop', 'swarm.apps.restart', 'swarm.apps.control', 'swarm.apps.uninstall', 'swarm.apps.logs', 'swarm.apps.open'].map((name) => {
+				const kind = ['swarm.list', 'swarm.history', 'swarm.alerts', 'swarm.desktopCheck', 'swarm.storage.status', 'swarm.storage.disks', 'swarm.storage.pools', 'swarm.storage.importable', 'swarm.services.list', 'swarm.services.logs', 'swarm.files.list', 'swarm.apps.status', 'swarm.apps.list', 'swarm.apps.logs'].includes(name) ? 'query' : 'mutation'
 				return [
 					name,
 					{
@@ -500,8 +500,8 @@ export async function startOmarchyd({port = 2021, host = '127.0.0.1', dataDir, t
 
 	const omarchyTheme = createOmarchyTheme({home, ...themeOptions})
 	const omarchyPlugins = createOmarchyPlugins({home, theme: omarchyTheme, ...pluginOptions})
-	// Local swarm: other Linux computers joined through the connector (see connector.mjs).
-	const connector = createConnector({dataDir, tlsDir, connectorDir: join(appDir, 'connector'), plugins: omarchyPlugins, files, source: () => updater.source(), webPort})
+	// Local swarm: other Linux or macOS computers joined through the connector (see connector.mjs).
+	const connector = createConnector({dataDir, tlsDir, connectorDir: join(appDir, 'connector'), plugins: omarchyPlugins, files, apps, source: () => updater.source(), webPort})
 	clips = createClips({
 		dataDir,
 		files,
@@ -820,6 +820,50 @@ WantedBy=graphical-session.target
 			}
 			if (url.pathname.startsWith('/trpc/')) return await handleRpc(req, res, url, procedures, (r) => accounts.authenticate(r) ?? apps.authenticatePublish(r))
 			if (url.pathname === '/assets/wallpapers/1.jpg' && req.method === 'GET') return await wallpaper(res)
+			// Owner-authenticated HTTP reverse-proxy into a remote swarm app over an in-process connector TCP stream.
+			const swarmAppMatch = /^\/connector\/app\/([0-9a-f]{12})\/([a-z0-9][a-z0-9._-]{0,63})(\/.*)?$/.exec(url.pathname)
+			if (swarmAppMatch) {
+				const auth = accounts.authenticate(req)
+				if (!auth) return sendJson(res, 401, {error: 'unauthorized'})
+				ownerOnly(auth, 'manage the local swarm')
+				const [, agentId, appId, restPath] = swarmAppMatch
+				const {app} = await connector.resolveRemoteApp(agentId, appId)
+				const fwdPath = `${restPath || '/'}${url.search}`
+				const hopByHop = new Set(['authorization', 'connection', 'keep-alive', 'proxy-authenticate', 'proxy-authorization', 'te', 'trailers', 'upgrade', 'host'])
+				const fwdHeaders = {host: `127.0.0.1:${app.port}`, connection: 'close'}
+				for (const [k, v] of Object.entries(req.headers)) {
+					if (v === undefined || hopByHop.has(k.toLowerCase())) continue
+					fwdHeaders[k] = v
+				}
+				const up = http.request(
+					{
+						host: '127.0.0.1',
+						port: app.port,
+						method: req.method,
+						path: fwdPath,
+						headers: fwdHeaders,
+						agent: false,
+						createConnection: () => connector.openTcpStream(agentId, appId, app.port, 'apps'),
+					},
+					(ur) => {
+						if (res.headersSent) return ur.resume()
+						res.writeHead(ur.statusCode ?? 502, ur.statusMessage, ur.headers)
+						ur.pipe(res)
+					},
+				)
+				up.setTimeout(120_000, () => up.destroy(new Error('Remote app timed out')))
+				req.on('aborted', () => up.destroy())
+				res.on('close', () => {
+					if (!res.writableEnded) up.destroy()
+				})
+				up.on('error', () => {
+					if (res.headersSent) return res.destroy()
+					res.writeHead(502, {'content-type': 'text/plain; charset=utf-8'})
+					res.end('The remote app isn’t answering right now.')
+				})
+				req.pipe(up)
+				return
+			}
 			// A computer's backup uploading to its own store (its connector's key; add-only, see backups.mjs).
 			if (url.pathname.startsWith('/connector/backup/')) {
 				const agentId = connector.backup.authenticate(req)
@@ -936,6 +980,41 @@ WantedBy=graphical-session.target
 			const url = new URL(req.url ?? '/', 'http://localhost')
 			// A connector on another computer (it signs in with its own key, checked in connector.mjs).
 			if (url.pathname === '/connector/ws') return await connector.upgradeAgent(req, socket, head)
+			// Owner-authenticated WebSocket upgrade into a remote swarm app over an in-process connector TCP stream.
+			const swarmAppWs = /^\/connector\/app\/([0-9a-f]{12})\/([a-z0-9][a-z0-9._-]{0,63})(\/.*)?$/.exec(url.pathname)
+			if (swarmAppWs) {
+				const auth = accounts.authenticate(req)
+				if (!auth) return refuse('401 Unauthorized')
+				if (accounts.getUser(auth.userId)?.role !== 'owner') return refuse('403 Forbidden')
+				const [, agentId, appId, restPath] = swarmAppWs
+				let resolved
+				try {
+					resolved = await connector.resolveRemoteApp(agentId, appId)
+				} catch (err) {
+					return refuse(err?.code === 'NOT_FOUND' ? '404 Not Found' : err?.code === 'FORBIDDEN' ? '403 Forbidden' : '409 Conflict')
+				}
+				const fwdPath = `${restPath || '/'}${url.search}`
+				if (/[\r\n]/.test(fwdPath)) return refuse('400 Bad Request')
+				const stream = connector.openTcpStream(agentId, appId, resolved.app.port, 'apps')
+				const lines = [`${req.method || 'GET'} ${fwdPath} HTTP/1.1`, `Host: 127.0.0.1:${resolved.app.port}`]
+				for (let i = 0; i < req.rawHeaders.length; i += 2) {
+					const k = req.rawHeaders[i]
+					const v = req.rawHeaders[i + 1]
+					const low = k.toLowerCase()
+					if (low === 'authorization' || low === 'host') continue
+					if (/[\r\n]/.test(k) || /[\r\n]/.test(v)) continue
+					lines.push(`${k}: ${v}`)
+				}
+				stream.write(`${lines.join('\r\n')}\r\n\r\n`)
+				if (head?.length) stream.write(head)
+				stream.pipe(socket)
+				socket.pipe(stream)
+				stream.on('error', () => socket.destroy())
+				socket.on('error', () => stream.destroy())
+				stream.on('close', () => socket.destroy())
+				socket.on('close', () => stream.destroy())
+				return
+			}
 			const route = {'/machines/console': 'machines', '/terminal': 'terminal', '/rdp': 'rdp'}[url.pathname]
 			if (!route) return refuse('404 Not Found')
 			const t = tickets.get(url.searchParams.get('ticket') ?? '')

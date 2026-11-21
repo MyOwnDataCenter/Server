@@ -18,8 +18,10 @@ import {readFile, stat} from 'node:fs/promises'
 import net from 'node:net'
 import os from 'node:os'
 import {basename, join} from 'node:path'
+import {Duplex} from 'node:stream'
 import {fileURLToPath} from 'node:url'
 import {WebSocketServer} from 'ws'
+import YAML from 'yaml'
 
 import {writeAtomic} from './atomic.mjs'
 import {RpcError} from './rpc.mjs'
@@ -30,7 +32,8 @@ import {parseResize} from './terminal.mjs'
 // storage: see its drives, format extra disks, and manage pools on that computer (connector/helper.py).
 // services: inspect and restart user systemd units and Podman/Docker containers.
 // files: browse, upload, download, and copy files inside /Home and /Pools (and Clip Book home streaming).
-const ABILITIES = ['terminal', 'desktop', 'manage', 'storage', 'backup', 'services', 'files']
+// apps: host server-prepared container apps on the node and tunnel their loopback web UI back here.
+const ABILITIES = ['terminal', 'desktop', 'manage', 'storage', 'backup', 'services', 'files', 'apps']
 const REMOTE_FILE_MAX = 20 * 1024 * 1024
 const PAIR_TTL = 15 * 60_000
 // A viewer that stops reading must not queue connector frames in memory without a bound.
@@ -63,7 +66,7 @@ function closeSocket(ws, code, reason) {
 }
 // Same sentence a refused new connection gets, so an open session ends with that reason too.
 function switchedOff(name, ability) {
-	const what = ability === 'terminal' ? 'The terminal' : ability === 'files' ? 'Files' : 'The desktop'
+	const what = ability === 'terminal' ? 'The terminal' : ability === 'files' ? 'Files' : ability === 'apps' ? 'Remote apps' : 'The desktop'
 	return `${what} isn’t switched on for ${name}`
 }
 function closeLiveChannel(l, ch, reason) {
@@ -71,8 +74,243 @@ function closeLiveChannel(l, ch, reason) {
 	if (!channel) return
 	if (channel.kind === 'file') return channel.end(new RpcError('FORBIDDEN', reason))
 	l.channels.delete(ch)
-	closeSocket(channel.ws, 1011, reason)
+	if (channel.kind === 'tcp') {
+		if (channel.stream) channel.stream.destroy(new Error(reason))
+		else if (channel.sock) channel.sock.destroy()
+	} else {
+		closeSocket(channel.ws, 1011, reason)
+	}
 	if (l.ws.readyState === l.ws.OPEN) l.ws.send(JSON.stringify({op: 'close', ch}))
+}
+
+// Strict remote-app Compose validation mirrored on the server (the connector enforces the same
+// rules independently so neither side relies solely on the other).
+const REMOTE_APP_ID_RE = /^[a-z0-9][a-z0-9._-]{0,63}$/
+const REMOTE_SVC_RE = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$/
+const REMOTE_VOL_RE = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/
+const REMOTE_IMG_RE = /^[a-zA-Z0-9][a-zA-Z0-9._/:@-]{0,255}$/
+const REMOTE_ENV_RE = /^[A-Za-z_][A-Za-z0-9_]{0,127}$/
+const REMOTE_USER_RE = /^[a-zA-Z0-9_.-]{1,64}(?::[a-zA-Z0-9_.-]{1,64})?$/
+const REMOTE_PORT_RE = /^127\.0\.0\.1:(\d{4,5}):(\d{1,5})(?:\/(tcp|udp))?$/
+const REMOTE_CTR_PATH_RE = /^\/[A-Za-z0-9._/@+-]+(?:\/[A-Za-z0-9._/@+-]+)*$|^\/$/
+const REMOTE_TOP_KEYS = new Set(['services', 'volumes'])
+const REMOTE_SVC_KEYS = new Set(['image', 'environment', 'restart', 'user', 'command', 'ports', 'volumes'])
+const REMOTE_RESTART = new Set(['no', 'always', 'on-failure', 'unless-stopped'])
+const REMOTE_PORT_KEYS = new Set(['host_ip', 'published', 'target', 'protocol'])
+const REMOTE_VOL_KEYS = new Set(['type', 'source', 'target', 'read_only'])
+const REMOTE_RESERVED_FILES = new Set(['docker-compose.yml', 'docker-compose.yaml', 'compose.yml', 'compose.yaml', 'meta.json'])
+
+function hasYamlAnchorOrAlias(node) {
+	if (!node || typeof node !== 'object') return false
+	if (node.anchor || node.type === 'ALIAS' || node.tag) return true
+	if (Array.isArray(node.items)) {
+		for (const item of node.items) {
+			if (hasYamlAnchorOrAlias(item) || hasYamlAnchorOrAlias(item?.key) || hasYamlAnchorOrAlias(item?.value)) return true
+		}
+	}
+	return false
+}
+
+export function validateRemoteAppCompose(composeText, port = 0) {
+	if (typeof composeText !== 'string' || !composeText.trim()) throw new RpcError('BAD_REQUEST', 'Compose definition is empty')
+	if (Buffer.byteLength(composeText, 'utf8') > 64 * 1024) throw new RpcError('BAD_REQUEST', 'Compose definition is too large (max 64 KB)')
+	if (/[\x00-\x08\x0b\x0c\x0e-\x1f]/.test(composeText)) throw new RpcError('BAD_REQUEST', 'Compose definition contains disallowed control characters')
+	const parsed = YAML.parseDocument(composeText, {uniqueKeys: true, merge: false})
+	if (parsed.errors?.length) throw new RpcError('BAD_REQUEST', `Invalid compose YAML: ${parsed.errors[0].message}`)
+	if (hasYamlAnchorOrAlias(parsed.contents)) throw new RpcError('BAD_REQUEST', 'YAML anchors, aliases, and tags are not allowed in remote app compose files')
+	const doc = parsed.toJS({maxAliasCount: 0})
+	if (!doc || typeof doc !== 'object' || Array.isArray(doc)) throw new RpcError('BAD_REQUEST', 'Compose definition must be a mapping')
+	const badTop = Object.keys(doc).filter((k) => !REMOTE_TOP_KEYS.has(k))
+	if (badTop.length) throw new RpcError('BAD_REQUEST', `Disallowed top-level compose key(s): ${badTop.join(', ')}`)
+
+	const declaredVolumes = {}
+	if (doc.volumes != null) {
+		if (typeof doc.volumes !== 'object' || Array.isArray(doc.volumes) || Object.keys(doc.volumes).length > 32) {
+			throw new RpcError('BAD_REQUEST', 'Top-level volumes must be a mapping of up to 32 named volumes')
+		}
+		for (const [vname, vcfg] of Object.entries(doc.volumes)) {
+			if (!REMOTE_VOL_RE.test(vname)) throw new RpcError('BAD_REQUEST', `Invalid named volume '${vname}'`)
+			if (vcfg != null && (typeof vcfg !== 'object' || Array.isArray(vcfg) || Object.keys(vcfg).length > 0)) {
+				throw new RpcError('BAD_REQUEST', `Volume '${vname}' cannot specify custom driver or external options`)
+			}
+			declaredVolumes[vname] = {}
+		}
+	}
+
+	if (!doc.services || typeof doc.services !== 'object' || Array.isArray(doc.services)) {
+		throw new RpcError('BAD_REQUEST', 'Compose file must define at least one service')
+	}
+	const svcEntries = Object.entries(doc.services)
+	if (svcEntries.length < 1 || svcEntries.length > 16) throw new RpcError('BAD_REQUEST', 'Compose file must define between 1 and 16 services')
+
+	const cleanServices = {}
+	const publishedTcp = new Set()
+	const bindSources = []
+
+	for (const [svcName, svc] of svcEntries) {
+		if (!REMOTE_SVC_RE.test(svcName)) throw new RpcError('BAD_REQUEST', `Invalid service name '${svcName}'`)
+		if (!svc || typeof svc !== 'object' || Array.isArray(svc)) throw new RpcError('BAD_REQUEST', `Service '${svcName}' must be a mapping`)
+		const badKeys = Object.keys(svc).filter((k) => !REMOTE_SVC_KEYS.has(k))
+		if (badKeys.length) throw new RpcError('BAD_REQUEST', `Disallowed compose option(s) in service '${svcName}': ${badKeys.join(', ')}`)
+		if (typeof svc.image !== 'string' || !REMOTE_IMG_RE.test(svc.image) || svc.image.includes('..') || svc.image.includes('$')) {
+			throw new RpcError('BAD_REQUEST', `Service '${svcName}' must declare a valid container image`)
+		}
+		const cleanSvc = {image: svc.image}
+
+		if (svc.restart != null) {
+			const restart = String(svc.restart)
+			if (!REMOTE_RESTART.has(restart)) throw new RpcError('BAD_REQUEST', `Disallowed restart policy '${restart}' in service '${svcName}'`)
+			cleanSvc.restart = restart
+		}
+		if (svc.user != null) {
+			const user = String(svc.user)
+			if (!REMOTE_USER_RE.test(user)) throw new RpcError('BAD_REQUEST', `Invalid user '${user}' in service '${svcName}'`)
+			cleanSvc.user = user
+		}
+		if (svc.command != null) {
+			if (typeof svc.command === 'string') {
+				if (svc.command.length > 1024) throw new RpcError('BAD_REQUEST', `Command too long in service '${svcName}'`)
+				cleanSvc.command = svc.command
+			} else if (Array.isArray(svc.command) && svc.command.length <= 64 && svc.command.every((x) => ['string', 'number', 'boolean'].includes(typeof x))) {
+				const parts = svc.command.map(String)
+				if (parts.some((p) => p.length > 512)) throw new RpcError('BAD_REQUEST', `Command argument too long in service '${svcName}'`)
+				cleanSvc.command = parts
+			} else {
+				throw new RpcError('BAD_REQUEST', `Invalid command in service '${svcName}'`)
+			}
+		}
+		if (svc.environment != null) {
+			const env = {}
+			if (Array.isArray(svc.environment)) {
+				if (svc.environment.length > 100) throw new RpcError('BAD_REQUEST', `Too many environment variables in service '${svcName}'`)
+				for (const item of svc.environment) {
+					if (typeof item !== 'string' || !item.includes('=')) throw new RpcError('BAD_REQUEST', `Environment entry in service '${svcName}' must be KEY=value`)
+					const idx = item.indexOf('=')
+					const k = item.slice(0, idx)
+					const v = item.slice(idx + 1)
+					if (!REMOTE_ENV_RE.test(k) || v.length > 4096) throw new RpcError('BAD_REQUEST', `Invalid environment variable '${k}'`)
+					env[k] = v
+				}
+			} else if (typeof svc.environment === 'object') {
+				const entries = Object.entries(svc.environment)
+				if (entries.length > 100) throw new RpcError('BAD_REQUEST', `Too many environment variables in service '${svcName}'`)
+				for (const [k, v] of entries) {
+					if (!REMOTE_ENV_RE.test(k) || v == null) throw new RpcError('BAD_REQUEST', `Invalid environment variable '${k}'`)
+					const s = String(v)
+					if (s.length > 4096) throw new RpcError('BAD_REQUEST', `Environment variable '${k}' value is too long`)
+					env[k] = s
+				}
+			} else {
+				throw new RpcError('BAD_REQUEST', `Invalid environment section in service '${svcName}'`)
+			}
+			if (Object.keys(env).length) cleanSvc.environment = env
+		}
+		if (svc.ports != null) {
+			if (!Array.isArray(svc.ports) || svc.ports.length > 16) throw new RpcError('BAD_REQUEST', `Ports in service '${svcName}' must be a list of up to 16 entries`)
+			const cleanPorts = []
+			for (const p of svc.ports) {
+				let hostPort
+				let targetPort
+				let proto = 'tcp'
+				if (typeof p === 'string') {
+					if (p.includes('$')) throw new RpcError('BAD_REQUEST', 'Variable expansion is not allowed in ports')
+					const m = REMOTE_PORT_RE.exec(p.trim())
+					if (!m) throw new RpcError('BAD_REQUEST', `Port '${p}' must bind only 127.0.0.1:<1024-65535>:<container_port>[/(tcp|udp)]`)
+					hostPort = Number(m[1])
+					targetPort = Number(m[2])
+					proto = m[3] || 'tcp'
+				} else if (p && typeof p === 'object' && !Array.isArray(p)) {
+					const bad = Object.keys(p).filter((k) => !REMOTE_PORT_KEYS.has(k))
+					if (bad.length) throw new RpcError('BAD_REQUEST', `Disallowed port option(s): ${bad.join(', ')}`)
+					if (String(p.host_ip ?? '') !== '127.0.0.1') throw new RpcError('BAD_REQUEST', 'Ports must set host_ip to 127.0.0.1')
+					hostPort = typeof p.published === 'boolean' ? NaN : Number(p.published)
+					targetPort = typeof p.target === 'boolean' ? NaN : Number(p.target)
+					proto = String(p.protocol ?? 'tcp').toLowerCase()
+					if (proto !== 'tcp' && proto !== 'udp') throw new RpcError('BAD_REQUEST', 'Port protocol must be tcp or udp')
+				} else {
+					throw new RpcError('BAD_REQUEST', 'Invalid port entry in compose file')
+				}
+				if (!Number.isInteger(hostPort) || hostPort < 1024 || hostPort > 65535) throw new RpcError('BAD_REQUEST', `Published port ${hostPort} must be between 1024 and 65535`)
+				if (!Number.isInteger(targetPort) || targetPort < 1 || targetPort > 65535) throw new RpcError('BAD_REQUEST', `Target port ${targetPort} must be between 1 and 65535`)
+				cleanPorts.push(proto === 'tcp' ? `127.0.0.1:${hostPort}:${targetPort}` : `127.0.0.1:${hostPort}:${targetPort}/${proto}`)
+				if (proto === 'tcp') publishedTcp.add(hostPort)
+			}
+			if (cleanPorts.length) cleanSvc.ports = cleanPorts
+		}
+		if (svc.volumes != null) {
+			if (!Array.isArray(svc.volumes) || svc.volumes.length > 32) throw new RpcError('BAD_REQUEST', `Volumes in service '${svcName}' must be a list of up to 32 entries`)
+			const cleanVols = []
+			for (const v of svc.volumes) {
+				let src
+				let tgt
+				let mode = null
+				let expectType = null
+				if (typeof v === 'string') {
+					const parts = v.trim().split(':')
+					if (parts.length !== 2 && parts.length !== 3) throw new RpcError('BAD_REQUEST', `Volume mount '${v}' must be <source>:<target>[:ro|rw]`)
+					;[src, tgt] = parts
+					mode = parts[2] ?? null
+				} else if (v && typeof v === 'object' && !Array.isArray(v)) {
+					const bad = Object.keys(v).filter((k) => !REMOTE_VOL_KEYS.has(k))
+					if (bad.length) throw new RpcError('BAD_REQUEST', `Disallowed volume option(s): ${bad.join(', ')}`)
+					expectType = String(v.type ?? '')
+					if (expectType !== 'volume' && expectType !== 'bind') throw new RpcError('BAD_REQUEST', `Disallowed volume type '${expectType}'`)
+					if (v.read_only != null && typeof v.read_only !== 'boolean') throw new RpcError('BAD_REQUEST', 'Volume read_only must be a boolean')
+					src = String(v.source ?? '')
+					tgt = String(v.target ?? '')
+					mode = v.read_only ? 'ro' : null
+				} else {
+					throw new RpcError('BAD_REQUEST', 'Invalid volume entry in compose file')
+				}
+				src = src.trim()
+				tgt = tgt.trim()
+				if (!src || !tgt || /[$~\\]/.test(src) || /[$~\\]/.test(tgt) || /\.sock/i.test(src) || /\.sock/i.test(tgt)) {
+					throw new RpcError('BAD_REQUEST', `Disallowed volume path '${src}:${tgt}'`)
+				}
+				if (!REMOTE_CTR_PATH_RE.test(tgt) || tgt.split('/').includes('..')) throw new RpcError('BAD_REQUEST', `Invalid container mount target '${tgt}'`)
+				if (mode != null && mode !== 'ro' && mode !== 'rw') throw new RpcError('BAD_REQUEST', `Disallowed volume mode '${mode}' (only ro or rw allowed)`)
+				if (src.startsWith('./')) {
+					if (expectType === 'volume') throw new RpcError('BAD_REQUEST', 'Named volume source cannot be a relative path')
+					if (src.includes(':')) throw new RpcError('BAD_REQUEST', `Disallowed relative volume path '${src}'`)
+					const parts = src.slice(2).split('/').filter(Boolean)
+					if (!parts.length || parts.some((p) => p === '.' || p === '..' || /[. ]$/.test(p)) || parts[0].startsWith('.') || REMOTE_RESERVED_FILES.has(parts[0].replace(/[. ]+$/, '').toLowerCase())) {
+						throw new RpcError('BAD_REQUEST', `Disallowed relative volume path '${src}'`)
+					}
+					const normSrc = `./${parts.join('/')}`
+					bindSources.push(normSrc)
+					cleanVols.push(`${normSrc}:${tgt}${mode ? `:${mode}` : ''}`)
+				} else {
+					if (expectType === 'bind' || src.includes('/') || src.startsWith('.') || src.includes(':')) {
+						throw new RpcError('BAD_REQUEST', `Host path mount '${src}' is not allowed; use a named volume or ./subdir`)
+					}
+					if (!REMOTE_VOL_RE.test(src) || !Object.hasOwn(declaredVolumes, src)) {
+						throw new RpcError('BAD_REQUEST', `Named volume '${src}' must be declared in top-level volumes`)
+					}
+					cleanVols.push(`${src}:${tgt}${mode ? `:${mode}` : ''}`)
+				}
+			}
+			if (cleanVols.length) cleanSvc.volumes = cleanVols
+		}
+		cleanServices[svcName] = cleanSvc
+	}
+
+	// Reject nested or duplicate relative bind paths across all services (case-folded for APFS/NTFS).
+	const seenBinds = []
+	for (const src of bindSources) {
+		const folded = src.toLowerCase()
+		for (const prev of seenBinds) {
+			if (folded === prev || folded.startsWith(`${prev}/`) || prev.startsWith(`${folded}/`)) {
+				throw new RpcError('BAD_REQUEST', `Overlapping bind mount '${src}' is not allowed`)
+			}
+		}
+		seenBinds.push(folded)
+	}
+
+	if (port !== 0 && !publishedTcp.has(port)) {
+		throw new RpcError('BAD_REQUEST', `Declared web port ${port} is not published on 127.0.0.1 in the compose file`)
+	}
+	const outDoc = {services: cleanServices, ...(Object.keys(declaredVolumes).length ? {volumes: declaredVolumes} : {})}
+	return {compose: JSON.stringify(outDoc), publishedPorts: [...publishedTcp]}
 }
 const num = (v) => (v == null || v === '' ? null : Number.isFinite(Number(v)) ? Number(v) : null)
 // A dropped connection, a slow answer, or a reconnect is not a reason to reinstall.
@@ -243,7 +481,7 @@ function serverAddresses() {
 	return out
 }
 
-export function createConnector({dataDir, tlsDir, connectorDir = fileURLToPath(new URL('../connector', import.meta.url)), plugins = null, files = null, source = async () => 'https://raw.githubusercontent.com/TouchWorkStation/omarchy-server', webPort = 7780, now = () => Date.now(), pingInterval = 25_000, sendWol = sendWolPacket}) {
+export function createConnector({dataDir, tlsDir, connectorDir = fileURLToPath(new URL('../connector', import.meta.url)), plugins = null, files = null, apps = null, source = async () => 'https://raw.githubusercontent.com/TouchWorkStation/omarchy-server', webPort = 7780, now = () => Date.now(), pingInterval = 25_000, sendWol = sendWolPacket}) {
 	const file = join(dataDir, 'swarm.json')
 	let state = {agents: []}
 	// Set when swarm.json exists but cannot be used. Nothing may write it until the owner repairs it.
@@ -305,7 +543,9 @@ export function createConnector({dataDir, tlsDir, connectorDir = fileURLToPath(n
 	const pairings = new Map() // sha(token) -> {abilities, expires}
 	const live = new Map() // agentId -> {ws, metrics, info, channels: Map, nextCh, calls: Map, nextCall}
 	const history = new Map() // agentId -> {fine: Point[], coarse: Point[]}
-	const tunnels = new Map() // `${agentId}:${appId}` -> {server, localPort, remotePort, refs, close}
+	const tunnels = new Map() // `${agentId}:${appId}` -> {server, localPort, remotePort, refs, close} (used by RDP bridge)
+	const remoteAppCache = new Map() // `${agentId}:${appId}` -> {port, path, checkedAt}
+	const remoteAppInflight = new Map() // `${agentId}:${appId}` -> Promise
 	const wss = new WebSocketServer({noServer: true, maxPayload: 16 * 1024 * 1024})
 
 	function closeAgentTunnels(agentId, appId = null) {
@@ -315,6 +555,163 @@ export function createConnector({dataDir, tlsDir, connectorDir = fileURLToPath(n
 				t.close()
 			}
 		}
+		for (const key of [...remoteAppCache.keys()]) {
+			if (key.startsWith(`${agentId}:`) && (!appId || key === `${agentId}:${appId}`)) remoteAppCache.delete(key)
+		}
+		const l = live.get(agentId)
+		if (l) {
+			for (const [ch, channel] of [...l.channels]) {
+				if (channel.kind === 'tcp' && channel.stream && (!appId || channel.appId === appId)) {
+					closeLiveChannel(l, ch, appId ? 'That app was stopped' : 'The computer went offline')
+				}
+			}
+		}
+	}
+
+	// In-process multiplexed TCP stream over the connector WebSocket (no unauthenticated loopback
+	// port on this server). Used by omarchyd's owner-authenticated /connector/app/:agentId/:appId proxy.
+	const TCP_STREAM_BUF_LIMIT = 4 * 1024 * 1024
+	function openTcpStream(agentId, appId, remotePort, requiredAbility = 'apps') {
+		const a = find(agentId)
+		const l = live.get(agentId)
+		if (!a) throw new RpcError('NOT_FOUND', 'That computer isn’t in your swarm')
+		if (!l || l.ws.readyState !== l.ws.OPEN) throw new RpcError('PRECONDITION_FAILED', `${a.name} is offline right now`)
+		if (!may(a, requiredAbility)) throw new RpcError('FORBIDDEN', switchedOff(a.name, requiredAbility))
+		const ch = ++l.nextCh
+		const head = Buffer.alloc(4)
+		head.writeUInt32BE(ch)
+		let closed = false
+		let idleTimer = null
+		let idleMs = 0
+		let idleCb = null
+		const bumpTimer = () => {
+			if (idleTimer) clearTimeout(idleTimer)
+			idleTimer = null
+			if (closed || !idleMs) return
+			idleTimer = setTimeout(() => {
+				idleTimer = null
+				stream.emit('timeout')
+				if (typeof idleCb === 'function') idleCb()
+			}, idleMs)
+			idleTimer.unref?.()
+		}
+		const teardown = () => {
+			if (closed) return
+			closed = true
+			if (idleTimer) clearTimeout(idleTimer)
+			idleTimer = null
+			if (!l.channels.delete(ch)) return
+			if (l.ws.readyState === l.ws.OPEN) {
+				try {
+					l.ws.send(JSON.stringify({op: 'close', ch}))
+				} catch {}
+			}
+		}
+		const stream = new Duplex({
+			allowHalfOpen: false,
+			read() {},
+			write(chunk, _encoding, cb) {
+				if (closed || l.ws.readyState !== l.ws.OPEN) return cb(new Error('Remote app connection closed'))
+				bumpTimer()
+				const payload = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
+				const sendNow = () => {
+					if (closed || l.ws.readyState !== l.ws.OPEN) return cb(new Error('Remote app connection closed'))
+					try {
+						l.ws.send(Buffer.concat([head, payload]), {binary: true}, cb)
+					} catch (err) {
+						cb(err)
+					}
+				}
+				// Apply gentle backpressure when the connector WS send buffer is full instead of failing uploads immediately.
+				if (l.ws.bufferedAmount <= TCP_STREAM_BUF_LIMIT) return sendNow()
+				let waited = 0
+				const waitDrain = () => {
+					if (closed || l.ws.readyState !== l.ws.OPEN) return cb(new Error('Remote app connection closed'))
+					if (l.ws.bufferedAmount <= TCP_STREAM_BUF_LIMIT) return sendNow()
+					waited += 25
+					if (waited >= 15_000) return cb(new Error('Remote app tunnel backpressure exceeded'))
+					setTimeout(waitDrain, 25).unref?.()
+				}
+				setTimeout(waitDrain, 25).unref?.()
+			},
+			final(cb) {
+				// Keep the readable side alive until the remote app finishes sending its response.
+				cb()
+			},
+			destroy(err, cb) {
+				teardown()
+				cb(err)
+			},
+		})
+		// Socket-compatible helpers so Node's http.request({createConnection}) treats this Duplex as a socket.
+		stream.setNoDelay = () => stream
+		stream.setKeepAlive = () => stream
+		stream.setTimeout = (ms, cb) => {
+			idleMs = Number(ms) > 0 ? Number(ms) : 0
+			idleCb = typeof cb === 'function' ? cb : null
+			bumpTimer()
+			return stream
+		}
+		stream.ref = () => stream
+		stream.unref = () => stream
+		stream.remoteAddress = '127.0.0.1'
+		stream.remotePort = remotePort
+		stream.localAddress = '127.0.0.1'
+		stream.localPort = 0
+		l.channels.set(ch, {
+			kind: 'tcp',
+			appId,
+			ability: requiredAbility,
+			stream,
+			pushData(buf) {
+				if (closed || stream.destroyed) return
+				bumpTimer()
+				if (stream.readableLength + buf.length > TCP_STREAM_BUF_LIMIT) {
+					closeLiveChannel(l, ch, 'The viewer fell behind')
+					return
+				}
+				stream.push(buf)
+			},
+		})
+		l.ws.send(JSON.stringify({op: 'open', ch, kind: 'tcp', appId, port: remotePort}))
+		return stream
+	}
+
+	async function resolveRemoteApp(agentId, appId, {refresh = false} = {}) {
+		await loaded
+		const id = String(agentId ?? '')
+		const cleanAppId = String(appId ?? '').trim().toLowerCase()
+		if (!/^[0-9a-f]{12}$/.test(id) || !REMOTE_APP_ID_RE.test(cleanAppId)) throw new RpcError('BAD_REQUEST', 'Invalid remote app address')
+		const a = find(id)
+		if (!a) throw new RpcError('NOT_FOUND', 'That computer isn’t in your swarm')
+		if (!may(a, 'apps')) throw new RpcError('FORBIDDEN', `Remote apps aren’t switched on for ${a.name}`)
+		if (!live.has(a.id)) throw new RpcError('PRECONDITION_FAILED', `${a.name} is offline right now`)
+		const key = `${a.id}:${cleanAppId}`
+		const cached = remoteAppCache.get(key)
+		if (!refresh && cached && now() - cached.checkedAt < 15_000) {
+			return {agent: a, app: {id: cleanAppId, port: cached.port, path: cached.path}}
+		}
+		if (!refresh && remoteAppInflight.has(key)) return remoteAppInflight.get(key)
+		const run = (async () => {
+			const list = await call(a.id, 'apps-list', {}, 30_000)
+			const app = Array.isArray(list) ? list.find((x) => x.id === cleanAppId) : null
+			if (!app) {
+				remoteAppCache.delete(key)
+				throw new RpcError('NOT_FOUND', 'That app isn’t installed on that computer')
+			}
+			const port = Number(app.port)
+			if (!Number.isInteger(port) || port < 1024 || port > 65535) {
+				remoteAppCache.delete(key)
+				throw new RpcError('PRECONDITION_FAILED', 'That app doesn’t expose a web port')
+			}
+			const suffix = app.path ? (String(app.path).startsWith('/') ? String(app.path) : `/${app.path}`) : '/'
+			remoteAppCache.set(key, {port, path: suffix, checkedAt: now()})
+			return {agent: a, app: {id: cleanAppId, port, path: suffix}}
+		})().finally(() => {
+			if (remoteAppInflight.get(key) === run) remoteAppInflight.delete(key)
+		})
+		remoteAppInflight.set(key, run)
+		return run
 	}
 
 	async function openAppTunnel(agentId, appId, remotePort, requiredAbility = 'desktop') {
@@ -371,6 +768,7 @@ export function createConnector({dataDir, tlsDir, connectorDir = fileURLToPath(n
 		tunnels.set(key, rec)
 		return rec
 	}
+
 	function recordHistory(agentId, m) {
 		const root = m.disks?.find((d) => d.mount === '/') ?? m.disks?.[0]
 		const pt = {
@@ -614,7 +1012,7 @@ export function createConnector({dataDir, tlsDir, connectorDir = fileURLToPath(n
 		const l = live.get(a.id)
 		if (l) {
 			for (const [ch, channel] of [...l.channels]) {
-				const ability = channel.kind === 'pty' ? 'terminal' : channel.kind === 'vnc' ? 'desktop' : channel.kind === 'file' ? 'files' : null
+				const ability = channel.kind === 'pty' ? 'terminal' : channel.kind === 'vnc' ? 'desktop' : channel.kind === 'file' ? 'files' : channel.kind === 'tcp' ? (channel.ability || 'apps') : null
 				if (ability && !may(a, ability)) closeLiveChannel(l, ch, switchedOff(a.name, ability))
 			}
 			if (!may(a, 'terminal') && l.ws.readyState === l.ws.OPEN) {
@@ -622,6 +1020,8 @@ export function createConnector({dataDir, tlsDir, connectorDir = fileURLToPath(n
 					l.ws.send(JSON.stringify({op: 'kill', session: '*'}))
 				} catch {}
 			}
+			if (!may(a, 'apps')) closeAgentTunnels(a.id)
+			if (!may(a, 'desktop')) closeAgentTunnels(a.id, '__rdp__')
 		}
 		return true
 	}
@@ -746,7 +1146,13 @@ export function createConnector({dataDir, tlsDir, connectorDir = fileURLToPath(n
 			const old = live.get(existing.id)
 			if (old) {
 				old.progress = null
-				for (const ch of old.channels.values()) closeSocket(ch.ws, 1000, 'Permissions updated')
+				closeAgentTunnels(existing.id)
+				for (const ch of old.channels.values()) {
+					if (ch.kind === 'file') ch.end(new RpcError('BAD_GATEWAY', 'Permissions updated'))
+					else if (ch.stream) ch.stream.destroy(new Error('Permissions updated'))
+					else if (ch.sock) ch.sock.destroy()
+					else closeSocket(ch.ws, 1000, 'Permissions updated')
+				}
 				for (const c of old.calls.values()) (clearTimeout(c.timer), c.reject(new RpcError('BAD_GATEWAY', 'Permissions updated')))
 				old.channels.clear()
 				old.calls.clear()
@@ -790,8 +1196,11 @@ export function createConnector({dataDir, tlsDir, connectorDir = fileURLToPath(n
 			const old = live.get(a.id)
 			if (old) {
 				old.progress = null
+				closeAgentTunnels(a.id)
 				for (const ch of [...old.channels.values()]) {
 					if (ch.kind === 'file') ch.end(new RpcError('BAD_GATEWAY', 'The computer reconnected'))
+					else if (ch.stream) ch.stream.destroy(new Error('The computer reconnected'))
+					else if (ch.sock) ch.sock.destroy()
 					else closeSocket(ch.ws, 1000, 'The computer reconnected')
 				}
 				for (const c of old.calls.values()) (clearTimeout(c.timer), c.reject(new RpcError('BAD_GATEWAY', 'The computer reconnected')))
@@ -827,7 +1236,12 @@ export function createConnector({dataDir, tlsDir, connectorDir = fileURLToPath(n
 							return
 						}
 						if (ch?.kind === 'tcp') {
-							if (!ch.sock.destroyed) ch.sock.write(buf.subarray(4))
+							if (ch.pushData) ch.pushData(buf.subarray(4))
+							else if (ch.stream) {
+								if (!ch.stream.destroyed) ch.stream.push(buf.subarray(4))
+							} else if (ch.sock && !ch.sock.destroyed) {
+								ch.sock.write(buf.subarray(4))
+							}
 							return
 						}
 						if (ch && ch.ws.readyState === ch.ws.OPEN) {
@@ -873,8 +1287,14 @@ export function createConnector({dataDir, tlsDir, connectorDir = fileURLToPath(n
 							return
 						}
 						l.channels.delete(Number(msg.ch))
-						if (ch.kind === 'tcp') ch.sock.end()
-						else closeSocket(ch.ws, msg.code === 1011 ? 1011 : 1000, msg.reason)
+						if (ch.kind === 'tcp') {
+							if (ch.stream) {
+								if (msg.code === 1011) ch.stream.destroy(new Error(clip(msg.reason, 200) || 'Remote app connection closed'))
+								else ch.stream.push(null)
+							} else if (ch.sock) {
+								ch.sock.end()
+							}
+						} else closeSocket(ch.ws, msg.code === 1011 ? 1011 : 1000, msg.reason)
 					} else if (msg.op === 'progress') {
 						// A long call (a backup) saying how far it's got. A report for a call that
 						// already finished must not become the next call's progress.
@@ -903,6 +1323,7 @@ export function createConnector({dataDir, tlsDir, connectorDir = fileURLToPath(n
 				closeAgentTunnels(a.id)
 				for (const ch of [...l.channels.values()]) {
 					if (ch.kind === 'file') ch.end(new RpcError('BAD_GATEWAY', 'The computer went offline'))
+					else if (ch.stream) ch.stream.destroy(new Error('The computer went offline'))
 					else if (ch.sock) ch.sock.destroy()
 					else closeSocket(ch.ws, 1000, 'The computer went offline')
 				}
@@ -1496,6 +1917,113 @@ export function createConnector({dataDir, tlsDir, connectorDir = fileURLToPath(n
 					return writeRemoteFile(input?.id, `${remoteDir}/${name}`, buf)
 				},
 			},
+			'swarm.apps.status': {
+				kind: 'query',
+				run: async (input) => {
+					const a = await requireAbility(input, 'apps', 'Remote apps')
+					return call(a.id, 'apps-status', {}, 30_000)
+				},
+			},
+			'swarm.apps.list': {
+				kind: 'query',
+				run: async (input) => {
+					const a = await requireAbility(input, 'apps', 'Remote apps')
+					return call(a.id, 'apps-list', {}, 30_000)
+				},
+			},
+			'swarm.apps.install': {
+				kind: 'mutation',
+				run: async (input) => {
+					const a = await requireAbility(input, 'apps', 'Remote apps')
+					const appId = String(input?.appId ?? '').trim().toLowerCase()
+					if (!REMOTE_APP_ID_RE.test(appId)) throw new RpcError('BAD_REQUEST', 'Invalid app id')
+					let compose = typeof input?.compose === 'string' ? input.compose : ''
+					let name = clip(input?.name || appId, 80)
+					let icon = clip(input?.icon || '', 300)
+					let port = Number(input?.port) || 0
+					let appPath = clip(input?.path || '', 120)
+					if (!compose && apps?.procedures?.['appStore.app']) {
+						const listing = await apps.procedures['appStore.app'].run({id: appId})
+						if (!listing) throw new RpcError('NOT_FOUND', 'That app wasn’t found in the App Store')
+						name = clip(listing.name || appId, 80)
+						icon = clip(listing.icon || '', 300)
+						port = Number(listing.port) || port
+						appPath = clip(listing.path || '', 120)
+						const image = clip(listing.image || listing.dockerImage || '', 200)
+						if (listing.compose) compose = String(listing.compose)
+						else if (image) {
+							const portLine = port >= 1024 && port <= 65535 ? `\n    ports:\n      - "127.0.0.1:${port}:${port}"` : ''
+							compose = `services:\n  app:\n    image: ${JSON.stringify(image)}\n    restart: unless-stopped${portLine}\n`
+						}
+					}
+					if (!compose.trim()) throw new RpcError('BAD_REQUEST', 'Provide a compose definition or pick an App Store app with a compose bundle')
+					if (port !== 0 && (!Number.isInteger(port) || port < 1024 || port > 65535)) throw new RpcError('BAD_REQUEST', 'Invalid app port')
+					const validated = validateRemoteAppCompose(compose, port)
+					remoteAppCache.delete(`${a.id}:${appId}`)
+					return call(a.id, 'apps-install', {id: appId, name, icon, compose: validated.compose, port, path: appPath}, 10 * 60_000)
+				},
+			},
+			'swarm.apps.start': {
+				kind: 'mutation',
+				run: async (input) => {
+					const a = await requireAbility(input, 'apps', 'Remote apps')
+					const appId = String(input?.appId ?? '').trim().toLowerCase()
+					return call(a.id, 'apps-control', {id: appId, action: 'start'}, 180_000)
+				},
+			},
+			'swarm.apps.stop': {
+				kind: 'mutation',
+				run: async (input) => {
+					const a = await requireAbility(input, 'apps', 'Remote apps')
+					const appId = String(input?.appId ?? '').trim().toLowerCase()
+					closeAgentTunnels(a.id, appId)
+					return call(a.id, 'apps-control', {id: appId, action: 'stop'}, 180_000)
+				},
+			},
+			'swarm.apps.restart': {
+				kind: 'mutation',
+				run: async (input) => {
+					const a = await requireAbility(input, 'apps', 'Remote apps')
+					const appId = String(input?.appId ?? '').trim().toLowerCase()
+					return call(a.id, 'apps-control', {id: appId, action: 'restart'}, 180_000)
+				},
+			},
+			'swarm.apps.control': {
+				kind: 'mutation',
+				run: async (input) => {
+					const a = await requireAbility(input, 'apps', 'Remote apps')
+					const appId = String(input?.appId ?? '').trim().toLowerCase()
+					const actionName = String(input?.action ?? '')
+					if (!REMOTE_APP_ID_RE.test(appId)) throw new RpcError('BAD_REQUEST', 'Invalid app id')
+					if (!['start', 'stop', 'restart'].includes(actionName)) throw new RpcError('BAD_REQUEST', 'Choose start, stop or restart')
+					if (actionName === 'stop') closeAgentTunnels(a.id, appId)
+					return call(a.id, 'apps-control', {id: appId, action: actionName}, 180_000)
+				},
+			},
+			'swarm.apps.uninstall': {
+				kind: 'mutation',
+				run: async (input) => {
+					const a = await requireAbility(input, 'apps', 'Remote apps')
+					const appId = String(input?.appId ?? '').trim().toLowerCase()
+					closeAgentTunnels(a.id, appId)
+					return call(a.id, 'apps-control', {id: appId, action: 'uninstall'}, 180_000)
+				},
+			},
+			'swarm.apps.logs': {
+				kind: 'query',
+				run: async (input) => {
+					const a = await requireAbility(input, 'apps', 'Remote apps')
+					const appId = String(input?.appId ?? '').trim().toLowerCase()
+					return call(a.id, 'apps-control', {id: appId, action: 'logs', lines: Number(input?.lines) || 200}, 60_000)
+				},
+			},
+			'swarm.apps.open': {
+				kind: 'mutation',
+				run: async (input) => {
+					const {agent: a, app} = await resolveRemoteApp(input?.id, input?.appId, {refresh: true})
+					return {agentId: a.id, appId: app.id, port: app.port, path: app.path}
+				},
+			},
 		},
 		enroll,
 		authenticateAgent: async (req) => {
@@ -1505,6 +2033,8 @@ export function createConnector({dataDir, tlsDir, connectorDir = fileURLToPath(n
 		readAgentScript,
 		readRemoteFile,
 		writeRemoteFile,
+		resolveRemoteApp,
+		openTcpStream,
 		summary: async () => {
 			await loaded
 			return {total: state.agents.length, online: state.agents.filter((a) => live.has(a.id)).length}

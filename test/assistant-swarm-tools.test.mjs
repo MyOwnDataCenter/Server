@@ -27,6 +27,7 @@ describe('assistant swarm fleet tools', () => {
 			'swarm_services_list',
 			'swarm_service_logs',
 			'swarm_files_list',
+			'swarm_apps_list',
 			'swarm_backups_status',
 		]
 		const expectedWrites = [
@@ -40,6 +41,7 @@ describe('assistant swarm fleet tools', () => {
 			'swarm_storage_scrub',
 			'swarm_storage_setSleep',
 			'swarm_service_control',
+			'swarm_app_control',
 			'swarm_backup_run',
 			'swarm_fleet_action',
 			'swarm_rename',
@@ -76,6 +78,7 @@ describe('assistant swarm fleet tools', () => {
 		assert.equal(cardFor('swarm_storage_scrub', {id: 'a2', name: 'tank', kind: 'zfs'}, names).title, 'Scrub pool tank on Render Box')
 		assert.equal(cardFor('swarm_storage_setSleep', {id: 'a2', device: '/dev/sdb', minutes: 15}, names).detail, '/dev/sdb · 15 min')
 		assert.equal(cardFor('swarm_service_control', {id: 'a2', kind: 'container', name: 'ollama', action: 'restart'}, names).title, 'Restart ollama on Render Box')
+		assert.equal(cardFor('swarm_app_control', {id: 'a2', appId: 'open-webui', action: 'stop'}, names).title, 'Stop Open Webui on Render Box')
 		assert.equal(cardFor('swarm_backup_run', {id: 'a1'}, names).title, 'Back up Studio Mac now')
 		const fleet = cardFor('swarm_fleet_action', {ids: ['a1', 'a2'], name: 'theme-set', theme: 'tokyo-night'}, names)
 		assert.equal(fleet.title, 'Set Tokyo Night across the swarm')

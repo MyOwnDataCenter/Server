@@ -24,7 +24,7 @@ Options:
   --server <url>        Server URL (https://...)
   --ca <fingerprint>    64-char hex SHA-256 fingerprint of the server CA
   --token <code>        One-time pairing token from Machines -> Local swarm
-  --allow <abilities>   Comma-separated abilities (terminal,desktop,manage,storage,backup,services,files)
+  --allow <abilities>   Comma-separated abilities (terminal,desktop,manage,storage,backup,services,files,apps)
   --source <url>        Base URL to download connector files from
   --uninstall           Remove the connector from this computer
   -h, --help            Show this help
@@ -71,13 +71,24 @@ DIR="${XDG_DATA_HOME:-$HOME/.local/share}/omarchy-connector"
 CONF="${XDG_CONFIG_HOME:-$HOME/.config}/omarchy-connector"
 UNIT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
 UNIT="$UNIT_DIR/omarchy-connector.service"
+PLIST="$HOME/Library/LaunchAgents/com.omarchy.connector.plist"
+OS="$(uname -s)"
 
-[ "$(uname -s)" = Linux ] || die "The connector is for Linux."
+[ "$OS" = Linux ] || [ "$OS" = Darwin ] || die "The connector is for Linux or macOS."
 [ "$(id -u)" -ne 0 ] || die "Run this as your normal user, not with sudo (the connector works as you)."
-command -v systemctl >/dev/null || die "systemd is required."
+if [ "$OS" = Linux ]; then
+	command -v systemctl >/dev/null || die "systemd is required."
+fi
 
 if [ "$UNINSTALL" = 1 ]; then
 	say "Removing the Omarchy Server connector"
+	if [ "$OS" = Darwin ]; then
+		launchctl bootout "gui/$(id -u)" "$PLIST" 2>/dev/null || launchctl unload "$PLIST" 2>/dev/null || true
+		rm -f "$PLIST"
+		rm -rf "$DIR" "$CONF" "${XDG_CACHE_HOME:-$HOME/.cache}/omarchy-connector"
+		say "Done. Remove this computer in Machines → Local swarm too, if it's still listed."
+		exit 0
+	fi
 	systemctl --user disable --now omarchy-connector.service 2>/dev/null || true
 	rm -f "$UNIT"
 	systemctl --user daemon-reload 2>/dev/null || true
@@ -99,39 +110,45 @@ case "$SERVER" in https://*) ;; *) die "The server address must start with https
 [[ "$ALLOW" =~ ^[a-z,]*$ ]] || die "Bad --allow list"
 has() { [[ ",$ALLOW," == *",$1,"* ]]; }
 
-# 1. What this computer needs: Python 3, git (for plugins) and screen sharing (for the desktop).
-pm=""
-for p in apt-get dnf pacman zypper; do command -v "$p" >/dev/null && { pm="$p"; break; }; done
-pkgs=()
-command -v python3 >/dev/null || case "$pm" in pacman) pkgs+=(python) ;; *) pkgs+=(python3) ;; esac
-has manage && ! command -v git >/dev/null && pkgs+=(git)
-if has desktop; then
-	command -v x11vnc >/dev/null || pkgs+=(x11vnc)
-	command -v wayvnc >/dev/null || pkgs+=(wayvnc)
+if [ "$OS" = Darwin ]; then
+	has desktop && die "Desktop screen sharing isn't supported on macOS yet. Uncheck Desktop and try again."
+	has storage && die "Storage drive management isn't supported on macOS yet. Uncheck Storage and try again."
+	command -v python3 >/dev/null || die "Python 3 is needed on macOS. Install Xcode Command Line Tools (xcode-select --install) or Homebrew Python, then try again."
+else
+	# 1. What this computer needs: Python 3, git (for plugins) and screen sharing (for the desktop).
+	pm=""
+	for p in apt-get dnf pacman zypper; do command -v "$p" >/dev/null && { pm="$p"; break; }; done
+	pkgs=()
+	command -v python3 >/dev/null || case "$pm" in pacman) pkgs+=(python) ;; *) pkgs+=(python3) ;; esac
+	has manage && ! command -v git >/dev/null && pkgs+=(git)
+	if has desktop; then
+		command -v x11vnc >/dev/null || pkgs+=(x11vnc)
+		command -v wayvnc >/dev/null || pkgs+=(wayvnc)
+	fi
+	# Disk tools live in /usr/sbin on Debian, which isn't on a normal user's PATH; the helper looks there too.
+	sbin() { PATH="$PATH:/usr/local/sbin:/usr/sbin:/sbin" command -v "$1" >/dev/null; }
+	if has storage; then
+		sbin smartctl || pkgs+=(smartmontools)
+		sbin mkfs.ext4 || pkgs+=(e2fsprogs)
+		sbin mkfs.exfat || pkgs+=(exfatprogs)
+		sbin mkfs.btrfs || pkgs+=(btrfs-progs)
+		sbin hdparm || pkgs+=(hdparm)
+	fi
+	if [ ${#pkgs[@]} -gt 0 ]; then
+		say "Installing ${pkgs[*]} (sudo needed)"
+		# One package at a time, so one that a distribution doesn't carry doesn't stop the rest.
+		for p in "${pkgs[@]}"; do
+			case "$pm" in
+				apt-get) sudo apt-get install -y "$p" >/dev/null || warn "Couldn't install $p" ;;
+				dnf) sudo dnf install -y "$p" >/dev/null || warn "Couldn't install $p" ;;
+				pacman) if command -v omarchy >/dev/null; then omarchy pkg add "$p" || warn "Couldn't install $p"; else sudo pacman -S --needed --noconfirm "$p" >/dev/null || warn "Couldn't install $p"; fi ;;
+				zypper) sudo zypper --non-interactive install "$p" >/dev/null || warn "Couldn't install $p" ;;
+				*) warn "Install $p yourself (no package manager found that I know)" ;;
+			esac
+		done
+	fi
+	command -v python3 >/dev/null || die "Python 3 is needed. Install it, then run this again."
 fi
-# Disk tools live in /usr/sbin on Debian, which isn't on a normal user's PATH; the helper looks there too.
-sbin() { PATH="$PATH:/usr/local/sbin:/usr/sbin:/sbin" command -v "$1" >/dev/null; }
-if has storage; then
-	sbin smartctl || pkgs+=(smartmontools)
-	sbin mkfs.ext4 || pkgs+=(e2fsprogs)
-	sbin mkfs.exfat || pkgs+=(exfatprogs)
-	sbin mkfs.btrfs || pkgs+=(btrfs-progs)
-	sbin hdparm || pkgs+=(hdparm)
-fi
-if [ ${#pkgs[@]} -gt 0 ]; then
-	say "Installing ${pkgs[*]} (sudo needed)"
-	# One package at a time, so one that a distribution doesn't carry doesn't stop the rest.
-	for p in "${pkgs[@]}"; do
-		case "$pm" in
-			apt-get) sudo apt-get install -y "$p" >/dev/null || warn "Couldn't install $p" ;;
-			dnf) sudo dnf install -y "$p" >/dev/null || warn "Couldn't install $p" ;;
-			pacman) if command -v omarchy >/dev/null; then omarchy pkg add "$p" || warn "Couldn't install $p"; else sudo pacman -S --needed --noconfirm "$p" >/dev/null || warn "Couldn't install $p"; fi ;;
-			zypper) sudo zypper --non-interactive install "$p" >/dev/null || warn "Couldn't install $p" ;;
-			*) warn "Install $p yourself (no package manager found that I know)" ;;
-		esac
-	done
-fi
-command -v python3 >/dev/null || die "Python 3 is needed. Install it, then run this again."
 
 # 2. Trust only your server: fetch its certificate authority and check it against the fingerprint
 #    in the command (which came from the server itself, over your own signed-in session).
@@ -167,11 +184,44 @@ say "Joining your server"
 name=$(python3 "$DIR/agent.py" enroll "$SERVER" "$TOKEN" "$ALLOW") || die "Joining didn't work (see above)."
 
 # 5. Keep it running, as you, from now on.
-# Storage needs sudo to the helper, so NoNewPrivileges stays off only when Storage was allowed.
-nnp=""
-has storage || nnp="NoNewPrivileges=yes"
-mkdir -p "$UNIT_DIR"
-cat >"$UNIT" <<EOF
+if [ "$OS" = Darwin ]; then
+	mkdir -p "$HOME/Library/LaunchAgents"
+	DIR_XML=$(python3 -c 'import sys, xml.sax.saxutils as x; print(x.escape(sys.argv[1]))' "$DIR")
+	cat >"$PLIST" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.omarchy.connector</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/usr/bin/env</string>
+		<string>python3</string>
+		<string>$DIR_XML/agent.py</string>
+	</array>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>PATH</key>
+		<string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+	</dict>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<true/>
+	<key>StandardErrorPath</key>
+	<string>$DIR_XML/connector.log</string>
+</dict>
+</plist>
+EOF
+	launchctl bootout "gui/$(id -u)" "$PLIST" 2>/dev/null || launchctl unload "$PLIST" 2>/dev/null || true
+	launchctl bootstrap "gui/$(id -u)" "$PLIST" 2>/dev/null || launchctl load -w "$PLIST"
+else
+	# Storage needs sudo to the helper, so NoNewPrivileges stays off only when Storage was allowed.
+	nnp=""
+	has storage || nnp="NoNewPrivileges=yes"
+	mkdir -p "$UNIT_DIR"
+	cat >"$UNIT" <<EOF
 [Unit]
 Description=Omarchy Server connector (local swarm)
 After=network-online.target
@@ -186,12 +236,13 @@ $nnp
 [Install]
 WantedBy=default.target
 EOF
-systemctl --user daemon-reload
-systemctl --user enable --now omarchy-connector.service
-systemctl --user restart omarchy-connector.service
-# Run even while nobody is signed in (so you can still watch it and open a terminal).
-if ! loginctl show-user "$USER" -p Linger 2>/dev/null | grep -q 'Linger=yes'; then
-	sudo loginctl enable-linger "$USER" 2>/dev/null || warn "It only runs while you're signed in. To keep it running, run: sudo loginctl enable-linger $USER"
+	systemctl --user daemon-reload
+	systemctl --user enable --now omarchy-connector.service
+	systemctl --user restart omarchy-connector.service
+	# Run even while nobody is signed in (so you can still watch it and open a terminal).
+	if ! loginctl show-user "$USER" -p Linger 2>/dev/null | grep -q 'Linger=yes'; then
+		sudo loginctl enable-linger "$USER" 2>/dev/null || warn "It only runs while you're signed in. To keep it running, run: sudo loginctl enable-linger $USER"
+	fi
 fi
 
 say "Done. \"$name\" is now in your server's Machines → Local swarm."

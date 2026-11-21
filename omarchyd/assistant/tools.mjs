@@ -58,6 +58,9 @@ export const READ_TOOLS = [
 		id: {type: 'string', description: 'Computer id from swarm_list'},
 		path: {type: 'string', description: 'Virtual path such as /Home or /Pools'},
 	}, true),
+	tool('swarm_apps_list', 'swarm.apps.list', 'Apps hosted on a Local swarm computer', {
+		id: {type: 'string', description: 'Computer id from swarm_list'},
+	}, true),
 	tool('swarm_backups_status', 'backups.computers', 'Backup schedule and status for Local swarm computers', {}, true),
 	tool('omarchy_plugins', 'omarchy.plugins', 'Omarchy plugins that can be installed', {
 		q: {type: 'string'},
@@ -157,6 +160,11 @@ export const WRITE_TOOLS = [
 		id: {type: 'string', description: 'Computer id from swarm_list'},
 		kind: {type: 'string', enum: ['user', 'container']},
 		name: {type: 'string', description: 'Unit or container name'},
+		action: {type: 'string', enum: ['start', 'stop', 'restart']},
+	}, true),
+	mutation('swarm_app_control', 'swarm.apps.control', 'Start, stop, or restart a remote app hosted on a Local swarm computer', {
+		id: {type: 'string', description: 'Computer id from swarm_list'},
+		appId: {type: 'string', description: 'App id from swarm_apps_list'},
 		action: {type: 'string', enum: ['start', 'stop', 'restart']},
 	}, true),
 	mutation('swarm_backup_run', 'backups.runComputer', 'Start a manual backup for a Local swarm computer', {

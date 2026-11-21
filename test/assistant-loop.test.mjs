@@ -241,6 +241,7 @@ test('read tools are the curated list and members do not get swarm_list', () => 
 		'swarm_services_list',
 		'swarm_service_logs',
 		'swarm_files_list',
+		'swarm_apps_list',
 		'swarm_backups_status',
 		'omarchy_plugins',
 		'omarchy_listBackgrounds',

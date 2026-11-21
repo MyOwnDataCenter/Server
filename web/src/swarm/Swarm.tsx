@@ -4,7 +4,7 @@
 import {useMutation, useQuery, useQueryClient} from '@tanstack/react-query'
 import {lazy, memo, Suspense, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode} from 'react'
 
-import {mutate, query} from '../api'
+import {mutate, post, query} from '../api'
 import {queryProblem, useBrowserOnline} from '../connection'
 import {Icon, type IconName} from '../icons'
 import {osLook} from '../osLook'
@@ -18,7 +18,7 @@ import {Ring, Row, Sheet, SheetHeader, StatChip, StatusPill, Switch, bytes, dura
 const Console = lazy(() => import('../Console').then((m) => ({default: m.Console})))
 const TerminalScreen = lazy(() => import('../Terminal').then((m) => ({default: m.TerminalScreen})))
 
-type Abilities = {terminal: boolean; desktop: boolean; manage: boolean; storage: boolean; backup: boolean; services: boolean; files: boolean}
+type Abilities = {terminal: boolean; desktop: boolean; manage: boolean; storage: boolean; backup: boolean; services: boolean; files: boolean; apps: boolean}
 type Ability = keyof Abilities
 export type Agent = {
 	id: string
@@ -77,6 +77,7 @@ const ABILITY: Record<Ability, {label: string; icon: IconName; what: string}> = 
 	backup: {label: 'Backups', icon: 'history', what: 'Back up folders you choose to this server, on a schedule (Settings › Backups). It can add backups, never delete them.'},
 	services: {label: 'Services', icon: 'server', what: 'Inspect logs and start, stop, or restart user systemd services and containers'},
 	files: {label: 'Files', icon: 'folder', what: 'Browse, upload, download, and copy files inside its Home and Pools folders (and Clip Book)'},
+	apps: {label: 'Apps', icon: 'apps', what: 'Host and run container apps on this computer, tunneled back to this server'},
 }
 const may = (a: Agent, k: Ability) => a.allowed[k] && a.on[k]
 const pct = (u?: {total: number; used: number}) => (u && u.total ? Math.round((100 * u.used) / u.total) : null)
@@ -138,7 +139,7 @@ export function LocalSwarm({heading = true}: {heading?: boolean}) {
 			{!heading && (
 				<div style={{display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12}}>
 					<span className="muted" style={{flex: 1}}>
-						{list.length ? `${online} of ${list.length} online` : 'Other Linux computers joined to this server'}
+						{list.length ? `${online} of ${list.length} online` : 'Other Linux or macOS computers joined to this server'}
 					</span>
 					{outdated.length > 0 && (
 						<button
@@ -184,7 +185,7 @@ export function LocalSwarm({heading = true}: {heading?: boolean}) {
 						<Icon name="devices" size={30} />
 					</span>
 					<b>No computers yet</b>
-					<span>Join your other Linux computers (Omarchy, Ubuntu, Debian, Fedora, Arch, openSUSE…) to watch them, open a terminal or their desktop, and manage them from here.</span>
+					<span>Join your other Linux or macOS computers (Omarchy, Ubuntu, Debian, Fedora, Arch, macOS…) to watch them, open a terminal or their desktop, and manage them from here.</span>
 					<button className="btn primary small" onClick={() => setAdding(true)}>
 						Add a computer
 					</button>
@@ -386,6 +387,7 @@ function AgentSheet({a, onClose, onTerminal, onDesktop, onStorage}: {a: Agent; o
 	const [reauth, setReauth] = useState(false)
 	const [services, setServices] = useState(false)
 	const [filesOpen, setFilesOpen] = useState(false)
+	const [appsOpen, setAppsOpen] = useState(false)
 	const [rdpOpen, setRdpOpen] = useState(false)
 	const m = a.metrics
 	const desk = a.info?.desktop
@@ -456,6 +458,14 @@ function AgentSheet({a, onClose, onTerminal, onDesktop, onStorage}: {a: Agent; o
 					label="Files"
 					sub={offline ? undefined : may(a, 'files') ? 'Browse, upload, download, and copy files in Home and Pools' : 'Use Change permissions below with Files switched on.'}
 					onClick={a.online && may(a, 'files') ? () => (haptic(8), setFilesOpen(true)) : undefined}
+					disabled={offline}
+				/>
+				<Row
+					icon="apps"
+					color="#a855f7"
+					label="Apps"
+					sub={offline ? undefined : may(a, 'apps') ? 'Host container apps on this computer and open them through the server' : 'Use Change permissions below with Apps switched on.'}
+					onClick={a.online && may(a, 'apps') ? () => (haptic(8), setAppsOpen(true)) : undefined}
 					disabled={offline}
 				/>
 			</Group>
@@ -609,6 +619,7 @@ function AgentSheet({a, onClose, onTerminal, onDesktop, onStorage}: {a: Agent; o
 			{reauth && <ReauthorizeComputer a={a} onClose={() => setReauth(false)} />}
 			{services && <AgentServices a={a} onClose={() => setServices(false)} />}
 			{filesOpen && <AgentFiles a={a} onClose={() => setFilesOpen(false)} />}
+			{appsOpen && <AgentApps a={a} onClose={() => setAppsOpen(false)} />}
 			{rdpOpen && <RdpBridgeSheet a={a} onClose={() => setRdpOpen(false)} />}
 		</Sheet>
 	)
@@ -768,8 +779,8 @@ function AgentPlugins({a, onClose}: {a: Agent; onClose: () => void}) {
 // ---- Add a computer: what it may do → the command → step by step → it appears. ----------------
 function AddComputer({before, onClose, onJoined}: {before: string[]; onClose: () => void; onJoined: (id: string) => void}) {
 	const [beforeIds] = useState(before)
-	// Storage, services and files are opt-in choices; backups are on by default.
-	const [allow, setAllow] = useState<Abilities>({terminal: true, desktop: true, manage: true, storage: false, backup: true, services: false, files: false})
+	// Storage, services, files and apps are opt-in choices; backups are on by default.
+	const [allow, setAllow] = useState<Abilities>({terminal: true, desktop: true, manage: true, storage: false, backup: true, services: false, files: false, apps: false})
 	const [pairing, setPairing] = useState<Pairing | null>(null)
 	const [host, setHost] = useState('')
 	const [copied, setCopied] = useState('')
@@ -824,7 +835,7 @@ function AddComputer({before, onClose, onJoined}: {before: string[]; onClose: ()
 
 	return (
 		<Sheet open onClose={onClose} label="Add a computer" tall>
-			<SheetHeader icon={<Icon name="devices" size={30} />} title="Add a computer" subtitle="Linux or Windows computers." onClose={onClose} />
+			<SheetHeader icon={<Icon name="devices" size={30} />} title="Add a computer" subtitle="Linux, macOS, or Windows computers." onClose={onClose} />
 			{!pairing ? (
 				<>
 					<p className="muted" style={{fontSize: 14, margin: '0 4px 12px'}}>
@@ -1207,6 +1218,168 @@ export function AgentFiles({a, onClose}: {a: Agent; onClose: () => void}) {
 							}
 						/>
 					))}
+				</div>
+			)}
+		</Sheet>
+	)
+}
+
+type RemoteApp = {id: string; name: string; icon?: string; port: number; path?: string; state: string; installedAt: number}
+type StoreRegistry = {url: string; meta: {id: string; name: string}; apps: {id: string; name: string; tagline?: string; icon?: string; port?: number}[]}
+
+function AgentApps({a, onClose}: {a: Agent; onClose: () => void}) {
+	const [showInstall, setShowInstall] = useState(false)
+	const [logApp, setLogApp] = useState<string | null>(null)
+	const [search, setSearch] = useState('')
+	const qc = useQueryClient()
+	const toast = useToast()
+	const confirm = useConfirm()
+	const status = useQuery({
+		queryKey: ['swarm.apps.status', a.id],
+		queryFn: () => query<{engine: string; compose: string; available: boolean; freeDisk: number; gpus: {name: string}[]}>('swarm.apps.status', {id: a.id}),
+	})
+	const apps = useQuery({
+		queryKey: ['swarm.apps.list', a.id],
+		queryFn: () => query<RemoteApp[]>('swarm.apps.list', {id: a.id}),
+		refetchInterval: 8000,
+	})
+	const store = useQuery({
+		queryKey: ['appStore.registry'],
+		queryFn: () => query<StoreRegistry[]>('appStore.registry'),
+		enabled: showInstall,
+	})
+	const logs = useQuery({
+		queryKey: ['swarm.apps.logs', a.id, logApp],
+		queryFn: () => query<{logs: string}>('swarm.apps.logs', {id: a.id, appId: logApp!, lines: 200}),
+		enabled: !!logApp,
+	})
+	const refresh = () => qc.invalidateQueries({queryKey: ['swarm.apps.list', a.id]})
+	const appOp = async (path: 'swarm.apps.start' | 'swarm.apps.stop' | 'swarm.apps.restart' | 'swarm.apps.uninstall', appId: string, msg: string) => {
+		try {
+			await mutate(path, {id: a.id, appId})
+			toast(msg)
+			refresh()
+		} catch (e) {
+			toast((e as Error).message, true)
+		}
+	}
+	const openApp = async (app: RemoteApp) => {
+		const win = window.open('about:blank', '_blank')
+		try {
+			const res = await post<{url: string}>('/api/swarm/apps/open', {id: a.id, appId: app.id})
+			if (win) win.location.href = res.url
+			else window.open(res.url, '_blank', 'noopener')
+		} catch (e) {
+			win?.close()
+			toast((e as Error).message, true)
+		}
+	}
+	const installApp = async (app: {id: string; name: string; icon?: string; port?: number}) => {
+		try {
+			await mutate('swarm.apps.install', {id: a.id, appId: app.id, name: app.name, icon: app.icon, port: app.port})
+			toast(`Installed ${app.name} on ${a.name}`)
+			setShowInstall(false)
+			refresh()
+		} catch (e) {
+			toast((e as Error).message, true)
+		}
+	}
+	const storeApps = (store.data ?? []).flatMap((r) => r.apps).filter((x) => !search.trim() || x.name.toLowerCase().includes(search.toLowerCase()) || x.id.toLowerCase().includes(search.toLowerCase()))
+	const installed = apps.data ?? []
+
+	return (
+		<Sheet open onClose={onClose} label={`Apps on ${a.name}`} tall>
+			<SheetHeader icon={<Icon name="apps" size={30} />} title="Apps" subtitle={`Hosted on ${a.name}`} onClose={onClose} />
+			{status.data && (
+				<p className="muted" style={{fontSize: 13, margin: '0 4px 12px'}}>
+					{status.data.available ? `${status.data.compose} ready · ${bytes(status.data.freeDisk)} free` : 'Install Podman or Docker with Compose on this computer to host apps.'}
+				</p>
+			)}
+			<div style={{display: 'flex', gap: 8, marginBottom: 12}}>
+				<button type="button" className="btn small primary" disabled={!status.data?.available} onClick={() => setShowInstall((v) => !v)}>
+					<Icon name="plus" size={15} /> {showInstall ? 'Hide App Store' : 'Install from App Store'}
+				</button>
+			</div>
+			{showInstall && (
+				<div className="glass" style={{padding: 12, marginBottom: 14}}>
+					<div className="field" style={{marginBottom: 8}}>
+						<input placeholder="Search App Store…" value={search} onChange={(e) => setSearch(e.target.value)} />
+					</div>
+					<div className="group" style={{'--inset': '62px'} as CSSProperties}>
+						{store.isLoading && <Row icon="apps" label="Loading App Store…" />}
+						{storeApps.slice(0, 25).map((item) => (
+							<Row
+								key={item.id}
+								icon="apps"
+								label={item.name}
+								sub={item.tagline || item.id}
+								trailing={
+									<button type="button" className="btn small primary" onClick={() => installApp(item)}>
+										Install
+									</button>
+								}
+							/>
+						))}
+					</div>
+				</div>
+			)}
+			{apps.isLoading && <p className="muted">Loading…</p>}
+			{apps.error && <div className="error">{(apps.error as Error).message}</div>}
+			{apps.data && (
+				<div className="glass group" style={{'--inset': '62px'} as CSSProperties}>
+					{installed.length === 0 && <Row icon="apps" label="No apps hosted on this computer yet" />}
+					{installed.map((app) => (
+						<Row
+							key={app.id}
+							icon="apps"
+							color={app.state === 'running' ? '#2fbf71' : '#8e8e93'}
+							label={app.name}
+							sub={app.port ? `Port ${app.port} · ${app.state}` : app.state}
+							trailing={
+								<span style={{display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap'}}>
+									{app.state === 'running' && app.port > 0 && (
+										<button type="button" className="btn small primary" onClick={() => openApp(app)}>
+											Open
+										</button>
+									)}
+									<button type="button" className="btn small" onClick={() => appOp(app.state === 'running' ? 'swarm.apps.restart' : 'swarm.apps.start', app.id, `${app.name} ${app.state === 'running' ? 'restarted' : 'started'}`)}>
+										{app.state === 'running' ? 'Restart' : 'Start'}
+									</button>
+									{app.state === 'running' && (
+										<button type="button" className="btn small" onClick={() => appOp('swarm.apps.stop', app.id, `${app.name} stopped`)}>
+											Stop
+										</button>
+									)}
+									<button type="button" className="btn small" onClick={() => setLogApp(app.id)}>
+										Logs
+									</button>
+									<button
+										type="button"
+										className="btn small"
+										onClick={async () => {
+											if (await confirm({title: `Uninstall ${app.name}?`, body: `Stops and removes ${app.name} from ${a.name}.`, confirm: 'Uninstall', icon: 'trash'}))
+												appOp('swarm.apps.uninstall', app.id, `${app.name} removed from ${a.name}`)
+										}}
+									>
+										Remove
+									</button>
+								</span>
+							}
+						/>
+					))}
+				</div>
+			)}
+			{logApp && (
+				<div className="glass" style={{marginTop: 14, padding: 12}}>
+					<div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8}}>
+						<b>Logs: {logApp}</b>
+						<button type="button" className="btn small" onClick={() => setLogApp(null)}>
+							Close
+						</button>
+					</div>
+					<pre className="mono" style={{maxHeight: 260, overflow: 'auto', fontSize: 12, whiteSpace: 'pre-wrap', margin: 0}}>
+						{logs.isLoading ? 'Loading logs…' : logs.error ? (logs.error as Error).message : (logs.data?.logs ?? 'No log lines.')}
+					</pre>
 				</div>
 			)}
 		</Sheet>

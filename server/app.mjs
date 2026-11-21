@@ -155,6 +155,16 @@ export const ALLOWED = {
 	'swarm.files.trash': 'mutation',
 	'swarm.files.copyToServer': 'mutation',
 	'swarm.files.copyFromServer': 'mutation',
+	'swarm.apps.status': 'query',
+	'swarm.apps.list': 'query',
+	'swarm.apps.install': 'mutation',
+	'swarm.apps.start': 'mutation',
+	'swarm.apps.stop': 'mutation',
+	'swarm.apps.restart': 'mutation',
+	'swarm.apps.control': 'mutation',
+	'swarm.apps.uninstall': 'mutation',
+	'swarm.apps.logs': 'query',
+	'swarm.apps.open': 'mutation',
 	'assistant.keys': 'query',
 	'assistant.addKey': 'mutation',
 	'assistant.updateKey': 'mutation',
@@ -362,7 +372,7 @@ export const ALLOWED = {
 }
 
 // Long-running mutations: omarchyd answers when the operation finishes.
-export const SLOW = new Set(['alerts.testPush', 'alerts.testEmail', 'health.testDeadman', 'tailscale.login', 'tailscale.ping', 'oidc.setConfig', 'apps.setOidc', 'unraid.connect', 'unraid.scan', 'unraid.preflight', 'unraid.resync', 'backups.configure', 'backups.shares', 'backups.restoreApp', 'backups.connectExisting', 'backups.snapshots', 'backups.computerSnapshots', 'backups.setComputer', 'backups.computerFolders', 'storage.growSystem', 'system.replaceCertificate', 'system.desktopSignIn', 'system.desktopShare', 'omarchy.removeTheme', 'storage.disks', 'storage.createPool', 'storage.addToPool', 'storage.importPool', 'storage.forgetPool', 'files.addShare', 'files.removeShare', 'files.copy', 'files.unarchive', 'files.getThumbnail', 'files.move', 'files.delete', 'files.emptyTrash', 'files.search', 'files.list', 'apps.install', 'apps.update', 'apps.uninstall', 'appStore.registry', 'appStore.app', 'appStore.addRepository', 'appStore.refresh', 'omarchy.plugins', 'omarchy.installPlugin', 'files.updateShare', 'files.setSharePassword', 'apps.logs', 'swarm.action', 'swarm.fleetAction', 'swarm.updateConnector', 'swarm.updateAllConnectors', 'system.update', 'system.logs', 'machines.create', 'machines.uninstall', 'machines.snapshot', 'machines.revertSnapshot', 'machines.deleteSnapshot', 'machines.resizeDisk', 'machines.addDisk', 'machines.restart', 'machines.updateCloudInit', 'machines.details', 'machines.node', 'wifi.connect', 'wifi.networks', 'system.setHostname', 'hardware.internalStorage.getDevices', 'hardware.raid.addDevice', 'hardware.raid.addMirror', 'hardware.raid.addAccelerator', 'hardware.raid.replaceDevice', 'hardware.raid.transitionToFailsafeRaidz', 'storage.unmount', 'storage.mount', 'storage.format', 'swarm.storage.disks', 'swarm.storage.unmount', 'swarm.storage.mount', 'swarm.storage.format', 'swarm.storage.pools', 'swarm.storage.importable', 'swarm.storage.createPool', 'swarm.storage.addToPool', 'swarm.storage.importPool', 'swarm.storage.forgetPool', 'swarm.storage.scrub', 'swarm.services.list', 'swarm.services.logs', 'swarm.services.control', 'swarm.files.list', 'swarm.files.copyToServer', 'swarm.files.copyFromServer', 'assistant.approve', 'clips.paste', 'clips.addFile', 'clips.fleetList'])
+export const SLOW = new Set(['alerts.testPush', 'alerts.testEmail', 'health.testDeadman', 'tailscale.login', 'tailscale.ping', 'oidc.setConfig', 'apps.setOidc', 'unraid.connect', 'unraid.scan', 'unraid.preflight', 'unraid.resync', 'backups.configure', 'backups.shares', 'backups.restoreApp', 'backups.connectExisting', 'backups.snapshots', 'backups.computerSnapshots', 'backups.setComputer', 'backups.computerFolders', 'storage.growSystem', 'system.replaceCertificate', 'system.desktopSignIn', 'system.desktopShare', 'omarchy.removeTheme', 'storage.disks', 'storage.createPool', 'storage.addToPool', 'storage.importPool', 'storage.forgetPool', 'files.addShare', 'files.removeShare', 'files.copy', 'files.unarchive', 'files.getThumbnail', 'files.move', 'files.delete', 'files.emptyTrash', 'files.search', 'files.list', 'apps.install', 'apps.update', 'apps.uninstall', 'appStore.registry', 'appStore.app', 'appStore.addRepository', 'appStore.refresh', 'omarchy.plugins', 'omarchy.installPlugin', 'files.updateShare', 'files.setSharePassword', 'apps.logs', 'swarm.action', 'swarm.fleetAction', 'swarm.updateConnector', 'swarm.updateAllConnectors', 'system.update', 'system.logs', 'machines.create', 'machines.uninstall', 'machines.snapshot', 'machines.revertSnapshot', 'machines.deleteSnapshot', 'machines.resizeDisk', 'machines.addDisk', 'machines.restart', 'machines.updateCloudInit', 'machines.details', 'machines.node', 'wifi.connect', 'wifi.networks', 'system.setHostname', 'hardware.internalStorage.getDevices', 'hardware.raid.addDevice', 'hardware.raid.addMirror', 'hardware.raid.addAccelerator', 'hardware.raid.replaceDevice', 'hardware.raid.transitionToFailsafeRaidz', 'storage.unmount', 'storage.mount', 'storage.format', 'swarm.storage.disks', 'swarm.storage.unmount', 'swarm.storage.mount', 'swarm.storage.format', 'swarm.storage.pools', 'swarm.storage.importable', 'swarm.storage.createPool', 'swarm.storage.addToPool', 'swarm.storage.importPool', 'swarm.storage.forgetPool', 'swarm.storage.scrub', 'swarm.services.list', 'swarm.services.logs', 'swarm.services.control', 'swarm.files.list', 'swarm.files.copyToServer', 'swarm.files.copyFromServer', 'swarm.apps.status', 'swarm.apps.list', 'swarm.apps.install', 'swarm.apps.start', 'swarm.apps.stop', 'swarm.apps.restart', 'swarm.apps.control', 'swarm.apps.uninstall', 'swarm.apps.logs', 'swarm.apps.open', 'assistant.approve', 'clips.paste', 'clips.addFile', 'clips.fleetList'])
 export const timeoutFor = (path) => (SLOW.has(path) ? 30 * 60 * 1000 : 20_000)
 
 // An IPv6 address in a URL needs brackets; req.hostname and URL.hostname may already have them.
@@ -1927,7 +1937,285 @@ export function createApp({store, staticDir, fetchImpl = fetch, secureCookies = 
 	app.closeRelays = () => {
 		for (const r of relays.values()) r.server.close()
 		relays.clear()
+		for (const r of swarmRelays.values()) r.server.close()
+		swarmRelays.clear()
 	}
+
+	// Authenticated relay for remote swarm apps: streams through omarchyd's owner-authenticated
+	// /connector/app/:agentId/:appId endpoint (never an unauthenticated loopback listener on the server).
+	const swarmRelays = new Map() // `${agentId}:${appId}` -> {port, remotePort, agentId, appId, server}
+	const swarmRelayPending = new Map() // `${agentId}:${appId}` -> Promise<number|null>
+	const swarmOwnerCache = new Map() // sid -> {owner: boolean, exp: number}
+	const swarmSessionIsOwner = async (sid) => {
+		const hit = swarmOwnerCache.get(sid)
+		const nowMs = Date.now()
+		if (hit && hit.exp > nowMs) return hit.owner
+		const owner = await sessionIsOwner(sid).catch(() => false)
+		swarmOwnerCache.set(sid, {owner, exp: nowMs + 15_000})
+		if (swarmOwnerCache.size > 200) {
+			for (const [k, v] of swarmOwnerCache) if (v.exp <= nowMs) swarmOwnerCache.delete(k)
+		}
+		return owner
+	}
+	const SWARM_RESERVED_COOKIES = new Set([COOKIE, APP_COOKIE, 'OMARCHY_APP_SESSION', '__Host-OMARCHY_APP_SESSION_HTTPS', 'OMARCHY_BROWSER_SESSION', 'OMARCHY_OIDC_CSRF'])
+	const isReservedServerCookie = (name) => SWARM_RESERVED_COOKIES.has(name) || /^(__Host-|__Secure-)?OMARCHY_/i.test(name)
+	const closeSwarmRelays = (agentId, appId = null) => {
+		for (const [key, r] of [...swarmRelays]) {
+			if (key.startsWith(`${agentId}:`) && (!appId || key === `${agentId}:${appId}`)) {
+				swarmRelays.delete(key)
+				r.server?.close?.()
+				r.server?.destroyConnections?.()
+			}
+		}
+	}
+	const swarmRelayHeaders = (req, token) => {
+		const h = {...req.headers}
+		for (const k of Object.keys(h)) if (k.startsWith('x-forwarded-') || k === 'forwarded' || k.startsWith('cf-')) delete h[k]
+		delete h.authorization
+		delete h.host
+		const rest = (h.cookie ?? '')
+			.split(';')
+			.map((c) => c.trim())
+			.filter((c) => {
+				const eq = c.indexOf('=')
+				const name = eq > 0 ? c.slice(0, eq).trim() : c
+				return c && !isReservedServerCookie(name)
+			})
+		if (rest.length) h.cookie = rest.join('; ')
+		else delete h.cookie
+		h.authorization = `Bearer ${token}`
+		return h
+	}
+	const filterSwarmSetCookies = (headers) => {
+		if (!headers['set-cookie']) return
+		const list = Array.isArray(headers['set-cookie']) ? headers['set-cookie'] : [headers['set-cookie']]
+		const kept = list.filter((raw) => {
+			const name = String(raw).split('=', 1)[0].trim()
+			return name && !isReservedServerCookie(name)
+		})
+		if (kept.length) headers['set-cookie'] = kept
+		else delete headers['set-cookie']
+	}
+	function startSwarmRelay(agentId, appId, remotePort) {
+		const relay = {agentId, appId, port: 0, remotePort, server: null}
+		const prefix = `/connector/app/${agentId}/${appId}`
+		const targetPath = (rawUrl) => {
+			const raw = String(rawUrl ?? '/')
+			if (raw.includes('\\') || raw.includes('\0') || /[\r\n]/.test(raw)) return null
+			let parsed
+			try {
+				parsed = new URL(raw, 'http://x')
+			} catch {
+				return null
+			}
+			const joined = `${prefix}${parsed.pathname}`
+			let check
+			try {
+				check = new URL(joined, 'http://x')
+			} catch {
+				return null
+			}
+			if (check.origin !== 'http://x' || (check.pathname !== prefix && !check.pathname.startsWith(`${prefix}/`))) return null
+			return `${check.pathname}${parsed.search}`
+		}
+		const handle = async (req, res) => {
+			const backend = getClient()
+			if (!backend) {
+				res.writeHead(503, {'content-type': 'text/plain; charset=utf-8'})
+				return res.end('Omarchy Server isn’t configured.')
+			}
+			const fwdPath = targetPath(req.url)
+			if (!fwdPath) {
+				res.writeHead(400, {'content-type': 'text/plain; charset=utf-8'})
+				return res.end('Bad request.')
+			}
+			if (req.method !== 'GET' && req.method !== 'HEAD' && req.method !== 'OPTIONS') {
+				const origin = req.headers.origin
+				const sfs = String(req.headers['sec-fetch-site'] ?? '').toLowerCase()
+				if ((origin && hostOf(origin) !== req.headers.host) || sfs === 'cross-site') {
+					res.writeHead(403, {'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store'})
+					return res.end('Cross-site request refused.')
+				}
+			}
+			const sid = parseCookies(req.headers.cookie)[COOKIE]
+			const session = store.getSession(sid)
+			if (!session) {
+				res.writeHead(401, {'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store'})
+				return res.end('Sign in to Omarchy Server first.')
+			}
+			const owner = await swarmSessionIsOwner(sid)
+			if (!owner) {
+				res.writeHead(403, {'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store'})
+				return res.end('Only the server’s owner can open remote swarm apps.')
+			}
+			let token
+			try {
+				token = await accessTokenFor(sid, session)
+			} catch {
+				res.writeHead(401, {'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store'})
+				return res.end('Sign in to Omarchy Server first.')
+			}
+			const base = new URL(backend.baseUrl)
+			const up = http.request(
+				{
+					hostname: base.hostname,
+					port: base.port || (base.protocol === 'https:' ? 443 : 80),
+					method: req.method,
+					path: fwdPath,
+					headers: swarmRelayHeaders(req, token),
+				},
+				(ur) => {
+					const headers = {...ur.headers}
+					filterSwarmSetCookies(headers)
+					if (headers.location && /^[a-z0-9.\-:[\]]{1,260}$/i.test(String(req.headers.host ?? ''))) {
+						try {
+							const to = new URL(headers.location, `http://${req.headers.host}`)
+							if (to.port === String(relay.remotePort) && isLoopback(to.hostname)) {
+								const trusted = isLoopback(String(req.socket.remoteAddress ?? '').replace(/^::ffff:/, ''))
+								const xf = trusted ? String(req.headers['x-forwarded-proto'] ?? '').split(',')[0].trim() : ''
+								const proto = xf || (req.socket.encrypted ? 'https' : 'http')
+								headers.location = `${proto === 'https' ? 'https' : 'http'}://${req.headers.host}${to.pathname}${to.search}${to.hash}`
+							}
+						} catch {
+							/* leave location intact */
+						}
+					}
+					res.writeHead(ur.statusCode ?? 502, ur.statusMessage, headers)
+					ur.pipe(res)
+				},
+			)
+			linkProxy(req, res, up)
+			up.on('error', () => {
+				if (res.headersSent) return
+				res.writeHead(502, {'content-type': 'text/plain; charset=utf-8'})
+				res.end('The remote app isn’t answering right now.')
+			})
+			req.pipe(up)
+		}
+		const upgrade = async (req, socket, head) => {
+			const refuse = (status) => {
+				socket.write(`HTTP/1.1 ${status}\r\nConnection: close\r\n\r\n`)
+				socket.destroy()
+			}
+			const backend = getClient()
+			if (!backend) return refuse('503 Service Unavailable')
+			const fwdPath = targetPath(req.url)
+			if (!fwdPath) return refuse('400 Bad Request')
+			const origin = req.headers.origin
+			if (!origin || hostOf(origin) !== req.headers.host) return refuse('403 Forbidden')
+			const sid = parseCookies(req.headers.cookie)[COOKIE]
+			const session = store.getSession(sid)
+			if (!session) return refuse('401 Unauthorized')
+			const owner = await swarmSessionIsOwner(sid)
+			if (!owner) return refuse('403 Forbidden')
+			let token
+			try {
+				token = await accessTokenFor(sid, session)
+			} catch {
+				return refuse('401 Unauthorized')
+			}
+			const base = new URL(backend.baseUrl)
+			const up = http.request({
+				hostname: base.hostname,
+				port: base.port || (base.protocol === 'https:' ? 443 : 80),
+				method: req.method,
+				path: fwdPath,
+				headers: swarmRelayHeaders(req, token),
+			})
+			up.on('upgrade', (ur, us, uhead) => {
+				const lines = [`HTTP/1.1 ${ur.statusCode} ${ur.statusMessage}`]
+				for (let i = 0; i < ur.rawHeaders.length; i += 2) {
+					const k = ur.rawHeaders[i]
+					const v = ur.rawHeaders[i + 1]
+					if (k.toLowerCase() === 'set-cookie') {
+						const name = String(v).split('=', 1)[0].trim()
+						if (!name || isReservedServerCookie(name)) continue
+					}
+					lines.push(`${k}: ${v}`)
+				}
+				socket.write(`${lines.join('\r\n')}\r\n\r\n`)
+				if (uhead?.length) socket.write(uhead)
+				us.pipe(socket)
+				socket.pipe(us)
+				us.on('error', () => socket.destroy())
+				socket.on('error', () => us.destroy())
+			})
+			up.on('response', (ur) => {
+				socket.end(`HTTP/1.1 ${ur.statusCode} ${ur.statusMessage}\r\nConnection: close\r\n\r\n`)
+				ur.resume()
+			})
+			up.on('error', () => socket.destroy())
+			up.end(head)
+		}
+		const server = http.createServer((req, res) => {
+			handle(req, res).catch(() => {
+				if (!res.headersSent) {
+					res.writeHead(502, {'content-type': 'text/plain; charset=utf-8'})
+					res.end('The remote app isn’t answering right now.')
+				}
+			})
+		})
+		server.requestTimeout = 0
+		server.on('upgrade', (req, socket, head) => {
+			upgrade(req, socket, head).catch(() => socket.destroy())
+		})
+		relay.server = tls ? dualProtocolServer(server, tls.get) : server
+		return relay
+	}
+	async function swarmRelayFor(agentId, appId, remotePort) {
+		const key = `${agentId}:${appId}`
+		const existing = swarmRelays.get(key)
+		if (existing && existing.remotePort === remotePort) return existing.port
+		if (swarmRelayPending.has(key)) return swarmRelayPending.get(key)
+		const run = (async () => {
+			let relay = swarmRelays.get(key)
+			if (relay && relay.remotePort !== remotePort) {
+				relay.server.close()
+				swarmRelays.delete(key)
+				relay = null
+			}
+			if (!relay) {
+				relay = startSwarmRelay(agentId, appId, remotePort)
+				const taken = new Set([...relays.values(), ...swarmRelays.values()].map((r) => r.port))
+				const candidates = relayPortBase ? Array.from({length: 100}, (_, i) => relayPortBase + i).filter((p) => !taken.has(p)) : [0]
+				let ok = false
+				for (const port of candidates) {
+					ok = await new Promise((resolve) => {
+						relay.server.once('error', () => resolve(false))
+						relay.server.listen(port, relayHost, () => resolve(true))
+					})
+					if (ok) break
+				}
+				if (!ok) return null
+				relay.server.on('error', () => {})
+				relay.port = relay.server.address().port
+				swarmRelays.set(key, relay)
+			}
+			return relay.port
+		})().finally(() => {
+			if (swarmRelayPending.get(key) === run) swarmRelayPending.delete(key)
+		})
+		swarmRelayPending.set(key, run)
+		return run
+	}
+
+	api.post('/swarm/apps/open', async (req, res) => {
+		try {
+			const id = String(req.body?.id ?? '').trim()
+			const appId = String(req.body?.appId ?? '').trim().toLowerCase()
+			if (!/^[0-9a-f]{12}$/.test(id) || !/^[a-z0-9][a-z0-9._-]{0,63}$/.test(appId)) {
+				return res.status(400).json({error: {code: 'BAD_REQUEST', message: 'Invalid computer or app id'}})
+			}
+			const opened = await authedCall(req, 'swarm.apps.open', 'mutation', {id, appId})
+			const port = await swarmRelayFor(opened.agentId, opened.appId, opened.port)
+			if (!port) return res.status(503).json({error: {code: 'UNAVAILABLE', message: 'No free port for the remote app relay'}})
+			const h = bracketHost(req.hostname)
+			const path = typeof opened.path === 'string' && opened.path.startsWith('/') ? opened.path : '/'
+			res.json({url: `${req.protocol}://${h}:${port}${path}`, agentId: opened.agentId, appId: opened.appId, port, remotePort: opened.port})
+		} catch (error) {
+			sendError(res, error)
+		}
+	})
 
 	// How each app opens on the desktop. With Touch's own Omarchy Server app session (every sign-in
 	// since 0.12), every app is relayed, so it opens in a window with no extra sign-in. Without it,
@@ -2095,6 +2383,8 @@ export function createApp({store, staticDir, fetchImpl = fetch, secureCookies = 
 		for (const wss of consoles) for (const c of wss.clients) c.close(1001, 'server restarting')
 		for (const r of relays.values()) r.server?.close?.()
 		for (const r of relays.values()) r.server?.destroyConnections?.()
+		for (const r of swarmRelays.values()) r.server?.close?.()
+		for (const r of swarmRelays.values()) r.server?.destroyConnections?.()
 	}
 	app.attachConsole = (server) => {
 		const wss = new WebSocketServer({noServer: true, maxPayload: 16 * 1024 * 1024})
@@ -2300,6 +2590,16 @@ export function createApp({store, staticDir, fetchImpl = fetch, secureCookies = 
 			return endOtherStoredSessions(req, res)
 		},
 		'user.revokeOtherSessions': async (req, res) => endOtherStoredSessions(req, res),
+		'swarm.apps.uninstall': async (req, _res, input) => {
+			const res = await authedCall(req, 'swarm.apps.uninstall', 'mutation', input)
+			if (input?.id && input?.appId) closeSwarmRelays(String(input.id), String(input.appId).trim().toLowerCase())
+			return res
+		},
+		'swarm.remove': async (req, _res, input) => {
+			const res = await authedCall(req, 'swarm.remove', 'mutation', input)
+			if (input?.id) closeSwarmRelays(String(input.id))
+			return res
+		},
 		// The reset itself happens in omarchyd; every sign-in here ends with it.
 		// Appearance saved on this server (prefs, desktops, uploaded backgrounds) goes with it.
 		'system.factoryReset': async (req, res, input) => {

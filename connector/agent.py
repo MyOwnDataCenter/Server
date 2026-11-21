@@ -57,7 +57,7 @@ except ImportError:
     fcntl = pty = pwd = termios = None
 
 VERSION = "1"
-ABILITY_NAMES = ("terminal", "desktop", "manage", "storage", "backup", "services", "files")
+ABILITY_NAMES = ("terminal", "desktop", "manage", "storage", "backup", "services", "files", "apps")
 # A file channel sends this much, then waits until the server has that many chunks. The socket
 # read loop stays free to take acks, so a large file cannot stall the terminal or the desktop.
 FILE_CHUNK = 64 * 1024
@@ -235,6 +235,14 @@ def os_release():
         ver = platform.release()
         pretty = f"Windows {ver}".strip()
         return {"PRETTY_NAME": pretty, "NAME": "Windows", "ID": "windows"}
+    if IS_MACOS:
+        ver = ""
+        try:
+            ver = subprocess.run(["sw_vers", "-productVersion"], capture_output=True, text=True, timeout=5).stdout.strip()
+        except (OSError, subprocess.SubprocessError):
+            pass
+        pretty = f"macOS {ver}".strip()
+        return {"PRETTY_NAME": pretty, "NAME": "macOS", "ID": "macos"}
     out = {}
     for line in read("/etc/os-release").splitlines():
         if "=" in line:
@@ -246,6 +254,8 @@ def os_release():
 def package_manager():
     if IS_WINDOWS:
         return "winget" if shutil.which("winget") else ""
+    if IS_MACOS:
+        return "brew" if shutil.which("brew") else ""
     for name in ("apt", "dnf", "pacman", "zypper"):
         if shutil.which(name if name != "apt" else "apt-get"):
             return name
@@ -255,7 +265,7 @@ def package_manager():
 def update_command(pkg, omarchy):
     if omarchy:
         return "omarchy update"
-    return {"apt": "sudo apt update && sudo apt upgrade", "dnf": "sudo dnf upgrade --refresh", "pacman": "sudo pacman -Syu", "zypper": "sudo zypper update", "winget": "winget upgrade --all"}.get(pkg, "")
+    return {"apt": "sudo apt update && sudo apt upgrade", "dnf": "sudo dnf upgrade --refresh", "pacman": "sudo pacman -Syu", "zypper": "sudo zypper update", "brew": "brew upgrade", "winget": "winget upgrade --all"}.get(pkg, "")
 
 
 def omarchy_facts():
@@ -312,6 +322,21 @@ def lan_macs(list_dir=os.listdir, read_file=read, root="/sys/class/net"):
             if mac != "00:00:00:00:00:00" and mac not in seen:
                 seen.add(mac)
                 macs.append(mac)
+        return macs[:8]
+    if IS_MACOS and list_dir is os.listdir and read_file is read and root == "/sys/class/net":
+        try:
+            out = subprocess.run(["ifconfig"], capture_output=True, text=True, timeout=5).stdout
+        except (OSError, subprocess.SubprocessError):
+            return []
+        seen, macs, iface = set(), [], ""
+        for line in out.splitlines():
+            if line and not line[0].isspace() and ":" in line:
+                iface = line.split(":", 1)[0]
+            elif iface.startswith("en") and "ether " in line:
+                mac = line.split("ether ", 1)[1].split()[0].strip().lower()
+                if re.fullmatch(r"[0-9a-f]{2}(:[0-9a-f]{2}){5}", mac) and mac != "00:00:00:00:00:00" and mac not in seen:
+                    seen.add(mac)
+                    macs.append(mac)
         return macs[:8]
     try:
         names = sorted(list_dir(root))
@@ -439,6 +464,81 @@ def info():
 _cpu_last = None
 
 
+def _macos_meminfo():
+    try:
+        total = int(subprocess.run(["sysctl", "-n", "hw.memsize"], capture_output=True, text=True, timeout=5).stdout.strip())
+        vm = subprocess.run(["vm_stat"], capture_output=True, text=True, timeout=5).stdout
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return {"total": 0, "used": 0}, {"total": 0, "used": 0}
+    m_page = re.search(r"page size of (\d+) bytes", vm)
+    page = int(m_page.group(1)) if m_page else 4096
+    counts = {}
+    for line in vm.splitlines():
+        if ":" in line:
+            k, _, v = line.partition(":")
+            v = v.strip().rstrip(".")
+            if v.isdigit():
+                counts[k.strip()] = int(v)
+    used_pages = counts.get("Pages active", 0) + counts.get("Pages wired down", 0) + counts.get("Pages occupied by compressor", 0)
+    used = min(total, used_pages * page)
+    return {"total": total, "used": used}, {"total": 0, "used": 0}
+
+
+def _macos_disks():
+    try:
+        out = subprocess.run(["df", "-Pk"], capture_output=True, text=True, timeout=5).stdout
+    except (OSError, subprocess.SubprocessError):
+        return []
+    rows, seen = [], set()
+    for line in out.splitlines()[1:]:
+        parts = line.split(None, 5)
+        if len(parts) < 6:
+            continue
+        dev, total_k, used_k, _avail, _pct, mount = parts
+        if mount != "/" and not mount.startswith("/Volumes/"):
+            continue
+        if dev in seen:
+            continue
+        try:
+            total = int(total_k) * 1024
+            used = int(used_k) * 1024
+        except ValueError:
+            continue
+        if total > 0:
+            seen.add(dev)
+            rows.append({"mount": mount, "total": total, "used": used})
+    return rows[:12]
+
+
+def _macos_batteries():
+    try:
+        out = subprocess.run(["pmset", "-g", "batt"], capture_output=True, text=True, timeout=5).stdout
+    except (OSError, subprocess.SubprocessError):
+        return []
+    for line in out.splitlines():
+        m = re.search(r"(\d+)%;\s*([^;]+);", line)
+        if not m:
+            continue
+        pct = int(m.group(1))
+        st_raw = m.group(2).strip().lower()
+        status = "charging" if "charging" in st_raw and "discharging" not in st_raw and "not" not in st_raw else "discharging" if "discharging" in st_raw else "full" if "charged" in st_raw else "not-charging"
+        eta = re.search(r"(\d+):(\d+)\s+remaining", line)
+        secs = (int(eta.group(1)) * 3600 + int(eta.group(2)) * 60) if eta else None
+        return [{"id": "BAT0", "index": 0, "name": "Internal", "percent": pct, "status": status, "secondsRemaining": secs, "power": None, "energyNow": None, "energyFull": None}]
+    return []
+
+
+def _macos_uptime():
+    try:
+        out = subprocess.run(["sysctl", "-n", "kern.boottime"], capture_output=True, text=True, timeout=5).stdout
+        m = re.search(r"sec\s*=\s*(\d+)", out)
+        if m:
+            return max(0.0, time.time() - int(m.group(1)))
+    except (OSError, ValueError, subprocess.SubprocessError):
+        pass
+    return 0.0
+
+
 def _windows_meminfo():
     class _MemStatus(ctypes.Structure):
         _fields_ = [
@@ -517,6 +617,12 @@ def _windows_cpu_percent():
 def cpu_percent():
     if IS_WINDOWS:
         return _windows_cpu_percent()
+    if IS_MACOS:
+        try:
+            load1 = os.getloadavg()[0]
+            return round(min(100.0, max(0.0, 100.0 * load1 / max(1, os.cpu_count() or 1))), 1)
+        except OSError:
+            return None
     global _cpu_last
     parts = read("/proc/stat").split("\n", 1)[0].split()[1:]
     vals = [int(x) for x in parts] if parts else []
@@ -533,6 +639,8 @@ def cpu_percent():
 def meminfo():
     if IS_WINDOWS:
         return _windows_meminfo()
+    if IS_MACOS:
+        return _macos_meminfo()
     m = {}
     for line in read("/proc/meminfo").splitlines():
         k, _, rest = line.partition(":")
@@ -577,6 +685,8 @@ def _begin_stat(mount):
 def disks():
     if IS_WINDOWS:
         return _windows_disks()
+    if IS_MACOS:
+        return _macos_disks()
     out, seen, mounts = [], set(), []
     for line in read("/proc/mounts").splitlines():
         p = line.split()
@@ -625,6 +735,8 @@ def _num(s):
 
 def batteries(list_dir=os.listdir, read_file=read, root="/sys/class/power_supply"):
     """System packs only. HID mouse/keyboard batteries (scope=Device) are skipped."""
+    if IS_MACOS and list_dir is os.listdir and read_file is read and root == "/sys/class/power_supply":
+        return _macos_batteries()
     try:
         names = sorted(list_dir(root))
     except OSError:
@@ -1009,7 +1121,7 @@ def default_reads():
         "temp": temperature,
         "battery": batteries,
         "disk": disks,
-        "uptime": _windows_uptime if IS_WINDOWS else (lambda: float(read("/proc/uptime", "0").split()[0] or 0)),
+        "uptime": _windows_uptime if IS_WINDOWS else _macos_uptime if IS_MACOS else (lambda: float(read("/proc/uptime", "0").split()[0] or 0)),
     }
 
 
@@ -1254,6 +1366,8 @@ def desktop_kind():
         except OSError:
             ok = False
         return {"kind": "rdp", "ok": ok, "why": "" if ok else "Turn on Remote Desktop in Windows Settings to share this screen."}
+    if IS_MACOS:
+        return {"kind": "none", "ok": False, "why": "Desktop sharing isn’t supported on macOS yet."}
     wl = _wayland_display()
     wlroots = _hypr_signature() or any(f.startswith("sway-ipc.") for f in (os.listdir(RUNTIME) if os.path.isdir(RUNTIME) else []))
     if wl and wlroots:
@@ -1778,7 +1892,7 @@ class Screen(Channel):
 
 
 class TcpChannel(Channel):
-    """Loopback-only TCP tunnel to 127.0.0.1 (used for Windows RDP over Swarm)."""
+    """Loopback-only TCP tunnel to 127.0.0.1 (hosted remote apps and Windows RDP)."""
 
     def __init__(self, conn, ch, port):
         super().__init__(conn, ch)
@@ -2947,7 +3061,22 @@ def _parse_containers_json(stdout, engine):
 def services_list(_args):
     user_units = []
     failed_units = []
-    if shutil.which("systemctl"):
+    if IS_MACOS and shutil.which("launchctl"):
+        try:
+            r = subprocess.run(["launchctl", "list"], capture_output=True, text=True, timeout=15)
+            for line in (r.stdout or "").splitlines()[1:]:
+                parts = line.split("\t")
+                if len(parts) < 3:
+                    continue
+                pid, status, label = parts[0].strip(), parts[1].strip(), parts[2].strip()
+                if not label or not UNIT_NAME.match(label):
+                    continue
+                active = "active" if pid != "-" else ("failed" if status not in ("0", "-") else "inactive")
+                user_units.append({"name": label, "scope": "user", "load": "loaded", "active": active, "sub": f"pid {pid}" if pid != "-" else "stopped", "description": "launchd agent"})
+            user_units = user_units[:200]
+        except (OSError, subprocess.SubprocessError):
+            pass
+    elif shutil.which("systemctl"):
         try:
             r = subprocess.run(["systemctl", "--user", "list-units", "--type=service", "--all", "--no-pager", "--no-legend", "--plain"], capture_output=True, text=True, timeout=15)
             user_units = _parse_systemd_units(r.stdout, "user")[:200]
@@ -3232,6 +3361,815 @@ FILES_ACTIONS = {
 
 
 # ---------------------------------------------------------------------------------------------
+# Remote App Hosting (ability "apps"). Runs validated loopback-only compose bundles under
+# DATA_DIR/apps/<id>/ and only allows loopback TCP channels to ports declared by installed apps.
+APP_ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
+COMPOSE_MAX_BYTES = 64 * 1024
+SERVICE_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$")
+VOLUME_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$")
+IMAGE_REF_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._/:@-]{0,255}$")
+ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")
+USER_SPEC_RE = re.compile(r"^[a-zA-Z0-9_.-]{1,64}(?::[a-zA-Z0-9_.-]{1,64})?$")
+LOOPBACK_PORT_RE = re.compile(r"^127\.0\.0\.1:(\d{4,5}):(\d{1,5})(?:/(tcp|udp))?$")
+CONTAINER_PATH_RE = re.compile(r"^/[A-Za-z0-9._/@+-]+(?:/[A-Za-z0-9._/@+-]+)*$|^/$")
+ALLOWED_TOP_KEYS = frozenset({"services", "volumes"})
+ALLOWED_SERVICE_KEYS = frozenset({"image", "environment", "restart", "user", "command", "ports", "volumes"})
+ALLOWED_RESTART_POLICIES = frozenset({"no", "always", "on-failure", "unless-stopped"})
+ALLOWED_PORT_OBJ_KEYS = frozenset({"host_ip", "published", "target", "protocol"})
+ALLOWED_VOL_OBJ_KEYS = frozenset({"type", "source", "target", "read_only"})
+RESERVED_COMPOSE_NAMES = frozenset({"docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml", "meta.json"})
+
+
+def _strip_yaml_comment(line):
+    """Strip an unquoted trailing '# ...' comment while respecting single/double quotes."""
+    in_s = False
+    in_d = False
+    esc = False
+    for i, ch in enumerate(line):
+        if esc:
+            esc = False
+            continue
+        if in_d:
+            if ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_d = False
+        elif in_s:
+            if ch == "'":
+                in_s = False
+        else:
+            prev = line[i - 1] if i > 0 else " "
+            if ch == '"' and prev in (" ", "\t", ":", "-", "[", "{", ","):
+                in_d = True
+            elif ch == "'" and prev in (" ", "\t", ":", "-", "[", "{", ","):
+                in_s = True
+            elif ch == "#" and (i == 0 or prev in (" ", "\t")):
+                return line[:i].rstrip()
+    if in_s or in_d:
+        raise RuntimeError("Unterminated quote in compose file")
+    return line.rstrip()
+
+
+def _parse_yaml_scalar(raw):
+    s = raw.strip()
+    if not s:
+        return None
+    if s[0] in ("&", "*", "!"):
+        raise RuntimeError("YAML anchors, aliases, and tags are not allowed in compose files")
+    if s in ("|", ">", "|-", ">-", "|+", ">+"):
+        raise RuntimeError("YAML block scalars are not allowed in compose files")
+    if s.startswith("["):
+        try:
+            val = json.loads(s)
+        except ValueError as e:
+            raise RuntimeError(f"Unsupported inline list in compose file: {e}") from e
+        if not isinstance(val, list):
+            raise RuntimeError("Invalid inline list in compose file")
+        return val
+    if s.startswith("{"):
+        if s == "{}":
+            return {}
+        try:
+            def _no_dups(pairs):
+                out = {}
+                for k, v in pairs:
+                    if k in out:
+                        raise RuntimeError(f"Duplicate key '{k}' in compose file")
+                    out[k] = v
+                return out
+            val = json.loads(s, object_pairs_hook=_no_dups)
+        except ValueError as e:
+            raise RuntimeError(f"Unsupported inline mapping in compose file: {e}") from e
+        if not isinstance(val, dict):
+            raise RuntimeError("Invalid inline mapping in compose file")
+        return val
+    if s[0] == '"':
+        try:
+            return json.loads(s)
+        except ValueError as e:
+            raise RuntimeError(f"Invalid double-quoted string in compose file: {e}") from e
+    if s[0] == "'":
+        if len(s) < 2 or not s.endswith("'"):
+            raise RuntimeError("Unterminated single-quoted string in compose file")
+        inner = s[1:-1]
+        # YAML single-quoted strings escape single quote as ''
+        check = inner.replace("''", "")
+        if "'" in check:
+            raise RuntimeError("Invalid single-quoted string in compose file")
+        return inner.replace("''", "'")
+    low = s.lower()
+    if low in ("null", "~"):
+        return None
+    if low == "true":
+        return True
+    if low == "false":
+        return False
+    if re.fullmatch(r"-?(?:0|[1-9]\d*)", s):
+        return int(s)
+    return s
+
+
+def _split_yaml_kv(text):
+    """Split 'key: value' outside quotes. Returns (key, rest_or_None) or None if not a mapping entry."""
+    in_s = False
+    in_d = False
+    esc = False
+    for i, ch in enumerate(text):
+        if esc:
+            esc = False
+            continue
+        if in_d:
+            if ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_d = False
+        elif in_s:
+            if ch == "'":
+                in_s = False
+        else:
+            if ch == '"':
+                in_d = True
+            elif ch == "'":
+                in_s = True
+            elif ch == ":" and (i + 1 == len(text) or text[i + 1] == " "):
+                key_raw = text[:i].strip()
+                if not key_raw:
+                    raise RuntimeError("Empty key in compose file")
+                if key_raw[0] in ("&", "*", "!"):
+                    raise RuntimeError("YAML anchors, aliases, and tags are not allowed in compose files")
+                if key_raw == "<<":
+                    raise RuntimeError("YAML merge keys (<<) are not allowed in compose files")
+                key = _parse_yaml_scalar(key_raw)
+                if not isinstance(key, str) or not key:
+                    raise RuntimeError("Compose keys must be non-empty strings")
+                rest = text[i + 1 :].strip()
+                return key, (rest if rest != "" else None)
+    return None
+
+
+def _parse_safe_compose(text):
+    """Parse a strict, anchor-free YAML/JSON subset suitable for validated Compose definitions."""
+    if not isinstance(text, str) or not text.strip():
+        raise RuntimeError("Compose definition is empty")
+    raw_bytes = text.encode("utf-8", errors="strict")
+    if len(raw_bytes) > COMPOSE_MAX_BYTES:
+        raise RuntimeError("Compose definition is too large (max 64 KB)")
+    if "\x00" in text:
+        raise RuntimeError("Compose definition contains null bytes")
+    for ch in text:
+        o = ord(ch)
+        if o < 32 and ch not in ("\n", "\r", "\t"):
+            raise RuntimeError("Compose definition contains control characters")
+
+    stripped = text.lstrip()
+    if stripped.startswith("{"):
+        def _no_dups(pairs):
+            out = {}
+            for k, v in pairs:
+                if k in out:
+                    raise RuntimeError(f"Duplicate key '{k}' in compose file")
+                out[k] = v
+            return out
+        try:
+            doc = json.loads(stripped, object_pairs_hook=_no_dups)
+        except ValueError as e:
+            raise RuntimeError(f"Invalid JSON compose definition: {e}") from e
+        if not isinstance(doc, dict):
+            raise RuntimeError("Compose definition must be a mapping")
+        return doc
+
+    lines = []
+    for lineno, raw_line in enumerate(text.splitlines(), 1):
+        if "\t" in raw_line[: len(raw_line) - len(raw_line.lstrip(" \t"))]:
+            raise RuntimeError(f"Tabs are not allowed for indentation (line {lineno})")
+        cleaned = _strip_yaml_comment(raw_line)
+        if not cleaned.strip():
+            continue
+        indent = len(cleaned) - len(cleaned.lstrip(" "))
+        content = cleaned[indent:]
+        if content.startswith("%"):
+            raise RuntimeError(f"YAML directives are not allowed (line {lineno})")
+        if content in ("---", "...") or content.startswith("--- ") or content.startswith("... "):
+            raise RuntimeError(f"Multi-document YAML markers are not allowed (line {lineno})")
+        lines.append((indent, content, lineno))
+
+    if not lines:
+        raise RuntimeError("Compose definition is empty")
+
+    def parse_block(idx, min_indent):
+        if idx >= len(lines) or lines[idx][0] < min_indent:
+            return None, idx
+        block_indent = lines[idx][0]
+        if lines[idx][1] == "-" or lines[idx][1].startswith("- "):
+            return parse_list(idx, block_indent)
+        return parse_map(idx, block_indent)
+
+    def parse_list(idx, indent):
+        items = []
+        while idx < len(lines):
+            ind, content, lineno = lines[idx]
+            if ind < indent:
+                break
+            if ind > indent:
+                raise RuntimeError(f"Unexpected indentation in list (line {lineno})")
+            if not (content == "-" or content.startswith("- ")):
+                break
+            rest = content[1:].lstrip(" ")
+            item_indent = ind + 2
+            idx += 1
+            if not rest:
+                if idx < len(lines) and lines[idx][0] > ind:
+                    val, idx = parse_block(idx, ind + 1)
+                else:
+                    val = None
+                items.append(val)
+                continue
+            kv = _split_yaml_kv(rest)
+            if kv is not None:
+                k, v_str = kv
+                entry = {}
+                if v_str is None:
+                    if idx < len(lines) and lines[idx][0] > item_indent:
+                        entry[k], idx = parse_block(idx, item_indent + 1)
+                    else:
+                        entry[k] = None
+                else:
+                    entry[k] = _parse_yaml_scalar(v_str)
+                while idx < len(lines) and lines[idx][0] >= item_indent:
+                    if lines[idx][0] > item_indent:
+                        raise RuntimeError(f"Unexpected indentation in list object (line {lines[idx][2]})")
+                    sub_kv = _split_yaml_kv(lines[idx][1])
+                    if sub_kv is None:
+                        raise RuntimeError(f"Expected key: value in list object (line {lines[idx][2]})")
+                    sk, sv_str = sub_kv
+                    if sk in entry:
+                        raise RuntimeError(f"Duplicate key '{sk}' (line {lines[idx][2]})")
+                    idx += 1
+                    if sv_str is None:
+                        if idx < len(lines) and lines[idx][0] > item_indent:
+                            entry[sk], idx = parse_block(idx, item_indent + 1)
+                        else:
+                            entry[sk] = None
+                    else:
+                        entry[sk] = _parse_yaml_scalar(sv_str)
+                items.append(entry)
+            else:
+                items.append(_parse_yaml_scalar(rest))
+        return items, idx
+
+    def parse_map(idx, indent):
+        mapping = {}
+        while idx < len(lines):
+            ind, content, lineno = lines[idx]
+            if ind < indent:
+                break
+            if ind > indent:
+                raise RuntimeError(f"Unexpected indentation (line {lineno})")
+            if content == "-" or content.startswith("- "):
+                raise RuntimeError(f"Unexpected list item in mapping (line {lineno})")
+            kv = _split_yaml_kv(content)
+            if kv is None:
+                raise RuntimeError(f"Expected key: value (line {lineno})")
+            k, v_str = kv
+            if k in mapping:
+                raise RuntimeError(f"Duplicate key '{k}' (line {lineno})")
+            idx += 1
+            if v_str is None:
+                if idx < len(lines) and lines[idx][0] > indent:
+                    mapping[k], idx = parse_block(idx, indent + 1)
+                else:
+                    mapping[k] = None
+            else:
+                mapping[k] = _parse_yaml_scalar(v_str)
+        return mapping, idx
+
+    doc, next_idx = parse_block(0, 0)
+    if next_idx != len(lines) or not isinstance(doc, dict):
+        raise RuntimeError("Compose definition must be a single top-level mapping")
+    return doc
+
+
+def _validate_port_entry(entry):
+    if isinstance(entry, str):
+        if "$" in entry:
+            raise RuntimeError("Variable expansion is not allowed in ports")
+        m = LOOPBACK_PORT_RE.match(entry.strip())
+        if not m:
+            raise RuntimeError(f"Port '{entry}' must bind only 127.0.0.1:<1024-65535>:<container_port>[/(tcp|udp)]")
+        host_port = int(m.group(1))
+        target_port = int(m.group(2))
+        proto = m.group(3) or "tcp"
+    elif isinstance(entry, dict):
+        bad = set(entry.keys()) - ALLOWED_PORT_OBJ_KEYS
+        if bad:
+            raise RuntimeError(f"Disallowed port option(s): {', '.join(sorted(bad))}")
+        if str(entry.get("host_ip") or "") != "127.0.0.1":
+            raise RuntimeError("Ports must set host_ip to 127.0.0.1")
+        pub_raw, tgt_raw = entry.get("published"), entry.get("target")
+        if isinstance(pub_raw, bool) or isinstance(tgt_raw, bool):
+            raise RuntimeError("Port published and target must be integers")
+        try:
+            host_port = int(pub_raw)
+            target_port = int(tgt_raw)
+        except (TypeError, ValueError):
+            raise RuntimeError("Port published and target must be integers")
+        proto = str(entry.get("protocol") or "tcp").lower()
+        if proto not in ("tcp", "udp"):
+            raise RuntimeError("Port protocol must be tcp or udp")
+    else:
+        raise RuntimeError("Invalid port entry in compose file")
+    if not (1024 <= host_port <= 65535):
+        raise RuntimeError(f"Published port {host_port} must be between 1024 and 65535")
+    if not (1 <= target_port <= 65535):
+        raise RuntimeError(f"Target port {target_port} must be between 1 and 65535")
+    spec = f"127.0.0.1:{host_port}:{target_port}" if proto == "tcp" else f"127.0.0.1:{host_port}:{target_port}/{proto}"
+    return spec, host_port, proto
+
+
+def _validate_volume_source_and_target(source, target, mode, app_dir_real, declared_volumes, expect_type=None):
+    if not isinstance(source, str) or not isinstance(target, str):
+        raise RuntimeError("Volume source and target must be strings")
+    source = source.strip()
+    target = target.strip()
+    if not source or not target:
+        raise RuntimeError("Volume source and target must be non-empty")
+    for field in (source, target):
+        if any(tok in field for tok in ("$", "~", "\x00", "\\")) or ".sock" in field.lower():
+            raise RuntimeError(f"Disallowed volume path '{field}'")
+    if not CONTAINER_PATH_RE.match(target) or ".." in target.split("/"):
+        raise RuntimeError(f"Invalid container mount target '{target}'")
+    if mode is not None and mode not in ("ro", "rw"):
+        raise RuntimeError(f"Disallowed volume mode '{mode}' (only ro or rw allowed)")
+
+    # Case 1: relative bind mount strictly inside app_dir (./subdir)
+    if source.startswith("./"):
+        if expect_type == "volume":
+            raise RuntimeError("Named volume source cannot be a relative path")
+        if ":" in source:
+            raise RuntimeError(f"Disallowed relative volume path '{source}'")
+        rel = source[2:]
+        parts = [p for p in rel.split("/") if p]
+        if not parts or any(p in (".", "..") or p.endswith((".", " ")) for p in parts):
+            raise RuntimeError(f"Disallowed relative volume path '{source}'")
+        if parts[0].startswith(".") or parts[0].rstrip(". ").lower() in RESERVED_COMPOSE_NAMES:
+            raise RuntimeError(f"Cannot mount compose metadata path '{source}'")
+        # Check every component for symlink escape if app_dir exists on disk.
+        cur = app_dir_real
+        for part in parts:
+            cur = os.path.join(cur, part)
+            if os.path.islink(cur):
+                raise RuntimeError(f"Symlink volume mount '{source}' is not allowed")
+        resolved = os.path.realpath(cur)
+        if not resolved.startswith(app_dir_real + os.sep):
+            raise RuntimeError(f"Volume path '{source}' escapes the app directory")
+        norm_source = "./" + "/".join(parts)
+        return f"{norm_source}:{target}" + (f":{mode}" if mode else ""), norm_source
+
+    # Refuse absolute paths, bare '.', '..', drive paths, or anything with '/'
+    if "/" in source or source.startswith(".") or ":" in source:
+        raise RuntimeError(f"Host path mount '{source}' is not allowed; use a named volume or ./subdir")
+
+    # Case 2: named volume declared at top-level volumes:
+    if expect_type == "bind":
+        raise RuntimeError("Bind mount source must be a ./subdir inside the app directory")
+    if not VOLUME_NAME_RE.match(source):
+        raise RuntimeError(f"Invalid named volume '{source}'")
+    if source not in declared_volumes:
+        raise RuntimeError(f"Named volume '{source}' must be declared in top-level volumes")
+    return f"{source}:{target}" + (f":{mode}" if mode else ""), None
+
+
+def _validate_volume_entry(entry, app_dir_real, declared_volumes):
+    if isinstance(entry, str):
+        raw = entry.strip()
+        if not raw or "$" in raw or "~" in raw or "\\" in raw:
+            raise RuntimeError(f"Disallowed volume mount '{entry}'")
+        parts = raw.split(":")
+        if len(parts) not in (2, 3):
+            raise RuntimeError(f"Volume mount '{entry}' must be <source>:<target>[:ro|rw]")
+        src, tgt = parts[0], parts[1]
+        mode = parts[2] if len(parts) == 3 else None
+        return _validate_volume_source_and_target(src, tgt, mode, app_dir_real, declared_volumes)
+    if isinstance(entry, dict):
+        bad = set(entry.keys()) - ALLOWED_VOL_OBJ_KEYS
+        if bad:
+            raise RuntimeError(f"Disallowed volume option(s): {', '.join(sorted(bad))}")
+        vtype = str(entry.get("type") or "")
+        if vtype not in ("volume", "bind"):
+            raise RuntimeError(f"Disallowed volume type '{vtype}' (only volume or bind allowed)")
+        ro = entry.get("read_only")
+        if ro is not None and not isinstance(ro, bool):
+            raise RuntimeError("Volume read_only must be a boolean")
+        mode = "ro" if ro else None
+        return _validate_volume_source_and_target(entry.get("source"), entry.get("target"), mode, app_dir_real, declared_volumes, expect_type=vtype)
+    raise RuntimeError("Invalid volume entry in compose file")
+
+
+def _escape_compose_dollars(val):
+    return str(val).replace("$", "$$")
+
+
+def _emit_compose_yaml(doc):
+    """Emit a canonical, double-quoted YAML 1.2 document from a validated Compose dict."""
+    out = ["services:"]
+    for svc_name, svc in doc["services"].items():
+        out.append(f"  {json.dumps(svc_name)}:")
+        out.append(f"    image: {json.dumps(svc['image'])}")
+        if "restart" in svc:
+            out.append(f"    restart: {json.dumps(svc['restart'])}")
+        if "user" in svc:
+            out.append(f"    user: {json.dumps(svc['user'])}")
+        if "command" in svc:
+            cmd = svc["command"]
+            if isinstance(cmd, str):
+                out.append(f"    command: {json.dumps(_escape_compose_dollars(cmd))}")
+            else:
+                out.append("    command:")
+                for arg in cmd:
+                    out.append(f"      - {json.dumps(_escape_compose_dollars(arg))}")
+        if "environment" in svc:
+            out.append("    environment:")
+            for k, v in svc["environment"].items():
+                out.append(f"      {json.dumps(k)}: {json.dumps(_escape_compose_dollars(v))}")
+        if "ports" in svc:
+            out.append("    ports:")
+            for p in svc["ports"]:
+                out.append(f"      - {json.dumps(p)}")
+        if "volumes" in svc:
+            out.append("    volumes:")
+            for v in svc["volumes"]:
+                out.append(f"      - {json.dumps(v)}")
+    if doc.get("volumes"):
+        out.append("volumes:")
+        for vol_name in doc["volumes"]:
+            out.append(f"  {json.dumps(vol_name)}: {{}}")
+    return "\n".join(out) + "\n"
+
+
+def _check_non_overlapping_binds(bind_sources):
+    """Reject nested or duplicate relative bind paths (case-folded for APFS/NTFS safety) to prevent symlink-swap escapes."""
+    seen = []
+    for src in bind_sources:
+        folded = src.lower()
+        for prev in seen:
+            if folded == prev or folded.startswith(prev + "/") or prev.startswith(folded + "/"):
+                raise RuntimeError(f"Overlapping bind mount '{src}' is not allowed")
+        seen.append(folded)
+
+
+def validate_app_compose(compose_text, app_dir, port=0):
+    """Strictly validate a remote app Compose definition and return (canonical_yaml, published_tcp_ports)."""
+    doc = _parse_safe_compose(compose_text)
+    bad_top = set(doc.keys()) - ALLOWED_TOP_KEYS
+    if bad_top:
+        raise RuntimeError(f"Disallowed top-level compose key(s): {', '.join(sorted(bad_top))}")
+
+    declared_volumes = {}
+    raw_vols = doc.get("volumes")
+    if raw_vols is not None:
+        if not isinstance(raw_vols, dict) or len(raw_vols) > 32:
+            raise RuntimeError("Top-level volumes must be a mapping of up to 32 named volumes")
+        for vname, vcfg in raw_vols.items():
+            if not isinstance(vname, str) or not VOLUME_NAME_RE.match(vname):
+                raise RuntimeError(f"Invalid named volume '{vname}'")
+            if vcfg is not None and vcfg != {}:
+                raise RuntimeError(f"Volume '{vname}' cannot specify custom driver or external options")
+            declared_volumes[vname] = {}
+
+    services = doc.get("services")
+    if not isinstance(services, dict) or not services or len(services) > 16:
+        raise RuntimeError("Compose file must define between 1 and 16 services")
+
+    app_dir_real = os.path.realpath(app_dir)
+    clean_services = {}
+    published_tcp_ports = set()
+    bind_sources = []
+
+    for svc_name, svc in services.items():
+        if not isinstance(svc_name, str) or not SERVICE_NAME_RE.match(svc_name):
+            raise RuntimeError(f"Invalid service name '{svc_name}'")
+        if not isinstance(svc, dict):
+            raise RuntimeError(f"Service '{svc_name}' must be a mapping")
+        bad_keys = set(svc.keys()) - ALLOWED_SERVICE_KEYS
+        if bad_keys:
+            raise RuntimeError(f"Disallowed compose option(s) in service '{svc_name}': {', '.join(sorted(bad_keys))}")
+
+        image = svc.get("image")
+        if not isinstance(image, str) or not IMAGE_REF_RE.match(image) or ".." in image or "$" in image:
+            raise RuntimeError(f"Service '{svc_name}' must declare a valid container image")
+        clean_svc = {"image": image}
+
+        if "restart" in svc and svc["restart"] is not None:
+            restart = str(svc["restart"])
+            if restart not in ALLOWED_RESTART_POLICIES:
+                raise RuntimeError(f"Disallowed restart policy '{restart}' in service '{svc_name}'")
+            clean_svc["restart"] = restart
+
+        if "user" in svc and svc["user"] is not None:
+            user = str(svc["user"])
+            if not USER_SPEC_RE.match(user):
+                raise RuntimeError(f"Invalid user '{user}' in service '{svc_name}'")
+            clean_svc["user"] = user
+
+        if "command" in svc and svc["command"] is not None:
+            cmd = svc["command"]
+            if isinstance(cmd, str):
+                if len(cmd) > 1024:
+                    raise RuntimeError(f"Command too long in service '{svc_name}'")
+                clean_svc["command"] = cmd
+            elif isinstance(cmd, list) and len(cmd) <= 64 and all(isinstance(x, (str, int, float, bool)) for x in cmd):
+                parts = [str(x) for x in cmd]
+                if any(len(p) > 512 for p in parts):
+                    raise RuntimeError(f"Command argument too long in service '{svc_name}'")
+                clean_svc["command"] = parts
+            else:
+                raise RuntimeError(f"Invalid command in service '{svc_name}'")
+
+        if "environment" in svc and svc["environment"] is not None:
+            raw_env = svc["environment"]
+            clean_env = {}
+            if isinstance(raw_env, dict):
+                if len(raw_env) > 100:
+                    raise RuntimeError(f"Too many environment variables in service '{svc_name}'")
+                for ek, ev in raw_env.items():
+                    if not isinstance(ek, str) or not ENV_KEY_RE.match(ek):
+                        raise RuntimeError(f"Invalid environment variable name '{ek}'")
+                    if ev is None:
+                        raise RuntimeError(f"Environment variable '{ek}' must specify an explicit value")
+                    val = "true" if ev is True else "false" if ev is False else str(ev)
+                    if len(val) > 4096:
+                        raise RuntimeError(f"Environment variable '{ek}' value is too long")
+                    clean_env[ek] = val
+            elif isinstance(raw_env, list):
+                if len(raw_env) > 100:
+                    raise RuntimeError(f"Too many environment variables in service '{svc_name}'")
+                for item in raw_env:
+                    if not isinstance(item, str) or "=" not in item:
+                        raise RuntimeError(f"Environment entry in service '{svc_name}' must be KEY=value")
+                    ek, ev = item.split("=", 1)
+                    if not ENV_KEY_RE.match(ek):
+                        raise RuntimeError(f"Invalid environment variable name '{ek}'")
+                    if len(ev) > 4096:
+                        raise RuntimeError(f"Environment variable '{ek}' value is too long")
+                    clean_env[ek] = ev
+            else:
+                raise RuntimeError(f"Invalid environment section in service '{svc_name}'")
+            if clean_env:
+                clean_svc["environment"] = clean_env
+
+        if "ports" in svc and svc["ports"] is not None:
+            raw_ports = svc["ports"]
+            if not isinstance(raw_ports, list) or len(raw_ports) > 16:
+                raise RuntimeError(f"Ports in service '{svc_name}' must be a list of up to 16 entries")
+            clean_ports = []
+            for p_entry in raw_ports:
+                spec, host_port, proto = _validate_port_entry(p_entry)
+                clean_ports.append(spec)
+                if proto == "tcp":
+                    published_tcp_ports.add(host_port)
+            if clean_ports:
+                clean_svc["ports"] = clean_ports
+
+        if "volumes" in svc and svc["volumes"] is not None:
+            raw_svc_vols = svc["volumes"]
+            if not isinstance(raw_svc_vols, list) or len(raw_svc_vols) > 32:
+                raise RuntimeError(f"Volumes in service '{svc_name}' must be a list of up to 32 entries")
+            clean_vols = []
+            for v_entry in raw_svc_vols:
+                vol_spec, bind_src = _validate_volume_entry(v_entry, app_dir_real, declared_volumes)
+                clean_vols.append(vol_spec)
+                if bind_src is not None:
+                    bind_sources.append(bind_src)
+            if clean_vols:
+                clean_svc["volumes"] = clean_vols
+
+        clean_services[svc_name] = clean_svc
+
+    _check_non_overlapping_binds(bind_sources)
+    if port != 0 and port not in published_tcp_ports:
+        raise RuntimeError(f"Declared web port {port} is not published on 127.0.0.1 in the compose file")
+
+    clean_doc = {"services": clean_services}
+    if declared_volumes:
+        clean_doc["volumes"] = declared_volumes
+    return _emit_compose_yaml(clean_doc), published_tcp_ports
+
+
+def _apps_root(data_dir=None):
+    return os.path.join(data_dir or DATA_DIR, "apps")
+
+
+def _compose_cmd():
+    if shutil.which("podman"):
+        try:
+            if subprocess.run(["podman", "compose", "version"], capture_output=True, timeout=5).returncode == 0:
+                return "podman", ["podman", "compose"]
+        except (OSError, subprocess.SubprocessError):
+            pass
+        if shutil.which("podman-compose"):
+            return "podman", ["podman-compose"]
+    if shutil.which("docker"):
+        try:
+            if subprocess.run(["docker", "compose", "version"], capture_output=True, timeout=5).returncode == 0:
+                return "docker", ["docker", "compose"]
+        except (OSError, subprocess.SubprocessError):
+            pass
+        if shutil.which("docker-compose"):
+            return "docker", ["docker-compose"]
+    return "", []
+
+
+def _allowed_app_ports(data_dir=None):
+    root = _apps_root(data_dir)
+    ports = {}
+    if not os.path.isdir(root):
+        return ports
+    for name in os.listdir(root):
+        if not APP_ID_RE.match(name):
+            continue
+        try:
+            with open(os.path.join(root, name, "meta.json"), encoding="utf-8") as f:
+                meta = json.load(f)
+            port = int(meta.get("port") or 0)
+            if 1024 <= port <= 65535:
+                ports[name] = port
+        except (OSError, ValueError, TypeError):
+            continue
+    return ports
+
+
+def apps_status(_args):
+    engine, cmd = _compose_cmd()
+    free = 0
+    try:
+        st = os.statvfs(os.path.expanduser("~"))
+        free = st.f_bavail * st.f_frsize
+    except OSError:
+        pass
+    return {"engine": engine, "compose": " ".join(cmd), "available": bool(engine and cmd), "freeDisk": free, "gpus": [{"name": g.get("name", "")} for g in gpus()]}
+
+
+def apps_list(_args, data_dir=None):
+    root = _apps_root(data_dir)
+    if not os.path.isdir(root):
+        return []
+    engine, cmd = _compose_cmd()
+    out = []
+    for name in sorted(os.listdir(root)):
+        if not APP_ID_RE.match(name):
+            continue
+        meta_file = os.path.join(root, name, "meta.json")
+        compose_file = os.path.join(root, name, "docker-compose.yml")
+        if not os.path.isfile(meta_file):
+            continue
+        try:
+            with open(meta_file, encoding="utf-8") as f:
+                meta = json.load(f)
+        except (OSError, ValueError):
+            continue
+        state = "stopped"
+        if cmd and os.path.isfile(compose_file):
+            try:
+                r = subprocess.run([*cmd, "-p", f"omarchy-swarm-{name}", "-f", compose_file, "ps", "--format", "json"], capture_output=True, text=True, timeout=15)
+                rows = _parse_containers_json(r.stdout, engine)
+                if any(x.get("state") == "running" for x in rows):
+                    state = "running"
+            except (OSError, subprocess.SubprocessError):
+                pass
+        out.append(
+            {
+                "id": name,
+                "name": str(meta.get("name") or name)[:80],
+                "icon": str(meta.get("icon") or "")[:300],
+                "port": int(meta.get("port") or 0),
+                "path": str(meta.get("path") or "")[:120],
+                "state": state,
+                "installedAt": int(meta.get("installedAt") or 0),
+            }
+        )
+    return out
+
+
+def apps_install(args, data_dir=None, run_cmd=None):
+    app_id = str((args or {}).get("id") or "").strip().lower()
+    if not APP_ID_RE.match(app_id):
+        raise RuntimeError("Invalid app id")
+    compose = str((args or {}).get("compose") or "")
+    if not compose.strip() or len(compose.encode("utf-8", errors="ignore")) > COMPOSE_MAX_BYTES:
+        raise RuntimeError("Missing or oversized compose file")
+    raw_port = (args or {}).get("port") or 0
+    if isinstance(raw_port, bool):
+        raise RuntimeError("Invalid app port")
+    try:
+        port = int(raw_port)
+    except (TypeError, ValueError):
+        raise RuntimeError("Invalid app port")
+    if port != 0 and not (1024 <= port <= 65535):
+        raise RuntimeError("Invalid app port")
+    name = str((args or {}).get("name") or app_id)[:80]
+    icon = str((args or {}).get("icon") or "")[:300]
+    path = str((args or {}).get("path") or "")[:120]
+    engine, cmd = _compose_cmd()
+    if run_cmd is None and (not engine or not cmd):
+        raise RuntimeError("Install podman or docker with compose on this computer first")
+    app_dir = os.path.join(_apps_root(data_dir), app_id)
+    compose_file = os.path.join(app_dir, "docker-compose.yml")
+    meta_file = os.path.join(app_dir, "meta.json")
+    existed = os.path.isfile(meta_file)
+    os.makedirs(app_dir, mode=0o700, exist_ok=True)
+    prev_compose = None
+    if existed and os.path.isfile(compose_file):
+        try:
+            with open(compose_file, encoding="utf-8") as f:
+                prev_compose = f.read()
+        except OSError:
+            prev_compose = None
+    try:
+        canonical_compose, _published = validate_app_compose(compose, app_dir, port=port)
+    except Exception:
+        if not existed:
+            shutil.rmtree(app_dir, ignore_errors=True)
+        raise
+    meta = {"id": app_id, "name": name, "icon": icon, "port": port, "path": path, "installedAt": int(time.time() * 1000)}
+    try:
+        fd = os.open(compose_file, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(canonical_compose)
+        exec_fn = run_cmd or (lambda c, cwd=None: run(c, cwd=cwd, timeout=600))
+        exec_fn([*(cmd or ["podman", "compose"]), "-p", f"omarchy-swarm-{app_id}", "-f", compose_file, "up", "-d"], cwd=app_dir)
+        mfd = os.open(meta_file, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(mfd, "w", encoding="utf-8") as f:
+            json.dump(meta, f)
+    except Exception:
+        if prev_compose is not None:
+            try:
+                fd = os.open(compose_file, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    f.write(prev_compose)
+            except OSError:
+                pass
+        elif not existed:
+            shutil.rmtree(app_dir, ignore_errors=True)
+        raise
+    return {"id": app_id, "name": name, "port": port, "path": path, "state": "running"}
+
+
+def _revalidate_installed_compose(app_dir, compose_file):
+    try:
+        with open(compose_file, encoding="utf-8") as f:
+            raw = f.read()
+    except OSError as e:
+        raise RuntimeError(f"Couldn’t read compose file: {e}") from e
+    validate_app_compose(raw, app_dir, port=0)
+
+
+def apps_control(args, data_dir=None, run_cmd=None):
+    app_id = str((args or {}).get("id") or "").strip().lower()
+    action = str((args or {}).get("action") or "")
+    if not APP_ID_RE.match(app_id):
+        raise RuntimeError("Invalid app id")
+    if action not in ("start", "stop", "restart", "uninstall", "logs"):
+        raise RuntimeError("Unknown app action")
+    app_dir = os.path.join(_apps_root(data_dir), app_id)
+    compose_file = os.path.join(app_dir, "docker-compose.yml")
+    if not os.path.isfile(compose_file):
+        raise RuntimeError("That app isn’t installed on this computer")
+    engine, cmd = _compose_cmd()
+    if run_cmd is None and (not engine or not cmd):
+        raise RuntimeError("No container runtime is installed on this computer")
+    base = [*(cmd or ["podman", "compose"]), "-p", f"omarchy-swarm-{app_id}", "-f", compose_file]
+    exec_fn = run_cmd or (lambda c, cwd=None: run(c, cwd=cwd, timeout=180))
+    if action == "start":
+        _revalidate_installed_compose(app_dir, compose_file)
+        exec_fn([*base, "up", "-d"], cwd=app_dir)
+        return True
+    if action == "stop":
+        exec_fn([*base, "stop"], cwd=app_dir)
+        return True
+    if action == "restart":
+        _revalidate_installed_compose(app_dir, compose_file)
+        exec_fn([*base, "restart"], cwd=app_dir)
+        return True
+    if action == "uninstall":
+        try:
+            exec_fn([*base, "down", "-v", "--remove-orphans"], cwd=app_dir)
+        finally:
+            shutil.rmtree(app_dir, ignore_errors=True)
+        return True
+    lines = max(10, min(1000, int((args or {}).get("lines") or 200)))
+    out = exec_fn([*base, "logs", "--tail", str(lines), "--no-color"], cwd=app_dir)
+    return {"logs": str(out or "")[-200_000:]}
+
+
+APPS_ACTIONS = {
+    "apps-status": apps_status,
+    "apps-list": apps_list,
+    "apps-install": apps_install,
+    "apps-control": apps_control,
+}
+
+
+# ---------------------------------------------------------------------------------------------
 class Connection:
     def __init__(self, cfg):
         self.cfg = cfg
@@ -3351,16 +4289,22 @@ class Connection:
                     self.send({"op": "closed", "ch": ch, "code": 1011, "reason": str(e)[:200]})
                 return
             is_rdp_tcp = kind == "tcp" and str(msg.get("appId") or "") == "__rdp__" and int(msg.get("port") or 0) == 3389
-            ability = "terminal" if kind == "pty" else "desktop" if (kind == "vnc" or is_rdp_tcp) else None
+            ability = "terminal" if kind == "pty" else "desktop" if (kind == "vnc" or is_rdp_tcp) else "apps" if kind == "tcp" else None
             if not ability or not self.allowed.get(ability):
                 return self.send({"op": "closed", "ch": ch, "code": 1011, "reason": f"This computer doesn’t allow the {ability or 'that'}"})
             if kind == "vnc":
                 # vnc_start sleeps until the socket exists. That wait used to sit on this thread.
                 self._open_vnc(ch)
                 return
-            if is_rdp_tcp:
+            if kind == "tcp":
                 try:
-                    self.channels[ch] = TcpChannel(self, ch, 3389)
+                    app_id = str(msg.get("appId") or "")
+                    port = int(msg.get("port") or 0)
+                    if not is_rdp_tcp:
+                        allowed_ports = _allowed_app_ports()
+                        if app_id not in allowed_ports or allowed_ports[app_id] != port:
+                            raise RuntimeError("That port doesn’t belong to an installed app")
+                    self.channels[ch] = TcpChannel(self, ch, port)
                 except Exception as e:  # noqa: BLE001
                     self.send({"op": "closed", "ch": ch, "code": 1011, "reason": str(e)[:200]})
                 return
@@ -3446,6 +4390,13 @@ class Connection:
                 if not fn:
                     raise RuntimeError("Unknown action")
                 data = fn(msg.get("args") or {})
+            elif name in APPS_ACTIONS or str(name).startswith("apps-"):
+                if not self.allowed.get("apps"):
+                    raise RuntimeError("This computer doesn’t allow remote apps")
+                fn = APPS_ACTIONS.get(name)
+                if not fn:
+                    raise RuntimeError("Unknown action")
+                data = fn(msg.get("args") or {})
             else:
                 if not self.allowed.get("manage"):
                     raise RuntimeError("This computer doesn’t allow managing")
@@ -3468,16 +4419,26 @@ def forget():
         os.unlink(CONFIG)
     except OSError:
         pass
+    _backup_password_dir(True)
     try:
         if IS_WINDOWS:
             subprocess.run(["schtasks", "/Delete", "/TN", "OmarchyConnector", "/F"], capture_output=True, timeout=30, creationflags=_WIN_NO_WINDOW)
+        elif IS_MACOS:
+            plist = os.path.expanduser("~/Library/LaunchAgents/com.omarchy.connector.plist")
+            # Remove the plist BEFORE bootout: bootout terminates this process immediately,
+            # so deleting after bootout would leave the plist behind to restart on next login.
+            if os.path.exists(plist):
+                try:
+                    os.unlink(plist)
+                except OSError:
+                    pass
+            subprocess.run(["launchctl", "bootout", f"gui/{os.getuid()}/com.omarchy.connector"], capture_output=True, timeout=30)
         else:
             # --now so systemd stops the unit instead of restarting it (Restart=always) every 5 seconds;
             # --no-block so this process isn't waiting on its own stop.
             subprocess.run(["systemctl", "--user", "disable", "--now", "--no-block", "omarchy-connector.service"], capture_output=True, timeout=30)
     except (OSError, subprocess.SubprocessError):
-        pass  # not run by systemd (or no systemd): stopping is enough
-    _backup_password_dir(True)
+        pass  # not run by systemd/launchd: stopping is enough
     os._exit(0)
 
 
