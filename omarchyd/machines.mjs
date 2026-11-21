@@ -378,9 +378,10 @@ export function createMachines({dataDir, catalogUrl = CATALOG_URL, fetchImpl = f
 		const scsi = layout.disks.some((d) => d.bus === 'scsi') ? "\n    <controller type='scsi' model='virtio-scsi'/>" : ''
 		const machine = layout.machineType === 'pc' ? 'pc' : 'q35'
 		const bootmenu = o.bootMenu ? "<bootmenu enable='yes' timeout='3000'/>" : ''
+		const nvramEl = layout.nvram ? `<nvram>${xml(layout.nvram)}</nvram>` : ''
 		const os =
 			layout.firmware === 'efi'
-				? `<os firmware='efi'><type arch='x86_64' machine='${machine}'>hvm</type><firmware><feature enabled='no' name='secure-boot'/></firmware>${bootmenu}</os>`
+				? `<os firmware='efi'><type arch='x86_64' machine='${machine}'>hvm</type><firmware><feature enabled='no' name='secure-boot'/></firmware>${nvramEl}${bootmenu}</os>`
 				: `<os><type arch='x86_64' machine='${machine}'>hvm</type>${bootmenu}</os>`
 		const sockets = m.sockets ?? 1
 		const topology = `<topology sockets='${sockets}' dies='1' cores='${m.cores}' threads='1'/>`
@@ -1680,6 +1681,24 @@ export function createMachines({dataDir, catalogUrl = CATALOG_URL, fetchImpl = f
 					} else kept.push({...d, file: d.file && (await exists(d.file)) ? d.file : ''})
 				}
 				m.layout.disks = kept
+				if (m.layout.firmware === 'efi' && source.layout?.nvram && (await exists(source.layout.nvram))) {
+					// Only attach copied UEFI NVRAM if its size matches a local OVMF_VARS template (when present),
+					// preventing libvirt from failing boot due to mismatched flash geometry.
+					const srcSize = (await stat(source.layout.nvram).catch(() => null))?.size ?? 0
+					const ovmfCandidates = ['/usr/share/edk2/x64/OVMF_VARS.4m.fd', '/usr/share/edk2-ovmf/x64/OVMF_VARS.4m.fd', '/usr/share/OVMF/OVMF_VARS_4M.fd', '/usr/share/OVMF/OVMF_VARS.fd']
+					const localSizes = []
+					for (const p of ovmfCandidates) {
+						const st = await stat(p).catch(() => null)
+						if (st?.size) localSizes.push(st.size)
+					}
+					if (srcSize > 0 && (!localSizes.length || localSizes.includes(srcSize))) {
+						const dstNvram = join(dir, 'VARS.fd')
+						await copyFile(source.layout.nvram, dstNvram)
+						m.layout.nvram = dstNvram
+					} else {
+						delete m.layout.nvram
+					}
+				}
 				m.boot = (m.boot ?? []).filter((b) => b === 'net' || kept.some((d) => d.id === b))
 				if (!m.boot.length) m.boot = [kept.find((d) => d.device === 'disk')?.id ?? 'disk0']
 				await define(m)
@@ -1728,7 +1747,7 @@ export function createMachines({dataDir, catalogUrl = CATALOG_URL, fetchImpl = f
 			cores: Math.max(1, Math.min(Number(spec.cores) || 2, os.cpus().length || 2)),
 			memoryMb,
 			memoryGb: Math.max(1, Math.round(memoryMb / 1024)),
-			layout: {firmware: spec.firmware === 'efi' ? 'efi' : 'bios', machineType: spec.machineType === 'pc' ? 'pc' : 'q35', nic: spec.nic === 'e1000e' ? 'e1000e' : 'virtio', video: 'vga', disks},
+			layout: {firmware: spec.firmware === 'efi' ? 'efi' : 'bios', machineType: spec.machineType === 'pc' ? 'pc' : 'q35', nic: spec.nic === 'e1000e' ? 'e1000e' : 'virtio', video: 'vga', ...(spec.nvram ? {nvram: String(spec.nvram)} : {}), disks},
 		}
 		return adopt(source, {name, keepIds: false, copyDisk: (d, dst) => run('qemu-img', ['convert', '-f', d.format, '-O', 'qcow2', d.file, dst], {timeout: 12 * 60 * 60_000})})
 	}
