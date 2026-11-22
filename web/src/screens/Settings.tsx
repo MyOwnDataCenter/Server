@@ -8,7 +8,7 @@ import {resetDeskConfig} from '../desktop/config'
 import {useBootstrap, useUser} from '../data'
 import {checkLiveText} from '../focus'
 import {Icon, type IconName} from '../icons'
-import {Card, Field, Group, InWindow, Row, Segmented, Sheet, SheetHeader, Switch, VersionTag, haptic, initials, scrollPhoneToTop, setLayoutPref, useConfirm, useLayout, useOmarchyThemes, useToast, type Prefs} from '../ui'
+import {Card, Field, Group, InWindow, Row, Segmented, Sheet, SheetHeader, Switch, VersionTag, bytes, haptic, initials, scrollPhoneToTop, setLayoutPref, useConfirm, useLayout, useOmarchyThemes, useToast, type Prefs} from '../ui'
 import {Appearance} from './More'
 import {AssistantAppearanceSettings} from '../character/widgets'
 import {OmarchyThemes} from '../OmarchyThemes'
@@ -88,7 +88,7 @@ function describeSession(s: ActiveSession) {
 	return {icon: 'browser' as IconName, name: `${browser}${os ? ` on ${os}` : ''}`, detail: ''}
 }
 
-type SheetId = null | 'name' | 'password' | '2fa' | 'hostname' | 'wifi' | 'logs' | 'reset' | 'alerts' | 'health' | 'audit'
+type SheetId = null | 'name' | 'password' | '2fa' | 'hostname' | 'wifi' | 'tailscale' | 'logs' | 'reset' | 'alerts' | 'health' | 'audit'
 
 export function Settings({prefs, setPrefs, onBack, onSignedOut}: {prefs: Prefs; setPrefs: (p: Prefs) => void; onBack: () => void; onSignedOut: () => void}) {
 	const boot = useBootstrap()
@@ -127,6 +127,7 @@ export function Settings({prefs, setPrefs, onBack, onSignedOut}: {prefs: Prefs; 
 	const ips = useQ<string[]>('system.getIpAddresses')
 	const wifiSupported = useQ<boolean>('wifi.supported', undefined, {enabled: owner})
 	const wifi = useQ<{status: 'connected' | 'disconnected'; ssid?: string}>('wifi.connected', undefined, {enabled: owner && !!wifiSupported.data})
+	const tailscale = useQ<TailscaleStatus>('tailscale.status', undefined, {enabled: owner})
 
 	const startUpdate = async () => {
 		const ok = await confirm({
@@ -369,6 +370,23 @@ export function Settings({prefs, setPrefs, onBack, onSignedOut}: {prefs: Prefs; 
 				<Group title="Network & privacy">
 					<Row icon="network" color="var(--teal)" label="Device name" value={hostname.data ? `${hostname.data}.local` : ''} onClick={() => setSheet('hostname')} />
 					<Row icon="networking" color="var(--blue)" label="IP address" value={(ips.data ?? []).join(', ') || '–'} />
+					<Row
+						icon="link"
+						color="var(--purple, #8b5cf6)"
+						label="Tailscale"
+						value={
+							tailscale.data
+								? !tailscale.data.available
+									? 'Unavailable'
+									: tailscale.data.backendState === 'Running'
+										? `${tailscale.data.self?.ips.find((ip) => ip.includes('.')) ?? tailscale.data.self?.ips[0] ?? 'Connected'} · ${tailscale.data.summary.onlinePeers} online`
+										: tailscale.data.backendState === 'NeedsLogin'
+											? 'Sign in needed'
+											: tailscale.data.backendState
+								: ''
+						}
+						onClick={() => setSheet('tailscale')}
+					/>
 					{wifiSupported.data && <Row icon="wifi" color="var(--blue)" label="Wi-Fi" value={wifi.data?.status === 'connected' ? wifi.data.ssid : 'Off'} onClick={() => setSheet('wifi')} />}
 				</Group>
 			)}
@@ -409,6 +427,7 @@ export function Settings({prefs, setPrefs, onBack, onSignedOut}: {prefs: Prefs; 
 			<TwoFactorSheet open={sheet === '2fa'} enabled={!!twoFactor.data} onClose={close} />
 			<HostnameSheet open={sheet === 'hostname'} current={hostname.data ?? ''} onClose={close} />
 			{sheet === 'wifi' && <WifiSheet onClose={close} connected={wifi.data?.status === 'connected' ? wifi.data.ssid : undefined} />}
+			{sheet === 'tailscale' && <TailscaleSheet onClose={close} />}
 			{sheet === 'alerts' && <AlertsSheet onClose={close} />}
 			{sheet === 'health' && <HealthSheet onClose={close} />}
 			{sheet === 'audit' && <AuditSheet onClose={close} />}
@@ -1849,6 +1868,531 @@ function AuditSheet({onClose}: {onClose: () => void}) {
 				))}
 				{rows.isSuccess && (rows.data?.length ?? 0) === 0 && <div className="row static muted">No recorded actions yet.</div>}
 			</Group>
+		</Sheet>
+	)
+}
+
+type TailscalePeer = {
+	id: string
+	hostName: string
+	dnsName: string
+	os: string
+	ips: string[]
+	online: boolean
+	active: boolean
+	direct: boolean
+	curAddr: string
+	relay: string
+	rxBytes: number
+	txBytes: number
+	lastSeen: string | null
+	lastHandshake: string | null
+	exitNode: boolean
+	exitNodeOption: boolean
+	tags: string[]
+}
+
+type TailscaleStatus = {
+	available: boolean
+	operator: boolean
+	version: string
+	backendState: string
+	authUrl: string
+	tailnet: string
+	magicDnsSuffix: string
+	health: string[]
+	error?: string
+	self: {
+		id: string
+		hostName: string
+		dnsName: string
+		os: string
+		ips: string[]
+		relay: string
+		online: boolean
+		exitNode: boolean
+		advertisingExitNode: boolean
+		subnetRoutes: string[]
+	} | null
+	prefs: {
+		wantRunning: boolean
+		controlUrl: string
+		acceptDns: boolean
+		acceptRoutes: boolean
+		runSsh: boolean
+		shieldsUp: boolean
+		exitNodeId: string
+		exitNodeAllowLan: boolean
+		advertiseExitNode: boolean
+		subnetRoutes: string[]
+	} | null
+	peers: TailscalePeer[]
+	summary: {
+		totalPeers: number
+		onlinePeers: number
+		directPeers: number
+		exitNodeOptions: number
+	}
+}
+
+type TailscalePingResult = {
+	ip: string
+	peer: string
+	latencyMs: number | null
+	direct: boolean
+	endpoint: string
+	derpRegionCode: string
+	error: string
+}
+
+function TailscaleSheet({onClose}: {onClose: () => void}) {
+	const toast = useToast()
+	const confirm = useConfirm()
+	const save = useSave()
+	const qc = useQueryClient()
+	const ts = useQ<TailscaleStatus>('tailscale.status', undefined, {refetchInterval: 10_000})
+	const [routesInput, setRoutesInput] = useState('')
+	const [controlUrlInput, setControlUrlInput] = useState('')
+	const [pinging, setPinging] = useState<string | null>(null)
+	const [pings, setPings] = useState<Record<string, TailscalePingResult>>({})
+	const [loginBusy, setLoginBusy] = useState(false)
+	const [loginUrl, setLoginUrl] = useState('')
+
+	const prefs = ts.data?.prefs
+	useEffect(() => {
+		if (!prefs) return
+		setRoutesInput(prefs.subnetRoutes.join(', '))
+		setControlUrlInput(prefs.controlUrl)
+	}, [prefs?.subnetRoutes.join(','), prefs?.controlUrl])
+
+	const patchPrefs = (patch: Record<string, unknown>, done: string) => {
+		save.mutate({path: 'tailscale.setPrefs', input: patch, done, refresh: ['tailscale.status']})
+	}
+
+	const copyText = async (text: string, label: string) => {
+		try {
+			await navigator.clipboard.writeText(text)
+			toast(`${label} copied`)
+		} catch {
+			toast(`Couldn’t copy ${label.toLowerCase()}`, true)
+		}
+	}
+
+	const startLogin = async () => {
+		setLoginBusy(true)
+		try {
+			const res = await mutate<{authUrl: string; backendState: string}>('tailscale.login')
+			if (res.authUrl) {
+				setLoginUrl(res.authUrl)
+				window.open(res.authUrl, '_blank', 'noopener,noreferrer')
+				toast('Finish signing in to Tailscale in the opened tab')
+			} else if (res.backendState === 'Running') {
+				toast('Tailscale is already connected')
+			} else {
+				toast('Sign-in started — check again in a moment')
+			}
+			qc.invalidateQueries({queryKey: ['tailscale.status']})
+		} catch (e) {
+			toast((e as Error).message, true)
+		} finally {
+			setLoginBusy(false)
+		}
+	}
+
+	const signOut = async () => {
+		const ok = await confirm({
+			title: 'Sign out of Tailscale?',
+			body: 'This server will leave your tailnet and won’t be reachable over Tailscale until you sign in again.',
+			confirm: 'Sign out',
+			danger: true,
+		})
+		if (!ok) return
+		save.mutate({path: 'tailscale.logout', done: 'Signed out of Tailscale', refresh: ['tailscale.status']})
+	}
+
+	const pingPeer = async (peer: TailscalePeer) => {
+		const ip = peer.ips.find((x) => x.includes('.')) ?? peer.ips[0]
+		if (!ip) return
+		setPinging(peer.id)
+		try {
+			const res = await mutate<TailscalePingResult>('tailscale.ping', {ip})
+			setPings((prev) => ({...prev, [peer.id]: res}))
+		} catch (e) {
+			toast((e as Error).message, true)
+		} finally {
+			setPinging(null)
+		}
+	}
+
+	const saveRoutes = (e: FormEvent) => {
+		e.preventDefault()
+		const list = routesInput
+			.split(/[,\n\s]+/)
+			.map((s) => s.trim())
+			.filter(Boolean)
+		patchPrefs({subnetRoutes: list}, list.length ? 'Subnet routes updated' : 'Subnet routes cleared')
+	}
+
+	const saveControlUrl = async (e: FormEvent) => {
+		e.preventDefault()
+		const next = controlUrlInput.trim()
+		if (next !== (prefs?.controlUrl ?? '')) {
+			const ok = await confirm({
+				title: next ? 'Switch Tailscale control server?' : 'Reset to default Tailscale control server?',
+				body: next
+					? `Point tailscaled at ${next}. You may need to sign in again if moving to a Headscale server.`
+					: 'Clears the custom control URL and restores Tailscale’s default coordination server.',
+				confirm: 'Save URL',
+			})
+			if (!ok) return
+		}
+		patchPrefs({controlUrl: next}, next ? 'Control server URL saved' : 'Default Tailscale control server restored')
+	}
+
+	const d = ts.data
+	const canEdit = Boolean(d?.available && d.operator && d.prefs)
+	const exitOptions = (d?.peers ?? []).filter((p) => p.exitNodeOption)
+	const activeAuthUrl = loginUrl || d?.authUrl || ''
+	const onTailscaleHost = Boolean(
+		d?.self &&
+			(d.self.ips.includes(location.hostname) ||
+				(d.self.dnsName && location.hostname.toLowerCase() === d.self.dnsName.toLowerCase()) ||
+				(d.magicDnsSuffix && location.hostname.toLowerCase().endsWith(`.${d.magicDnsSuffix.toLowerCase()}`))),
+	)
+
+	const toggleRunning = async (on: boolean) => {
+		if (!on) {
+			const ok = await confirm({
+				title: 'Disconnect Tailscale?',
+				body: onTailscaleHost
+					? 'You appear to be viewing Omarchy Server over Tailscale right now — disconnecting will immediately cut off this session.'
+					: 'This server will drop off your tailnet until you reconnect Tailscale.',
+				confirm: 'Disconnect',
+				danger: true,
+			})
+			if (!ok) return
+		}
+		patchPrefs({wantRunning: on}, on ? 'Tailscale connected' : 'Tailscale disconnected')
+	}
+
+	const toggleShieldsUp = async (on: boolean) => {
+		if (on) {
+			const ok = await confirm({
+				title: 'Enable Shields up?',
+				body: onTailscaleHost
+					? 'You appear to be connected over Tailscale — Shields up blocks all incoming tailnet connections and will lock out this session.'
+					: 'Shields up blocks all incoming connections from other devices on your tailnet.',
+				confirm: 'Enable Shields up',
+				danger: true,
+			})
+			if (!ok) return
+		}
+		patchPrefs({shieldsUp: on}, on ? 'Shields up enabled' : 'Shields up disabled')
+	}
+
+	const selectExitNode = async (nextId: string) => {
+		if (nextId) {
+			const peer = exitOptions.find((p) => p.id === nextId)
+			const ok = await confirm({
+				title: `Route traffic through ${peer?.hostName || peer?.dnsName || 'exit node'}?`,
+				body: 'All outbound server traffic will go through this exit node. Local LAN access will be kept enabled so you don’t lose access on your local network.',
+				confirm: 'Use exit node',
+			})
+			if (!ok) return
+			patchPrefs({exitNodeId: nextId, exitNodeAllowLan: true}, 'Exit node updated')
+		} else {
+			patchPrefs({exitNodeId: ''}, 'Exit node cleared')
+		}
+	}
+
+	return (
+		<Sheet open onClose={onClose} label="Tailscale" tall>
+			<SheetHeader
+				title="Tailscale"
+				subtitle={d?.tailnet ? `${d.tailnet}${d.version ? ` · v${d.version}` : ''}` : 'Private WireGuard mesh networking'}
+				onClose={onClose}
+			/>
+
+			{ts.isLoading && (
+				<div className="row static">
+					<span className="spinner" />
+				</div>
+			)}
+
+			{d && !d.available && (
+				<Group title="Status">
+					<Row icon="alert" color="var(--orange, #f59e0b)" label="Tailscale unavailable" sub={d.error || 'Install and start tailscaled on this server to manage it here.'} />
+				</Group>
+			)}
+
+			{d?.available && (
+				<>
+					<Group
+						title="Connection"
+						footer={
+							!d.operator
+								? 'Read-only view: run `sudo tailscale set --operator=$USER` on this server to manage Tailscale settings from here.'
+								: undefined
+						}
+					>
+						<Row
+							icon={d.backendState === 'Running' ? 'check' : 'alert'}
+							color={d.backendState === 'Running' ? 'var(--green)' : 'var(--orange, #f59e0b)'}
+							label={d.backendState === 'Running' ? 'Connected' : d.backendState === 'NeedsLogin' ? 'Sign in required' : d.backendState}
+							sub={d.self?.relay ? `Home DERP: ${d.self.relay.toUpperCase()}` : undefined}
+							trailing={
+								canEdit && d.prefs ? (
+									<Switch
+										on={d.prefs.wantRunning}
+										disabled={save.isPending}
+										label="Connect Tailscale"
+										onChange={toggleRunning}
+									/>
+								) : undefined
+							}
+						/>
+						{d.self?.dnsName && (
+							<Row
+								icon="networking"
+								color="var(--blue)"
+								label="MagicDNS"
+								sub={d.self.dnsName}
+								trailing={
+									<button type="button" className="btn small" onClick={() => copyText(d.self!.dnsName, 'MagicDNS name')}>
+										Copy
+									</button>
+								}
+							/>
+						)}
+						{(d.self?.ips.length ?? 0) > 0 && (
+							<Row
+								icon="network"
+								color="var(--teal)"
+								label="Tailscale IPs"
+								sub={d.self!.ips.join(' · ')}
+								trailing={
+									<button type="button" className="btn small" onClick={() => copyText(d.self!.ips[0], 'Tailscale IP')}>
+										Copy
+									</button>
+								}
+							/>
+						)}
+						{canEdit && (d.backendState === 'NeedsLogin' || d.backendState === 'NoState' || activeAuthUrl) && (
+							<div className="row static" style={{gap: 8, flexWrap: 'wrap'}}>
+								<button type="button" className="btn primary small" disabled={loginBusy} onClick={startLogin}>
+									{loginBusy ? 'Starting…' : 'Sign in to Tailscale'}
+								</button>
+								{activeAuthUrl && (
+									<a className="btn small" href={activeAuthUrl} target="_blank" rel="noopener noreferrer">
+										Open login link
+									</a>
+								)}
+							</div>
+						)}
+						{canEdit && d.backendState === 'Running' && (
+							<Row icon="signout" color="var(--red)" label="Sign out of tailnet" onClick={signOut} />
+						)}
+					</Group>
+
+					{d.health.length > 0 && (
+						<Group title="Health warnings">
+							{d.health.map((w, i) => (
+								<Row key={i} icon="alert" color="var(--orange, #f59e0b)" label="Warning" sub={w} />
+							))}
+						</Group>
+					)}
+
+					{d.prefs && (
+						<Group
+							title="Routing & features"
+							footer="Exit node advertisement and subnet routes also need approval once in your Tailscale admin console (or Headscale CLI)."
+						>
+							<Row
+								icon="networking"
+								color="var(--purple, #8b5cf6)"
+								label="Advertise as exit node"
+								sub="Let other devices route all internet traffic through this server"
+								trailing={
+									<Switch
+										on={d.prefs.advertiseExitNode}
+										disabled={!canEdit || save.isPending}
+										label="Advertise as exit node"
+										onChange={(on) => patchPrefs({advertiseExitNode: on}, on ? 'Advertising as exit node' : 'Stopped advertising exit node')}
+									/>
+								}
+							/>
+							<div className="row static" style={{justifyContent: 'space-between', gap: 12}}>
+								<span className="main">
+									<b style={{fontWeight: 550}}>Use exit node</b>
+									<span>{exitOptions.length ? 'Route outbound traffic via a peer' : d.prefs.exitNodeId ? 'Selected exit node is no longer advertising' : 'No peers advertising an exit node'}</span>
+								</span>
+								<select
+									aria-label="Use exit node"
+									disabled={!canEdit || save.isPending || (exitOptions.length === 0 && !d.prefs.exitNodeId)}
+									value={d.prefs.exitNodeId}
+									onChange={(e) => selectExitNode(e.target.value)}
+									style={{maxWidth: 190}}
+								>
+									<option value="">None</option>
+									{d.prefs.exitNodeId && !exitOptions.some((p) => p.id === d.prefs!.exitNodeId) && (
+										<option value={d.prefs.exitNodeId}>Current exit node ({d.prefs.exitNodeId.slice(0, 8)})</option>
+									)}
+									{exitOptions.map((p) => (
+										<option key={p.id} value={p.id}>
+											{p.hostName || p.dnsName}
+										</option>
+									))}
+								</select>
+							</div>
+							{d.prefs.exitNodeId && (
+								<Row
+									icon="network"
+									color="var(--teal)"
+									label="Allow local LAN access"
+									sub="Keep LAN devices reachable while using an exit node"
+									trailing={
+										<Switch
+											on={d.prefs.exitNodeAllowLan}
+											disabled={!canEdit || save.isPending}
+											label="Allow local LAN access"
+											onChange={(on) => patchPrefs({exitNodeAllowLan: on}, on ? 'Local LAN access enabled' : 'Local LAN access disabled')}
+										/>
+									}
+								/>
+							)}
+							<Row
+								icon="network"
+								color="var(--blue)"
+								label="Accept MagicDNS"
+								trailing={
+									<Switch
+										on={d.prefs.acceptDns}
+										disabled={!canEdit || save.isPending}
+										label="Accept MagicDNS"
+										onChange={(on) => patchPrefs({acceptDns: on}, on ? 'MagicDNS enabled' : 'MagicDNS disabled')}
+									/>
+								}
+							/>
+							<Row
+								icon="link"
+								color="var(--blue)"
+								label="Accept subnet routes"
+								trailing={
+									<Switch
+										on={d.prefs.acceptRoutes}
+										disabled={!canEdit || save.isPending}
+										label="Accept subnet routes"
+										onChange={(on) => patchPrefs({acceptRoutes: on}, on ? 'Accepting subnet routes' : 'Stopped accepting subnet routes')}
+									/>
+								}
+							/>
+							<Row
+								icon="terminal"
+								color="var(--green)"
+								label="Tailscale SSH"
+								sub="Allow SSH authenticated by your tailnet"
+								trailing={
+									<Switch
+										on={d.prefs.runSsh}
+										disabled={!canEdit || save.isPending}
+										label="Tailscale SSH"
+										onChange={(on) => patchPrefs({runSsh: on}, on ? 'Tailscale SSH enabled' : 'Tailscale SSH disabled')}
+									/>
+								}
+							/>
+							<Row
+								icon="shield"
+								color="var(--red)"
+								label="Shields up"
+								sub="Block all incoming tailnet connections"
+								trailing={
+									<Switch
+										on={d.prefs.shieldsUp}
+										disabled={!canEdit || save.isPending}
+										label="Shields up"
+										onChange={toggleShieldsUp}
+									/>
+								}
+							/>
+							<form onSubmit={saveRoutes} style={{padding: '10px 14px'}}>
+								<Field
+									id="ts-routes"
+									label="Advertised subnet routes (comma-separated CIDRs)"
+									placeholder="192.168.1.0/24, 10.0.1.0/24"
+									value={routesInput}
+									onChange={(e) => setRoutesInput(e.target.value)}
+									disabled={!canEdit}
+									autoCapitalize="off"
+									autoCorrect="off"
+								/>
+								{canEdit && (
+									<button className="btn small" disabled={save.isPending} style={{marginTop: 6}}>
+										Save subnet routes
+									</button>
+								)}
+							</form>
+							<form onSubmit={saveControlUrl} style={{padding: '6px 14px 12px'}}>
+								<Field
+									id="ts-control"
+									label="Custom control server URL (optional, e.g. Headscale)"
+									type="url"
+									placeholder="Leave blank for Tailscale default"
+									value={controlUrlInput}
+									onChange={(e) => setControlUrlInput(e.target.value)}
+									disabled={!canEdit}
+									autoCapitalize="off"
+									autoCorrect="off"
+								/>
+								{canEdit && (
+									<button className="btn small" disabled={save.isPending} style={{marginTop: 6}}>
+										Save control URL
+									</button>
+								)}
+							</form>
+						</Group>
+					)}
+
+					<Group
+						title={`Peers (${d.summary.onlinePeers} online · ${d.summary.directPeers} direct · ${d.summary.totalPeers} total)`}
+						footer="Ping sends a live Tailscale DISCO probe to measure direct vs DERP relay latency."
+					>
+						{d.peers.map((p) => {
+							const ip = p.ips.find((x) => x.includes('.')) ?? p.ips[0] ?? ''
+							const pingRes = pings[p.id]
+							const pathLabel = p.online ? (p.direct ? 'Direct' : p.relay ? `DERP (${p.relay.toUpperCase()})` : 'Online') : 'Offline'
+							const traffic = p.rxBytes || p.txBytes ? ` · ↓${bytes(p.rxBytes, 0)} ↑${bytes(p.txBytes, 0)}` : ''
+							const exitBadge = p.exitNode ? ' · Active exit' : p.exitNodeOption ? ' · Exit option' : ''
+							const pingLine = pingRes
+								? pingRes.error
+									? ` · Ping error: ${pingRes.error}`
+									: ` · ${pingRes.direct ? 'Direct' : `DERP (${pingRes.derpRegionCode || '?'})`} ${pingRes.latencyMs != null ? `${pingRes.latencyMs} ms` : ''}`
+								: ''
+							return (
+								<div className="row static" key={p.id} style={{minHeight: 62}}>
+									<span className="row-ico" style={{'--c': p.online ? 'var(--green)' : '#8e8e93'} as CSSProperties}>
+										<Icon name="devices" size={18} />
+									</span>
+									<span className="main">
+										<b style={{fontWeight: 550}}>{p.hostName || p.dnsName || p.id}</b>
+										<span>
+											{[p.os, ip, pathLabel].filter(Boolean).join(' · ')}
+											{exitBadge}
+											{traffic}
+											{pingLine}
+										</span>
+									</span>
+									{ip && (
+										<button type="button" className="btn small" disabled={pinging === p.id} onClick={() => pingPeer(p)}>
+											{pinging === p.id ? '…' : 'Ping'}
+										</button>
+									)}
+								</div>
+							)
+						})}
+						{d.peers.length === 0 && <div className="row static muted">No other peers in this tailnet yet.</div>}
+					</Group>
+				</>
+			)}
 		</Sheet>
 	)
 }

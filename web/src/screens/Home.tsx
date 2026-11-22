@@ -75,7 +75,21 @@ export function Home({onOpenApp, go, onTerminal, onAssistant}: {onOpenApp: (app:
 		enabled: user.data?.role === 'owner',
 		refetchInterval: 10_000,
 	})
+	const tailscale = useQuery({
+		queryKey: ['tailscale.status'],
+		queryFn: () =>
+			query<{
+				available: boolean
+				backendState: string
+				self: {ips: string[]} | null
+				summary: {onlinePeers: number}
+			}>('tailscale.status'),
+		enabled: user.data?.role === 'owner',
+		refetchInterval: 30_000,
+		retry: false,
+	})
 	const swarmList = swarm.data ?? []
+	const tsIp = tailscale.data?.self?.ips?.find((ip) => ip.includes('.')) ?? tailscale.data?.self?.ips?.[0] ?? ''
 	const updateIds = useMemo(() => new Set((updates.data ?? []).map((u) => u.id)), [updates.data])
 	const list = apps.data ?? []
 	const byId = useMemo(() => new Map(list.map((a) => [a.id, a])), [list])
@@ -131,6 +145,12 @@ export function Home({onOpenApp, go, onTerminal, onAssistant}: {onOpenApp: (app:
 						<span className="fact">
 							<Icon name="devices" size={15} />
 							{swarmList.filter((a) => a.online).length}/{swarmList.length} swarm online
+						</span>
+					)}
+					{tailscale.data?.available && tailscale.data.backendState === 'Running' && (
+						<span className="fact">
+							<Icon name="networking" size={15} />
+							Tailscale{tsIp ? ` · ${tsIp}` : ''} · {tailscale.data.summary.onlinePeers} online
 						</span>
 					)}
 				</div>
