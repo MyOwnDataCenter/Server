@@ -34,6 +34,7 @@ import {SYSTEM_PERMISSIONS} from './system-apps.mjs'
 import {dualProtocolServer, tlsContext, wantsUpgrade} from './tls.mjs'
 import {linkProxy} from './proxy-link.mjs'
 import {usbComposeOverlay} from './usb.mjs'
+import {buildAppRedirectUris, buildOidcCaBundle, oidcComposeOverlay, oidcSummaryForStore, oidcVarsFor, parseManifestOidc, resolveAppOidcSpec} from './app-oidc.mjs'
 
 export const APP_COOKIE = 'OMARCHY_APP_SESSION'
 // Every cookie Omarchy Server itself sets (and any it may set later under these prefixes).
@@ -582,7 +583,7 @@ async function readFirst(dir, names) {
 const LIST_FIELDS = [
 	'id', 'name', 'tagline', 'icon', 'category', 'version', 'installSize', 'developer', 'unsupported', 'caution',
 	'needs', 'dependencies', 'implements', 'port', 'path', 'web', 'shared', 'folders', 'openPorts',
-	'requiresHttps', 'system', 'defaultUsername', 'defaultPassword', 'deterministicPassword', 'repo',
+	'requiresHttps', 'system', 'defaultUsername', 'defaultPassword', 'deterministicPassword', 'repo', 'oidc',
 ]
 const DETAIL_FIELDS = [...LIST_FIELDS, 'description', 'releaseNotes', 'gallery', 'website', 'permissions']
 
@@ -837,7 +838,7 @@ export async function podmanHealth(run, env, home) {
 	}
 }
 
-export function createApps({dataDir, home = os.homedir(), webPort = 7780, run = execP, gatewayHost = '0.0.0.0', allowFileStores = false, firewall = null, defaultStores = DEFAULT_STORES, tlsDir = join(dataDir, 'tls'), secure = tlsContext({dir: tlsDir, lazy: true}), startGraceMs = 120_000, systemApps = null, deviceExists = exists}) {
+export function createApps({dataDir, home = os.homedir(), webPort = 7780, run = execP, gatewayHost = '0.0.0.0', allowFileStores = false, firewall = null, defaultStores = DEFAULT_STORES, tlsDir = join(dataDir, 'tls'), secure = tlsContext({dir: tlsDir, lazy: true}), startGraceMs = 120_000, systemApps = null, deviceExists = exists, oidc = null, getTailscaleStatus = null}) {
 	const base = join(dataDir, 'apps')
 	const storesDir = join(base, 'stores')
 	const installedDir = join(base, 'installed')
@@ -854,6 +855,7 @@ export function createApps({dataDir, home = os.homedir(), webPort = 7780, run = 
 	const publishSock = join(base, 'publish.sock')
 	const publishTokenFile = join(base, 'publish.token')
 	const busy = new Map() // appId -> {state, progress}
+	const oidcRuntimeVars = new Map() // appId -> {OIDC_*} (memory only; never written to apps.json)
 	const lock = createKeyedLock()
 	// Uninstalls of different apps must not overlap: each would still see the other and leave Tor up.
 	let uninstallQueue = Promise.resolve()
@@ -1018,7 +1020,11 @@ export function createApps({dataDir, home = os.homedir(), webPort = 7780, run = 
 				}
 			}
 		}
-		for (const a of state.apps) if (a.state === 'installing') Object.assign(a, {state: 'error', error: 'Install was interrupted. Uninstall it and install again.'})
+		for (const a of state.apps) {
+			if (a.state !== 'installing') continue
+			if (a.oidc?.enabled) await oidc?.removeAppClient(a.id).catch(() => {})
+			Object.assign(a, {state: 'error', error: 'Install was interrupted. Uninstall it and install again.'})
+		}
 		// Newer versions ask about more kinds of access (host network, server folders, system access).
 		// Apps you already installed keep what they have, so they keep working and updating.
 		if ((state.permissionsVersion ?? 1) < 2) {
@@ -1322,6 +1328,8 @@ export function createApps({dataDir, home = os.homedir(), webPort = 7780, run = 
 			const installSize = installSizeOf(a.installSize)
 			const media = (f) => (typeof f === 'string' && /^https:\/\//.test(f) ? f : gallery && typeof f === 'string' && /^[\w.-]+$/.test(f) ? `${gallery}/${a.id}/${f}` : null)
 			const mcp = parseMcp(a.mcp)
+			const manifestOidc = parseManifestOidc(a.oidc)
+			const oidcInfo = oidcSummaryForStore(a.id, manifestOidc)
 			apps.push({
 				id: a.id,
 				name: String(a.name ?? a.id),
@@ -1351,6 +1359,8 @@ export function createApps({dataDir, home = os.homedir(), webPort = 7780, run = 
 				...(folderChoices(a.folders).length ? {folders: folderChoices(a.folders)} : {}),
 				...(a.web && typeof a.web.service === 'string' && Number.isInteger(Number(a.web.port)) ? {web: {service: a.web.service, port: Number(a.web.port), ...(a.web.https === true ? {https: true} : {})}} : {}),
 				...(mcp ? {mcp} : {}),
+				...(manifestOidc ? {manifestOidc} : {}),
+				...(oidcInfo ? {oidc: oidcInfo} : {}),
 				...(a.publish === true ? {publish: true} : {}),
 				...(unsupported ? {unsupported} : {}),
 				...(caution ? {caution} : {}),
@@ -1561,6 +1571,7 @@ export function createApps({dataDir, home = os.homedir(), webPort = 7780, run = 
 			APP_GATEWAY_KEY: deriveEntropy(`app-${app.id}-gateway`),
 			// Folders you placed when installing (its listing's `folders:`); otherwise inside the app.
 			...Object.fromEntries((app.folderIds ?? []).map((id) => [folderVar(id), app.folders?.[id] ?? join(dir, 'folders', id)])),
+			...(oidcRuntimeVars.get(app.id) ?? {}),
 		}
 	}
 	async function sharedRoot() {
@@ -1573,6 +1584,82 @@ export function createApps({dataDir, home = os.homedir(), webPort = 7780, run = 
 		}
 	}
 	const usbFile = (id) => join(appDir(id), 'compose.usb.yml')
+	const oidcFile = (id) => join(appDir(id), 'compose.oidc.yml')
+	const isLoopbackHost = (h) => {
+		const clean = String(h ?? '').toLowerCase().replace(/^\[|\]$/g, '')
+		return clean === 'localhost' || clean === '::1' || clean.startsWith('127.')
+	}
+	function lanIpv4s() {
+		const out = []
+		for (const [name, list] of Object.entries(os.networkInterfaces())) {
+			if (/^(docker|podman|veth|virbr|br-|cni|tailscale)/i.test(name)) continue
+			for (const i of list ?? []) if (!i.internal && i.family === 'IPv4' && !out.includes(i.address)) out.push(i.address)
+		}
+		return out
+	}
+	function usableIssuerHint(raw) {
+		const v = String(raw ?? '').trim()
+		if (!v) return ''
+		try {
+			const u = new URL(v)
+			if ((u.protocol !== 'https:' && u.protocol !== 'http:') || !u.hostname || u.username || u.password) return ''
+			if (isLoopbackHost(u.hostname)) return ''
+			return u.origin
+		} catch {
+			return ''
+		}
+	}
+	async function effectiveIssuerForApp(issuerHint = '') {
+		const st = await oidc?.procedures['oidc.status'].run().catch(() => null)
+		if (st?.issuerUrl) return st.issuerUrl
+		const hasCa = await exists(join(tlsDir, 'ca.crt'))
+		const ip = serverIp()
+		if (ip && !isLoopbackHost(ip)) return `${hasCa ? 'https' : 'http'}://${ip}:${webPort}`
+		const hint = usableIssuerHint(issuerHint)
+		if (hint) return hint
+		return `${hasCa ? 'https' : 'http'}://${os.hostname()}.local:${webPort}`
+	}
+	async function resolveSpecForApp(app, src = null) {
+		if (!app || app.system) return null
+		const manifest = src ? (src.manifestOidc ?? null) : (app.manifestOidc ?? (await findInRegistry(app.id).catch(() => null))?.manifestOidc ?? null)
+		return resolveAppOidcSpec(app.id, manifest)
+	}
+	async function writeOidcOverlay(app, spec, {issuerHint = '', forceEnabled = false} = {}) {
+		const path = oidcFile(app.id)
+		const enabled = forceEnabled || Boolean(app.oidc?.enabled)
+		if (!oidc || !enabled || !spec || app.system) {
+			oidcRuntimeVars.delete(app.id)
+			await rm(path, {force: true}).catch(() => {})
+			return null
+		}
+		const ts = await getTailscaleStatus?.().catch(() => null)
+		const issuerUrl = await effectiveIssuerForApp(issuerHint)
+		const redirectUris = buildAppRedirectUris({
+			port: app.port,
+			redirectPaths: spec.redirectPaths,
+			issuerUrl,
+			hostname: os.hostname(),
+			ips: lanIpv4s(),
+			tailscaleDns: ts?.available ? ts.self?.dnsName : '',
+			tailscaleIps: ts?.available ? ts.self?.ips : [],
+		})
+		const ensured = await oidc.ensureAppClient({
+			appId: app.id,
+			name: app.name,
+			redirectUris,
+			requirePkce: spec.requirePkce,
+		})
+		const vars = oidcVarsFor(issuerUrl, ensured.client.id, ensured.clientSecret, app.port)
+		oidcRuntimeVars.set(app.id, vars)
+		const composeText = await readFile(join(appDir(app.id), 'compose.omarchy.yml'), 'utf8').catch(() => '')
+		const {caPath, bundlePath} = issuerUrl.startsWith('https://')
+			? await buildOidcCaBundle({caCertPath: join(tlsDir, 'ca.crt'), outDir: appDir(app.id)})
+			: {caPath: null, bundlePath: null}
+		const overlay = oidcComposeOverlay({composeText, app, spec, oidcVars: vars, caPath, bundlePath, issuerUrl})
+		if (!overlay) await rm(path, {force: true}).catch(() => {})
+		else await writeAtomic(path, overlay, {mode: 0o600})
+		return {client: ensured.client, clientSecret: ensured.clientSecret, issuerUrl, created: ensured.created}
+	}
 	async function writeUsbOverlay(app) {
 		const path = usbFile(app.id)
 		const text = await readFile(join(appDir(app.id), 'compose.omarchy.yml'), 'utf8').catch(() => '')
@@ -1589,6 +1676,8 @@ export function createApps({dataDir, home = os.homedir(), webPort = 7780, run = 
 		const files = ['-f', join(appDir(app.id), 'compose.omarchy.yml')]
 		const extra = usbFile(app.id)
 		if (await exists(extra)) files.push('-f', extra)
+		const oidcExtra = oidcFile(app.id)
+		if (await exists(oidcExtra)) files.push('-f', oidcExtra)
 		try {
 			return await run('docker-compose', ['-p', project(app.id), ...files, ...args], {env: composeEnv(app), cwd: appDir(app.id)})
 		} catch (e) {
@@ -1890,6 +1979,7 @@ export function createApps({dataDir, home = os.homedir(), webPort = 7780, run = 
 					return {defaultUsername: a.defaultUsername, defaultPassword: password, showBeforeOpen: !!password, ...(apiToken ? {label: 'API token'} : {})}
 				})(),
 				...(a.store === PUBLISHED_STORE && a.openPorts?.[0] ? {apiPort: a.openPorts[0]} : {}),
+				...(a.oidc?.enabled ? {oidc: {enabled: true, mode: a.oidc.mode}} : {}),
 			}
 		})
 	}
@@ -2282,15 +2372,19 @@ export function createApps({dataDir, home = os.homedir(), webPort = 7780, run = 
 				if (!failed) continue
 				if (await exists(join(appDir(src.id), 'compose.omarchy.yml'))) await compose(failed, 'down', '--remove-orphans').catch(() => {})
 				await removeAppDir(src.id)
+				await oidc?.removeAppClient(src.id).catch(() => {})
 				state.apps = state.apps.filter((a) => a !== failed)
 				cleared = true
 			}
 			if (cleared) await save()
+			const wantOidc = input?.oidc === true
+			const oidcIssuerHint = typeof input?.oidcIssuerUrl === 'string' ? input.oidcIssuerUrl.trim() : ''
 			// Every app in the plan shows as installing right away; they then install one after another.
 			const queued = plan.map((src) => {
 				const leftover = state.apps.find((a) => a.id === src.id && a.state === 'error')
 				if (leftover) state.apps = state.apps.filter((a) => a !== leftover)
-				const app = {id: src.id, name: src.name, version: src.version, icon: src.icon, port: src.port, path: src.path, defaultUsername: src.defaultUsername, defaultPassword: src.defaultPassword, deterministicPassword: src.deterministicPassword, ...(src.requiresHttps ? {requiresHttps: true} : {}), ...(src.web?.https ? {internalHttps: true} : {}), ...(src.openPorts?.length ? {openPorts: src.openPorts} : {}), ...(src.mcp ? {mcp: src.mcp} : {}), ...(src.store ? {store: src.store} : {}), ...(src.implements?.length ? {implements: src.implements} : {}), ...(src.needs?.length ? {needs: src.needs} : {}), ...(src.folders?.length ? {folderIds: src.folders.map((f) => f.id), folders: Object.fromEntries(src.folders.filter((f) => placed.has(`${src.id}/${f.id}`)).map((f) => [f.id, placed.get(`${src.id}/${f.id}`)]))} : {}), installedAt: Date.now(), state: 'installing', permissions: needs.get(src.id) ?? [], ownSecretsOnly: true}
+				const oidcSpec = wantOidc && src.id === id && !src.system ? resolveAppOidcSpec(src.id, src.manifestOidc) : null
+				const app = {id: src.id, name: src.name, version: src.version, icon: src.icon, port: src.port, path: src.path, defaultUsername: src.defaultUsername, defaultPassword: src.defaultPassword, deterministicPassword: src.deterministicPassword, ...(src.requiresHttps ? {requiresHttps: true} : {}), ...(src.web?.https ? {internalHttps: true} : {}), ...(src.openPorts?.length ? {openPorts: src.openPorts} : {}), ...(src.mcp ? {mcp: src.mcp} : {}), ...(src.manifestOidc ? {manifestOidc: src.manifestOidc} : {}), ...(oidcSpec ? {oidc: {enabled: true, mode: oidcSpec.mode}} : {}), ...(src.store ? {store: src.store} : {}), ...(src.implements?.length ? {implements: src.implements} : {}), ...(src.needs?.length ? {needs: src.needs} : {}), ...(src.folders?.length ? {folderIds: src.folders.map((f) => f.id), folders: Object.fromEntries(src.folders.filter((f) => placed.has(`${src.id}/${f.id}`)).map((f) => [f.id, placed.get(`${src.id}/${f.id}`)]))} : {}), installedAt: Date.now(), state: 'installing', permissions: needs.get(src.id) ?? [], ownSecretsOnly: true}
 				state.apps.push(app)
 				busy.set(app.id, {state: 'installing', progress: 0})
 				return {src, app}
@@ -2330,6 +2424,17 @@ export function createApps({dataDir, home = os.homedir(), webPort = 7780, run = 
 					try {
 						await sharedRoot()
 						app.internalPort = await placeApp(src, app)
+						if (app.oidc?.enabled) {
+							try {
+								await writeOidcOverlay(app, await resolveSpecForApp(app, src), {issuerHint: oidcIssuerHint})
+							} catch (oidcErr) {
+								console.error(`[omarchyd] oidc setup for ${app.id} failed:`, oidcErr?.message ?? oidcErr)
+								delete app.oidc
+								oidcRuntimeVars.delete(app.id)
+								await rm(oidcFile(app.id), {force: true}).catch(() => {})
+								await oidc?.removeAppClient(app.id).catch(() => {})
+							}
+						}
 						await prepareOwnership(app)
 						busy.set(app.id, {state: 'installing', progress: 15})
 						await pullApp(app)
@@ -2340,6 +2445,7 @@ export function createApps({dataDir, home = os.homedir(), webPort = 7780, run = 
 						delete app.state
 						delete app.error
 					} catch (error) {
+						if (app.oidc?.enabled) await oidc?.removeAppClient(app.id).catch(() => {})
 						Object.assign(app, {state: 'error', error: error.message})
 						broken = app.name
 					} finally {
@@ -2395,14 +2501,21 @@ export function createApps({dataDir, home = os.homedir(), webPort = 7780, run = 
 		const previousExports = app.exports
 		const usbPath = usbFile(app.id)
 		const previousUsb = await readFile(usbPath).catch(() => null)
+		const oidcPath = oidcFile(app.id)
+		const previousOidc = await readFile(oidcPath).catch(() => null)
 		let switched = false
 		let usbWritten = false
+		let oidcWritten = false
 		let wasStopped = false
 		try {
 			wasStopped = (await liveState(app)) === 'stopped'
 			const internalPort = await placeApp(src, app)
 			await writeUsbOverlay(app)
 			usbWritten = true
+			if (app.oidc?.enabled) {
+				await writeOidcOverlay(app, await resolveSpecForApp(app, src))
+				oidcWritten = true
+			}
 			await prepareOwnership(app)
 			step = 'downloading the new version'
 			busy.set(app.id, {state: 'updating', progress: 25})
@@ -2426,6 +2539,8 @@ export function createApps({dataDir, home = os.homedir(), webPort = 7780, run = 
 			Object.assign(app, {version: src.version, name: src.name, icon: src.icon, path: src.path, requiresHttps: src.requiresHttps || undefined, internalHttps: src.web?.https || undefined})
 			if (src.mcp) app.mcp = src.mcp
 			else delete app.mcp
+			if (src.manifestOidc) app.manifestOidc = src.manifestOidc
+			else delete app.manifestOidc
 			if (src.needs?.length) app.needs = src.needs
 			else delete app.needs
 			delete app.state
@@ -2441,6 +2556,10 @@ export function createApps({dataDir, home = os.homedir(), webPort = 7780, run = 
 			if (usbWritten) {
 				if (previousUsb) await writeFile(usbPath, previousUsb, {mode: 0o600}).catch(() => {})
 				else await rm(usbPath, {force: true}).catch(() => {})
+			}
+			if (oidcWritten) {
+				if (previousOidc) await writeFile(oidcPath, previousOidc, {mode: 0o600}).catch(() => {})
+				else await rm(oidcPath, {force: true}).catch(() => {})
 			}
 			if (previousExports === undefined) delete app.exports
 			else app.exports = previousExports
@@ -2465,7 +2584,10 @@ export function createApps({dataDir, home = os.homedir(), webPort = 7780, run = 
 		busy.set(app.id, {state: pending})
 		try {
 			let pluggedIds = null
-			if (!app.system && (args[0] === 'up' || args[0] === 'restart')) pluggedIds = await writeUsbOverlay(app)
+			if (!app.system && (args[0] === 'up' || args[0] === 'restart')) {
+				pluggedIds = await writeUsbOverlay(app)
+				if (app.oidc?.enabled) await writeOidcOverlay(app, await resolveSpecForApp(app))
+			}
 			if (app.system) await systemApps[verb](app)
 			// `restart` leaves the running container on the old device list. Recreate so the overlay just written is what runs.
 			else if (args[0] === 'restart') await compose(app, 'up', '-d', '--force-recreate')
@@ -2520,6 +2642,8 @@ export function createApps({dataDir, home = os.homedir(), webPort = 7780, run = 
 					throw new RpcError('BAD_GATEWAY', `Couldn’t uninstall ${app.name ?? app.id}: ${detail}`)
 				}
 				await removeAppDir(app.id)
+				oidcRuntimeVars.delete(app.id)
+				await oidc?.removeAppClient(app.id).catch(() => {})
 				state.apps = state.apps.filter((a) => a.id !== app.id)
 				state.recent = state.recent.filter((r) => r !== app.id)
 				await save()
@@ -2957,9 +3081,109 @@ export function createApps({dataDir, home = os.homedir(), webPort = 7780, run = 
 			await save()
 			return app
 		},
+		async resyncOidcClients() {
+			await ready
+			for (const app of state.apps) {
+				if (!app.oidc?.enabled || app.system || app.state === 'error' || busy.has(app.id)) continue
+				const spec = await resolveSpecForApp(app).catch(() => null)
+				if (!spec) continue
+				const path = oidcFile(app.id)
+				const before = await readFile(path, 'utf8').catch(() => '')
+				await writeOidcOverlay(app, spec).catch(() => {})
+				const after = await readFile(path, 'utf8').catch(() => '')
+				if (before !== after && !busy.has(app.id) && (await liveState(app).catch(() => 'stopped')) === 'running') {
+					await compose(app, 'up', '-d').catch((e) => console.error(`[omarchyd] oidc resync ${app.id}:`, e.message))
+				}
+			}
+		},
 		procedures: {
 			'apps.list': {kind: 'query', run: list},
 			'apps.install': {kind: 'mutation', run: install},
+			'apps.oidcStatus': {
+				kind: 'query',
+				run: async (input) => {
+					await ready
+					const app = findInstalled(String(input?.appId ?? ''))
+					if (app.system || !oidc) return {supported: false, enabled: false}
+					const spec = await resolveSpecForApp(app)
+					if (!spec) return {supported: false, enabled: false}
+					const managed = await oidc.getAppClient(app.id)
+					const issuerUrl = await effectiveIssuerForApp()
+					return {
+						supported: true,
+						mode: spec.mode,
+						enabled: Boolean(app.oidc?.enabled && managed),
+						note: spec.note || '',
+						issuerUrl,
+						discoveryUrl: issuerUrl ? `${issuerUrl}/.well-known/openid-configuration` : '',
+						clientId: managed?.client.id ?? null,
+						clientSecret: managed?.clientSecret ?? null,
+						redirectUris: managed?.client.redirectUris ?? [],
+					}
+				},
+			},
+			'apps.setOidc': {
+				kind: 'mutation',
+				run: async (input) => {
+					await ready
+					const app = findInstalled(String(input?.appId ?? ''))
+					if (app.system) throw new RpcError('PRECONDITION_FAILED', `${app.name} doesn’t run in a container.`)
+					if (!oidc) throw new RpcError('PRECONDITION_FAILED', 'OIDC provider isn’t available on this server')
+					if (busy.has(app.id)) throw new RpcError('CONFLICT', `${app.name} is busy`)
+					const spec = await resolveSpecForApp(app)
+					if (!spec) throw new RpcError('PRECONDITION_FAILED', `${app.name} doesn’t have an Omarchy SSO integration`)
+					const enable = !!input?.enabled
+					const issuerHint = typeof input?.issuerUrl === 'string' ? input.issuerUrl.trim() : ''
+					const prevOidc = app.oidc ? {...app.oidc} : undefined
+					const prevOverlay = await readFile(oidcFile(app.id)).catch(() => null)
+					let createdFreshClient = false
+					busy.set(app.id, {state: 'restarting'})
+					try {
+						const wasRunning = (await liveState(app)) === 'running'
+						if (enable) {
+							const res = await writeOidcOverlay(app, spec, {issuerHint, forceEnabled: true})
+							createdFreshClient = Boolean(res?.created)
+							app.oidc = {enabled: true, mode: spec.mode}
+						} else {
+							delete app.oidc
+							oidcRuntimeVars.delete(app.id)
+							await rm(oidcFile(app.id), {force: true}).catch(() => {})
+							await oidc.removeAppClient(app.id)
+						}
+						await save()
+						if (wasRunning && (await exists(join(appDir(app.id), 'compose.omarchy.yml')))) {
+							await compose(app, 'up', '-d', '--force-recreate')
+							markStarted(app.id)
+						}
+					} catch (error) {
+						if (enable) {
+							if (prevOidc) app.oidc = prevOidc
+							else delete app.oidc
+							oidcRuntimeVars.delete(app.id)
+							if (prevOverlay) await writeAtomic(oidcFile(app.id), prevOverlay, {mode: 0o600}).catch(() => {})
+							else await rm(oidcFile(app.id), {force: true}).catch(() => {})
+							if (createdFreshClient) await oidc.removeAppClient(app.id).catch(() => {})
+							await save().catch(() => {})
+						}
+						throw error
+					} finally {
+						busy.delete(app.id)
+					}
+					const managed = enable ? await oidc.getAppClient(app.id) : null
+					const issuerUrl = await effectiveIssuerForApp(issuerHint)
+					return {
+						supported: true,
+						mode: spec.mode,
+						enabled: enable,
+						note: spec.note || '',
+						issuerUrl,
+						discoveryUrl: issuerUrl ? `${issuerUrl}/.well-known/openid-configuration` : '',
+						clientId: managed?.client.id ?? null,
+						clientSecret: managed?.clientSecret ?? null,
+						redirectUris: managed?.client.redirectUris ?? [],
+					}
+				},
+			},
 			'apps.installReview': {
 				kind: 'query',
 				run: async (input) => {
@@ -2978,7 +3202,19 @@ export function createApps({dataDir, home = os.homedir(), webPort = 7780, run = 
 					for (const a of plan) if (a.system && systemApps?.setup) { const s = await systemApps.setup(a.id); if (s) setup.push({...s, appId: a.id, appName: a.name}) }
 					// Folders it lets you place: inside the app, or a folder of yours (suggested under your home).
 					const folders = plan.flatMap((a) => (a.folders ?? []).map((f) => ({...f, appId: a.id, appName: a.name, suggest: f.suggest ? join(home, f.suggest) : null})))
-					return {requiredFolders: [], gpuAccess: false, alsoInstalls: also, permissions: access, setup, folders, home}
+					const target = plan.at(-1)
+					const oidcSpec = oidc && target && !target.system ? resolveAppOidcSpec(target.id, target.manifestOidc) : null
+					const oidcStatus = oidcSpec ? await oidc.procedures['oidc.status'].run().catch(() => null) : null
+					const oidcInfo = oidcSpec
+						? {
+								supported: true,
+								mode: oidcSpec.mode,
+								note: oidcSpec.note || '',
+								issuerUrl: oidcStatus?.issuerUrl || '',
+								defaultOn: oidcSpec.mode === 'auto',
+							}
+						: null
+					return {requiredFolders: [], gpuAccess: false, alsoInstalls: also, permissions: access, setup, folders, home, ...(oidcInfo ? {oidc: oidcInfo} : {})}
 				},
 			},
 			'apps.uninstall': {kind: 'mutation', run: uninstall},

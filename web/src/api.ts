@@ -66,6 +66,7 @@ const SLOW_RPC = new Set([
 	'clips.paste',
 	'clips.addFile',
 	'clips.fleetList',
+	'apps.setOidc',
 ])
 
 const RESTARTING_MESSAGE = 'Omarchy Server is restarting or not answering. Wait a moment and try again.'
@@ -262,6 +263,7 @@ export type UserApp = {
 	error?: string
 	/** Runs on the server itself (Tailscale), not in a container: no container terminal. */
 	system?: boolean
+	oidc?: {enabled: boolean; mode: 'auto' | 'assisted'}
 }
 
 export type UsageItem = {id: string; used: number; name?: string}
@@ -339,6 +341,7 @@ export type RegistryApp = {
 	caution?: string
 	releaseNotes?: string
 	installSize?: number
+	oidc?: {supported: boolean; mode: 'auto' | 'assisted'; note?: string}
 }
 export type Registry = {meta: {id: string; name: string}; apps: RegistryApp[]}[]
 
@@ -379,6 +382,7 @@ export type InstallReview = {
 	/** Folders you choose a place for: inside the app, or a folder of yours (suggested under your home). */
 	folders?: {appId: string; appName: string; id: string; label: string; detail: string; suggest: string | null}[]
 	home?: string
+	oidc?: {supported: boolean; mode: 'auto' | 'assisted'; note?: string; issuerUrl: string; defaultOn: boolean}
 }
 
 export type OsImage = {

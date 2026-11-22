@@ -91,7 +91,9 @@ export async function startOmarchyd({port = 2021, host = '127.0.0.1', dataDir, t
 	const secure = appOptions.secure ?? tlsContext({dir: tlsDir, lazy: true})
 	// Apps that are part of the server itself (Tailscale), installed through the root helper.
 	const systemApps = appOptions.systemApps !== undefined ? appOptions.systemApps || null : createSystemApps({helper: storage.helper})
-	const apps = createApps({dataDir, home, webPort, firewall: storage.firewall, ...(defaultStores ? {defaultStores} : {}), ...appOptions, systemApps, tlsDir, secure})
+	const oidc = createOidc({dataDir, accounts, audit, ...oidcOptions})
+	let tailscale = null
+	const apps = createApps({dataDir, home, webPort, firewall: storage.firewall, ...(defaultStores ? {defaultStores} : {}), ...appOptions, systemApps, tlsDir, secure, oidc, getTailscaleStatus: () => tailscale?.procedures['tailscale.status'].run().catch(() => null)})
 	// Backups need apps: to pause them while their files are saved, and to know where those files are.
 	// …and the local swarm's connector (created further down), for computers that back up here.
 	const backups = createBackups({dataDir, home, files, apps, swarm: {agents: () => connector.backup.agents(), call: (...a) => connector.backup.call(...a), progress: (id) => connector.backup.progress(id)}, ...backupOptions})
@@ -432,7 +434,35 @@ export async function startOmarchyd({port = 2021, host = '127.0.0.1', dataDir, t
 			Object.entries(apps.procedures).map(([name, p]) =>
 				name === 'appStore.addRepository' || name === 'appStore.removeRepository'
 					? [name, {kind: p.kind, run: (input, {auth}) => (ownerOnly(auth, 'change app stores'), p.run(input))}]
-					: [name, p],
+					: name === 'apps.oidcStatus' || name === 'apps.setOidc'
+						? [name, {kind: p.kind, run: (input, {auth}) => (ownerOnly(auth, 'manage Single Sign-On'), p.run(input))}]
+						: name === 'apps.install'
+							? [
+									name,
+									{
+										kind: p.kind,
+										run: (input, ctx) => {
+											if (input?.oidc || input?.oidcIssuerUrl) ownerOnly(ctx.auth, 'manage Single Sign-On')
+											return p.run(input, ctx)
+										},
+									},
+								]
+							: name === 'apps.installReview'
+								? [
+										name,
+										{
+											kind: p.kind,
+											run: async (input, ctx) => {
+												const res = await p.run(input, ctx)
+												if (accounts.getUser(ctx.auth?.userId)?.role === 'member' && res?.oidc) {
+													const {oidc: _drop, ...rest} = res
+													return rest
+												}
+												return res
+											},
+										},
+									]
+								: [name, p],
 			),
 		),
 		...Object.fromEntries(
@@ -526,15 +556,27 @@ export async function startOmarchyd({port = 2021, host = '127.0.0.1', dataDir, t
 		],
 		...healthOptions,
 	})
-	const tailscale = createTailscale({audit, ...tailscaleOptions})
-	const oidc = createOidc({dataDir, accounts, audit, ...oidcOptions})
+	tailscale = createTailscale({audit, ...tailscaleOptions})
 	Object.assign(
 		procedures,
 		Object.fromEntries(Object.entries(alerts.procedures).map(([name, p]) => [name, {kind: p.kind, run: (input, {auth}) => (ownerOnly(auth, 'manage alerts'), p.run(input))}])),
 		Object.fromEntries(Object.entries(audit.procedures).map(([name, p]) => [name, {kind: p.kind, run: (input, {auth}) => (ownerOnly(auth, 'read the activity log'), p.run(input))}])),
 		Object.fromEntries(Object.entries(health.procedures).map(([name, p]) => [name, {kind: p.kind, run: (input, {auth}) => (ownerOnly(auth, 'check server health'), p.run(input))}])),
 		Object.fromEntries(Object.entries(tailscale.procedures).map(([name, p]) => [name, {kind: p.kind, run: (input, {auth}) => (ownerOnly(auth, 'manage Tailscale'), p.run(input))}])),
-		Object.fromEntries(Object.entries(oidc.procedures).map(([name, p]) => [name, {kind: p.kind, run: (input, {auth}) => (ownerOnly(auth, 'manage Single Sign-On'), p.run(input))}])),
+		Object.fromEntries(
+			Object.entries(oidc.procedures).map(([name, p]) => [
+				name,
+				{
+					kind: p.kind,
+					run: async (input, {auth}) => {
+						ownerOnly(auth, 'manage Single Sign-On')
+						const res = await p.run(input)
+						if (name === 'oidc.setConfig') await apps.resyncOidcClients?.().catch(() => {})
+						return res
+					},
+				},
+			]),
+		),
 	)
 	const origApprove = procedures['assistant.approve']
 	if (origApprove) {

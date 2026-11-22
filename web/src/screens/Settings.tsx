@@ -2431,6 +2431,7 @@ type OidcClient = {
 	redirectUris: string[]
 	scopes: string[]
 	createdAt: number
+	managedAppId?: string
 }
 
 function OidcSheet({onClose}: {onClose: () => void}) {
@@ -2734,6 +2735,7 @@ function OidcSheet({onClose}: {onClose: () => void}) {
 								<b style={{fontWeight: 600}}>{c.name}</b>
 								<span style={{fontFamily: 'var(--mono)', fontSize: 12}}>
 									{c.id} · {c.publicClient ? 'Public PKCE' : c.requirePkce ? 'Confidential + PKCE' : 'Confidential'}
+									{c.managedAppId ? ` · App Store (${c.managedAppId})` : ''}
 								</span>
 							</span>
 							<button type="button" className="btn small" onClick={() => copyText(c.id, 'Client ID')}>
@@ -2744,17 +2746,25 @@ function OidcSheet({onClose}: {onClose: () => void}) {
 							{c.redirectUris.join(' · ')}
 						</div>
 						<div style={{display: 'flex', gap: 6, flexWrap: 'wrap'}}>
-							<button type="button" className="btn small" onClick={() => startEdit(c)}>
-								Edit
-							</button>
-							{!c.publicClient && (
-								<button type="button" className="btn small" onClick={() => rotateSecret(c)}>
-									Rotate secret
-								</button>
+							{c.managedAppId ? (
+								<span className="muted" style={{fontSize: 12}}>
+									Managed by App Store — toggle SSO from this app’s sheet.
+								</span>
+							) : (
+								<>
+									<button type="button" className="btn small" onClick={() => startEdit(c)}>
+										Edit
+									</button>
+									{!c.publicClient && (
+										<button type="button" className="btn small" onClick={() => rotateSecret(c)}>
+											Rotate secret
+										</button>
+									)}
+									<button type="button" className="btn small" style={{color: 'var(--red)'}} onClick={() => deleteClient(c)}>
+										Remove
+									</button>
+								</>
 							)}
-							<button type="button" className="btn small" style={{color: 'var(--red)'}} onClick={() => deleteClient(c)}>
-								Remove
-							</button>
 						</div>
 					</div>
 				))}

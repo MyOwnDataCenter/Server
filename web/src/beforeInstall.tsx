@@ -2,7 +2,7 @@ import {useEffect, useState, type CSSProperties} from 'react'
 
 import {useInstallReview} from './data'
 import {Icon} from './icons'
-import {AppIcon, Field, bytes, haptic, useToast} from './ui'
+import {AppIcon, Field, Switch, bytes, haptic, useToast} from './ui'
 import {folderKey, folderPathOk, reviewInstallInput, type ReviewInstallInput} from './installReview'
 
 // The store's "Before you install" body. The store sheet and the assistant both use this,
@@ -30,14 +30,18 @@ export function BeforeInstall({
 	const toast = useToast()
 	const [allowed, setAllowed] = useState(false)
 	const [placed, setPlaced] = useState<Record<string, string | null>>({})
+	const [enableOidc, setEnableOidc] = useState(false)
 	useEffect(() => setAllowed(false), [appId])
 	useEffect(() => setPlaced({}), [appId])
+	useEffect(() => {
+		setEnableOidc(Boolean(review.data?.oidc?.defaultOn))
+	}, [appId, review.data?.oidc?.defaultOn])
 	const data = review.data
 	const access = data?.permissions ?? []
 	const setup = data?.setup ?? []
 	const folders = data?.folders ?? []
 	const home = data?.home ?? ''
-	const choice = data ? reviewInstallInput(data, allowed, placed) : null
+	const choice = data ? reviewInstallInput(data, allowed, placed, enableOidc) : null
 	const copy = (text: string) =>
 		navigator.clipboard?.writeText(text).then(
 			() => toast('Copied'),
@@ -209,7 +213,30 @@ export function BeforeInstall({
 					</p>
 				</div>
 			))}
-			{data && !data.requiredFolders.length && !data.gpuAccess && !access.length && !setup.length && !folders.length && (
+			{data?.oidc?.supported && (
+				<div className="glass card" style={{marginBottom: 16, borderRadius: 18}}>
+					<div style={{display: 'flex', gap: 12, alignItems: 'center'}}>
+						<span className="row-ico" style={{'--c': 'var(--accent)'} as CSSProperties}>
+							<Icon name="key" size={18} />
+						</span>
+						<span style={{flex: 1, minWidth: 0}}>
+							<b style={{fontSize: 15, display: 'block'}}>Sign in with Omarchy Server</b>
+							<small className="muted">
+								{data.oidc.mode === 'auto'
+									? 'Automatically configures OIDC SSO using your Omarchy accounts + 2FA.'
+									: 'Pre-registers an OIDC client so you can paste credentials after install.'}
+							</small>
+						</span>
+						<Switch on={enableOidc} label="Sign in with Omarchy Server" onChange={setEnableOidc} />
+					</div>
+					{enableOidc && data.oidc.note && (
+						<p className="prose" style={{margin: '10px 0 0', fontSize: 13.5}}>
+							{data.oidc.note}
+						</p>
+					)}
+				</div>
+			)}
+			{data && !data.requiredFolders.length && !data.gpuAccess && !access.length && !setup.length && !folders.length && !data.oidc?.supported && (
 				<div className="glass card" style={{display: 'flex', gap: 12, alignItems: 'center', marginBottom: 16, borderRadius: 18}}>
 					<span className="row-ico" style={{'--c': 'var(--green)'} as CSSProperties}>
 						<Icon name="shield" size={18} />

@@ -568,6 +568,16 @@ function StoreSheet({
 							<span style={{fontSize: 14.5}}>{app.caution}</span>
 						</div>
 					)}
+					{app.oidc?.supported && (
+						<div className="glass card" style={{display: 'flex', gap: 12, alignItems: 'center', marginBottom: 16, borderRadius: 18}}>
+							<span className="row-ico" style={{'--c': 'var(--accent)'} as React.CSSProperties}>
+								<Icon name="key" size={18} />
+							</span>
+							<span style={{fontSize: 14}}>
+								<b>Sign in with Omarchy</b> · {app.oidc.mode === 'auto' ? 'Automatic OIDC SSO on install' : 'Pre-registered OIDC SSO'}
+							</span>
+						</div>
+					)}
 
 					<div className="store-stats">
 						<div>

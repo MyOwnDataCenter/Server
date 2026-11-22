@@ -4,6 +4,8 @@ export type ReviewInstallInput = {
 	grant?: string[]
 	folders?: {appId: string; id: string; path: string}[]
 	folderAccess?: {id: string; sourcePath: string}[]
+	oidc?: boolean
+	oidcIssuerUrl?: string
 }
 
 type Placed = Record<string, string | null | undefined>
@@ -30,7 +32,7 @@ export function installNeedsReview(review: InstallReview | null | undefined) {
 	return Boolean(review.permissions?.length || review.setup?.length || review.folders?.length || review.requiredFolders?.length || review.gpuAccess)
 }
 
-export function reviewInstallInput(review: InstallReview, allowed: boolean, placed: Placed): ReviewInstallInput | null {
+export function reviewInstallInput(review: InstallReview, allowed: boolean, placed: Placed, enableOidc = false): ReviewInstallInput | null {
 	const access = review.permissions ?? []
 	if (access.some((p) => p.id === 'refused')) return null
 	if ((review.setup?.length ?? 0) > 0) return null
@@ -41,9 +43,12 @@ export function reviewInstallInput(review: InstallReview, allowed: boolean, plac
 	const grant = [...new Set(access.map((p) => p.id))]
 	const chosen = folders.filter((f) => placed[folderKey(f)]).map((f) => ({appId: f.appId, id: f.id, path: placed[folderKey(f)]!.trim()}))
 	const folderAccess = (review.requiredFolders ?? []).map((f) => ({id: f.id, sourcePath: f.defaultSourcePath}))
+	const useOidc = Boolean(enableOidc && review.oidc?.supported)
+	const issuerHint = useOidc && !review.oidc?.issuerUrl && typeof location !== 'undefined' ? location.origin : undefined
 	return {
 		...(folderAccess.length ? {folderAccess} : {}),
 		...(grant.length ? {grant} : {}),
 		...(chosen.length ? {folders: chosen} : {}),
+		...(useOidc ? {oidc: true, ...(issuerHint ? {oidcIssuerUrl: issuerHint} : {})} : {}),
 	}
 }
