@@ -32,6 +32,7 @@ import {attachRdcCleanPathBridge} from './rdcleanpath.mjs'
 import {createUpdater} from './updater.mjs'
 import {createSystemApps} from './system-apps.mjs'
 import {createTailscale} from './tailscale.mjs'
+import {createOidc} from './oidc.mjs'
 import {authorityInfo, readPolicy, rotateAuthority, tlsContext, writePolicy} from './tls.mjs'
 import {RpcError, handleRpc, sendError, sendJson} from './rpc.mjs'
 import * as system from './system.mjs'
@@ -40,7 +41,7 @@ import {WebSocketServer} from 'ws'
 
 export const OMARCHYD_VERSION = '0.9.60'
 
-export async function startOmarchyd({port = 2021, host = '127.0.0.1', dataDir, tlsDir: sharedTlsDir = null, home = os.homedir(), webPort = 7780, machineOptions = {}, appOptions = {}, storageOptions = {}, updaterOptions = {}, pluginOptions = {}, themeOptions = {}, assistantOptions = {}, usbOptions = {}, backupOptions = {}, unraidOptions = {}, alertOptions = {}, healthOptions = {}, tailscaleOptions = {}, desktopVncPort = 5900, desktopVncSocket = join(process.env.XDG_RUNTIME_DIR || `/run/user/${process.getuid?.() ?? ''}`, 'omarchy-server', 'desktop-vnc.sock')}) {
+export async function startOmarchyd({port = 2021, host = '127.0.0.1', dataDir, tlsDir: sharedTlsDir = null, home = os.homedir(), webPort = 7780, machineOptions = {}, appOptions = {}, storageOptions = {}, updaterOptions = {}, pluginOptions = {}, themeOptions = {}, assistantOptions = {}, usbOptions = {}, backupOptions = {}, unraidOptions = {}, alertOptions = {}, healthOptions = {}, tailscaleOptions = {}, oidcOptions = {}, desktopVncPort = 5900, desktopVncSocket = join(process.env.XDG_RUNTIME_DIR || `/run/user/${process.getuid?.() ?? ''}`, 'omarchy-server', 'desktop-vnc.sock')}) {
 	const sourceDir = localGitDir('OMARCHY_SERVER_SOURCE', process.env.OMARCHY_SERVER_SOURCE)
 	const storeDir = localGitDir('OMARCHY_SERVER_APP_STORE', process.env.OMARCHY_SERVER_APP_STORE)
 	const appDir = fileURLToPath(new URL('..', import.meta.url))
@@ -301,6 +302,7 @@ export async function startOmarchyd({port = 2021, host = '127.0.0.1', dataDir, t
 					for (const agent of agents) await connector.procedures['swarm.remove'].run({id: agent.id}).catch((e) => console.error('[omarchyd] reset swarm', e.message))
 					await backups.clearSettings().catch((e) => console.error('[omarchyd] reset backups', e.message))
 					await storage.clearShares().catch((e) => console.error('[omarchyd] reset shares', e.message))
+					await oidc.reset().catch((e) => console.error('[omarchyd] reset oidc', e.message))
 					if (appsRemain || machinesRemain) return
 					await accounts.reset()
 					console.log('[omarchyd] factory reset done')
@@ -525,12 +527,14 @@ export async function startOmarchyd({port = 2021, host = '127.0.0.1', dataDir, t
 		...healthOptions,
 	})
 	const tailscale = createTailscale({audit, ...tailscaleOptions})
+	const oidc = createOidc({dataDir, accounts, audit, ...oidcOptions})
 	Object.assign(
 		procedures,
 		Object.fromEntries(Object.entries(alerts.procedures).map(([name, p]) => [name, {kind: p.kind, run: (input, {auth}) => (ownerOnly(auth, 'manage alerts'), p.run(input))}])),
 		Object.fromEntries(Object.entries(audit.procedures).map(([name, p]) => [name, {kind: p.kind, run: (input, {auth}) => (ownerOnly(auth, 'read the activity log'), p.run(input))}])),
 		Object.fromEntries(Object.entries(health.procedures).map(([name, p]) => [name, {kind: p.kind, run: (input, {auth}) => (ownerOnly(auth, 'check server health'), p.run(input))}])),
 		Object.fromEntries(Object.entries(tailscale.procedures).map(([name, p]) => [name, {kind: p.kind, run: (input, {auth}) => (ownerOnly(auth, 'manage Tailscale'), p.run(input))}])),
+		Object.fromEntries(Object.entries(oidc.procedures).map(([name, p]) => [name, {kind: p.kind, run: (input, {auth}) => (ownerOnly(auth, 'manage Single Sign-On'), p.run(input))}])),
 	)
 	const origApprove = procedures['assistant.approve']
 	if (origApprove) {
@@ -749,6 +753,7 @@ WantedBy=graphical-session.target
 	const server = http.createServer(async (req, res) => {
 		const url = new URL(req.url ?? '/', 'http://localhost')
 		try {
+			if (await oidc.handleHttp(req, res, url)) return
 			if (url.pathname === '/api/health' && req.method === 'GET') {
 				const h = await health.check()
 				return sendJson(res, h.ok ? 200 : 503, {ok: h.ok, status: h.status, version: OMARCHYD_VERSION})

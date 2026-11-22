@@ -273,6 +273,26 @@ export async function openAccounts(dataDir, {create = true} = {}) {
 		},
 		// Asked again before sensitive actions (signing in the desktop).
 		confirmPassword: async (userId, password) => (await verify({userId, password}, {twoFactor: false}), true),
+		// Verify username + password (+ 2FA when enabled) for native OIDC SSO without falling back to owner.
+		async verifyCredentials({username, password, totpToken} = {}) {
+			adoptOwnerFromDisk()
+			const needle = String(username ?? '').trim()
+			const lower = needle.toLowerCase()
+			const match = needle ? state.users.find((u) => u.userId === needle || u.name.toLowerCase() === lower) : null
+			if (!match) {
+				await new Promise((r) => setTimeout(r, 300 + Math.random() * 300))
+				throw new RpcError('UNAUTHORIZED', 'Incorrect username or password')
+			}
+			try {
+				const user = await verify({userId: match.userId, password, totpToken}, {twoFactor: true})
+				return publicUser(user)
+			} catch (e) {
+				if (e instanceof RpcError && e.code === 'UNAUTHORIZED' && e.message === 'Incorrect password') {
+					throw new RpcError('UNAUTHORIZED', 'Incorrect username or password')
+				}
+				throw e
+			}
+		},
 		// ---- two-factor ----
 		is2faEnabled: (userId) => !!userById(userId)?.totp,
 		totpUri(userId) {

@@ -88,7 +88,7 @@ function describeSession(s: ActiveSession) {
 	return {icon: 'browser' as IconName, name: `${browser}${os ? ` on ${os}` : ''}`, detail: ''}
 }
 
-type SheetId = null | 'name' | 'password' | '2fa' | 'hostname' | 'wifi' | 'tailscale' | 'logs' | 'reset' | 'alerts' | 'health' | 'audit'
+type SheetId = null | 'name' | 'password' | '2fa' | 'hostname' | 'wifi' | 'tailscale' | 'oidc' | 'logs' | 'reset' | 'alerts' | 'health' | 'audit'
 
 export function Settings({prefs, setPrefs, onBack, onSignedOut}: {prefs: Prefs; setPrefs: (p: Prefs) => void; onBack: () => void; onSignedOut: () => void}) {
 	const boot = useBootstrap()
@@ -128,6 +128,7 @@ export function Settings({prefs, setPrefs, onBack, onSignedOut}: {prefs: Prefs; 
 	const wifiSupported = useQ<boolean>('wifi.supported', undefined, {enabled: owner})
 	const wifi = useQ<{status: 'connected' | 'disconnected'; ssid?: string}>('wifi.connected', undefined, {enabled: owner && !!wifiSupported.data})
 	const tailscale = useQ<TailscaleStatus>('tailscale.status', undefined, {enabled: owner})
+	const oidc = useQ<OidcStatus>('oidc.status', undefined, {enabled: owner})
 
 	const startUpdate = async () => {
 		const ok = await confirm({
@@ -410,6 +411,15 @@ export function Settings({prefs, setPrefs, onBack, onSignedOut}: {prefs: Prefs; 
 			{owner && <SecurityGroup />}
 
 			<Group title="More">
+				{owner && (
+					<Row
+						icon="key"
+						color="var(--accent)"
+						label="Single Sign-On (OIDC)"
+						value={oidc.data ? `${oidc.data.clientCount} app${oidc.data.clientCount === 1 ? '' : 's'}` : ''}
+						onClick={() => setSheet('oidc')}
+					/>
+				)}
 				{owner && <Row icon="bell" color="var(--orange, #f59e0b)" label="Alerts & push" onClick={() => setSheet('alerts')} />}
 				{owner && <Row icon="pulse" color="var(--green)" label="Server health" onClick={() => setSheet('health')} />}
 				{owner && <Row icon="history" color="var(--blue)" label="Activity log" onClick={() => setSheet('audit')} />}
@@ -428,6 +438,7 @@ export function Settings({prefs, setPrefs, onBack, onSignedOut}: {prefs: Prefs; 
 			<HostnameSheet open={sheet === 'hostname'} current={hostname.data ?? ''} onClose={close} />
 			{sheet === 'wifi' && <WifiSheet onClose={close} connected={wifi.data?.status === 'connected' ? wifi.data.ssid : undefined} />}
 			{sheet === 'tailscale' && <TailscaleSheet onClose={close} />}
+			{sheet === 'oidc' && <OidcSheet onClose={close} />}
 			{sheet === 'alerts' && <AlertsSheet onClose={close} />}
 			{sheet === 'health' && <HealthSheet onClose={close} />}
 			{sheet === 'audit' && <AuditSheet onClose={close} />}
@@ -2393,6 +2404,362 @@ function TailscaleSheet({onClose}: {onClose: () => void}) {
 					</Group>
 				</>
 			)}
+		</Sheet>
+	)
+}
+
+type OidcPreset = {
+	id: string
+	name: string
+	requirePkce: boolean
+	defaultPaths: string[]
+	note: string
+}
+
+type OidcStatus = {
+	issuerUrl: string
+	keyId: string
+	clientCount: number
+	presets: OidcPreset[]
+}
+
+type OidcClient = {
+	id: string
+	name: string
+	publicClient: boolean
+	requirePkce: boolean
+	redirectUris: string[]
+	scopes: string[]
+	createdAt: number
+}
+
+function OidcSheet({onClose}: {onClose: () => void}) {
+	const toast = useToast()
+	const confirm = useConfirm()
+	const save = useSave()
+	const qc = useQueryClient()
+	const status = useQ<OidcStatus>('oidc.status')
+	const clients = useQ<OidcClient[]>('oidc.clients')
+
+	const [issuerInput, setIssuerInput] = useState('')
+	const [name, setName] = useState('')
+	const [redirectUris, setRedirectUris] = useState('')
+	const [publicClient, setPublicClient] = useState(false)
+	const [requirePkce, setRequirePkce] = useState(true)
+	const [selectedPresetNote, setSelectedPresetNote] = useState('')
+	const [revealed, setRevealed] = useState<{id: string; name: string; secret: string | null} | null>(null)
+	const [editingId, setEditingId] = useState<string | null>(null)
+
+	useEffect(() => {
+		if (status.data) setIssuerInput(status.data.issuerUrl)
+	}, [status.data?.issuerUrl])
+
+	const effectiveIssuer = status.data?.issuerUrl || location.origin
+	const discoveryUrl = `${effectiveIssuer}/.well-known/openid-configuration`
+
+	const copyText = async (text: string, label: string) => {
+		try {
+			await navigator.clipboard.writeText(text)
+			toast(`${label} copied`)
+		} catch {
+			toast(`Couldn’t copy ${label.toLowerCase()}`, true)
+		}
+	}
+
+	const saveIssuer = (e: FormEvent) => {
+		e.preventDefault()
+		save.mutate({
+			path: 'oidc.setConfig',
+			input: {issuerUrl: issuerInput.trim()},
+			done: issuerInput.trim() ? 'Issuer URL saved' : 'Using automatic Issuer URL',
+			refresh: ['oidc.status'],
+		})
+	}
+
+	const applyPreset = (p: OidcPreset) => {
+		setEditingId(null)
+		setName(p.name)
+		setRedirectUris(p.defaultPaths.map((path) => (path.startsWith('/') ? `https://<app-host>${path}` : path)).join('\n'))
+		setPublicClient(false)
+		setRequirePkce(p.requirePkce)
+		setSelectedPresetNote(p.note)
+	}
+
+	const startEdit = (c: OidcClient) => {
+		setEditingId(c.id)
+		setName(c.name)
+		setRedirectUris(c.redirectUris.join('\n'))
+		setPublicClient(c.publicClient)
+		setRequirePkce(c.requirePkce)
+		setSelectedPresetNote('')
+	}
+
+	const resetForm = () => {
+		setEditingId(null)
+		setName('')
+		setRedirectUris('')
+		setPublicClient(false)
+		setRequirePkce(true)
+		setSelectedPresetNote('')
+	}
+
+	const submitClient = async (e: FormEvent) => {
+		e.preventDefault()
+		const uris = redirectUris
+			.split(/[\n,]+/)
+			.map((s) => s.trim())
+			.filter(Boolean)
+		if (!name.trim() || uris.length === 0) {
+			toast('Enter an app name and at least one redirect URI', true)
+			return
+		}
+		if (uris.some((u) => u.includes('<app-host>'))) {
+			toast('Replace <app-host> with your app’s real hostname or IP', true)
+			return
+		}
+		try {
+			if (editingId) {
+				await mutate('oidc.updateClient', {id: editingId, name: name.trim(), redirectUris: uris, requirePkce})
+				toast('OIDC app updated')
+				resetForm()
+			} else {
+				const res = await mutate<{client: OidcClient; clientSecret: string | null}>('oidc.createClient', {
+					name: name.trim(),
+					redirectUris: uris,
+					publicClient,
+					requirePkce,
+					...(!status.data?.issuerUrl ? {issuerUrl: issuerInput.trim() || location.origin} : {}),
+				})
+				setRevealed({id: res.client.id, name: res.client.name, secret: res.clientSecret})
+				toast(`${res.client.name} added`)
+				resetForm()
+			}
+			qc.invalidateQueries({queryKey: ['oidc.clients']})
+			qc.invalidateQueries({queryKey: ['oidc.status']})
+		} catch (err) {
+			toast((err as Error).message, true)
+		}
+	}
+
+	const rotateSecret = async (c: OidcClient) => {
+		const ok = await confirm({
+			title: `Rotate secret for ${c.name}?`,
+			body: 'The previous client secret stops working immediately. Update it in the app after rotating.',
+			confirm: 'Rotate secret',
+			danger: true,
+		})
+		if (!ok) return
+		try {
+			const res = await mutate<{id: string; clientSecret: string}>('oidc.rotateSecret', {id: c.id})
+			setRevealed({id: c.id, name: c.name, secret: res.clientSecret})
+			toast('Client secret rotated')
+		} catch (err) {
+			toast((err as Error).message, true)
+		}
+	}
+
+	const deleteClient = async (c: OidcClient) => {
+		const ok = await confirm({
+			title: `Remove ${c.name}?`,
+			body: 'Sign-in with Omarchy Server will stop working for this app and its active OIDC tokens will be revoked.',
+			confirm: 'Remove app',
+			danger: true,
+		})
+		if (!ok) return
+		if (editingId === c.id) resetForm()
+		if (revealed?.id === c.id) setRevealed(null)
+		save.mutate({path: 'oidc.deleteClient', input: {id: c.id}, done: `${c.name} removed`, refresh: ['oidc.clients', 'oidc.status']})
+	}
+
+	return (
+		<Sheet open onClose={onClose} label="Single Sign-On (OIDC)" tall>
+			<SheetHeader title="Single Sign-On (OIDC)" subtitle="Use your Omarchy Server accounts + 2FA to sign in to self-hosted apps" onClose={onClose} />
+
+			{revealed && (
+				<Group
+					title={`Credentials for ${revealed.name}`}
+					footer={revealed.secret ? 'Save this client secret now — it is hashed on disk and won’t be shown again.' : 'Public PKCE client — no client secret is required.'}
+				>
+					<Row
+						icon="key"
+						color="var(--green)"
+						label="Client ID"
+						sub={revealed.id}
+						trailing={
+							<button type="button" className="btn small" onClick={() => copyText(revealed.id, 'Client ID')}>
+								Copy
+							</button>
+						}
+					/>
+					{revealed.secret && (
+						<Row
+							icon="shield"
+							color="var(--orange, #f59e0b)"
+							label="Client Secret (shown once)"
+							sub={revealed.secret}
+							trailing={
+								<button type="button" className="btn primary small" onClick={() => copyText(revealed.secret!, 'Client secret')}>
+									Copy
+								</button>
+							}
+						/>
+					)}
+					<div className="row static">
+						<button type="button" className="btn small" onClick={() => setRevealed(null)}>
+							I’ve saved these
+						</button>
+					</div>
+				</Group>
+			)}
+
+			<Group
+				title="Provider endpoints"
+				footer="Paste the Discovery URL (or Issuer URL) into any app that supports OpenID Connect (RS256). Scopes: openid, profile, email, groups."
+			>
+				{status.data && !status.data.issuerUrl && (
+					<Row
+						icon="alert"
+						color="var(--orange, #f59e0b)"
+						label="Issuer URL is automatic"
+						sub="Save your server’s reachable URL so Docker apps and browsers always agree on the token issuer."
+						trailing={
+							<button
+								type="button"
+								className="btn small"
+								disabled={save.isPending}
+								onClick={() =>
+									save.mutate({
+										path: 'oidc.setConfig',
+										input: {issuerUrl: location.origin},
+										done: `Issuer URL set to ${location.origin}`,
+										refresh: ['oidc.status'],
+									})
+								}
+							>
+								Use this address
+							</button>
+						}
+					/>
+				)}
+				<Row
+					icon="link"
+					color="var(--blue)"
+					label="Issuer URL"
+					sub={effectiveIssuer}
+					trailing={
+						<button type="button" className="btn small" onClick={() => copyText(effectiveIssuer, 'Issuer URL')}>
+							Copy
+						</button>
+					}
+				/>
+				<Row
+					icon="networking"
+					color="var(--teal)"
+					label="Discovery URL"
+					sub={discoveryUrl}
+					trailing={
+						<button type="button" className="btn small" onClick={() => copyText(discoveryUrl, 'Discovery URL')}>
+							Copy
+						</button>
+					}
+				/>
+				<form onSubmit={saveIssuer} style={{padding: '10px 14px'}}>
+					<Field
+						id="oidc-issuer"
+						label="Custom Issuer URL (optional, for reverse proxies or custom domains)"
+						type="url"
+						placeholder={`Automatic (${location.origin})`}
+						value={issuerInput}
+						onChange={(e) => setIssuerInput(e.target.value)}
+						autoCapitalize="off"
+						autoCorrect="off"
+					/>
+					<button className="btn small" disabled={save.isPending} style={{marginTop: 6}}>
+						Save issuer URL
+					</button>
+				</form>
+			</Group>
+
+			<Group title={editingId ? 'Edit OIDC app' : 'Add OIDC app'} footer={selectedPresetNote || 'Redirect URIs must match exactly. Wildcards are rejected.'}>
+				{!editingId && (status.data?.presets.length ?? 0) > 0 && (
+					<div className="row static" style={{flexWrap: 'wrap', gap: 6, paddingBlock: 10}}>
+						{status.data!.presets.map((p) => (
+							<button key={p.id} type="button" className="btn small" onClick={() => applyPreset(p)}>
+								{p.name}
+							</button>
+						))}
+					</div>
+				)}
+				<form onSubmit={submitClient} style={{padding: '10px 14px'}}>
+					<Field id="oidc-name" label="App name" placeholder="Immich" value={name} onChange={(e) => setName(e.target.value)} />
+					<div className="field" style={{marginBottom: 10}}>
+						<label htmlFor="oidc-redirects">Redirect URIs (one per line)</label>
+						<textarea
+							id="oidc-redirects"
+							rows={3}
+							placeholder="https://immich.example.com/auth/login"
+							value={redirectUris}
+							onChange={(e) => setRedirectUris(e.target.value)}
+							style={{width: '100%', resize: 'vertical', fontFamily: 'var(--mono)', fontSize: 12.5}}
+						/>
+					</div>
+					{!editingId && (
+						<div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8}}>
+							<span style={{fontSize: 13.5}}>Public client (no secret, PKCE only)</span>
+							<Switch on={publicClient} label="Public client" onChange={(v) => (setPublicClient(v), v && setRequirePkce(true))} />
+						</div>
+					)}
+					<div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12}}>
+						<span style={{fontSize: 13.5}}>Require PKCE (S256)</span>
+						<Switch on={publicClient ? true : requirePkce} disabled={publicClient} label="Require PKCE" onChange={setRequirePkce} />
+					</div>
+					<div style={{display: 'flex', gap: 8}}>
+						<button className="btn primary" style={{flex: 1}}>
+							{editingId ? 'Save changes' : 'Create OIDC app'}
+						</button>
+						{editingId && (
+							<button type="button" className="btn" onClick={resetForm}>
+								Cancel
+							</button>
+						)}
+					</div>
+				</form>
+			</Group>
+
+			<Group title={`Registered apps (${clients.data?.length ?? 0})`}>
+				{(clients.data ?? []).map((c) => (
+					<div className="row static" key={c.id} style={{flexDirection: 'column', alignItems: 'stretch', gap: 8, paddingBlock: 12}}>
+						<div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8}}>
+							<span className="main">
+								<b style={{fontWeight: 600}}>{c.name}</b>
+								<span style={{fontFamily: 'var(--mono)', fontSize: 12}}>
+									{c.id} · {c.publicClient ? 'Public PKCE' : c.requirePkce ? 'Confidential + PKCE' : 'Confidential'}
+								</span>
+							</span>
+							<button type="button" className="btn small" onClick={() => copyText(c.id, 'Client ID')}>
+								Copy ID
+							</button>
+						</div>
+						<div className="muted" style={{fontSize: 12, wordBreak: 'break-all'}}>
+							{c.redirectUris.join(' · ')}
+						</div>
+						<div style={{display: 'flex', gap: 6, flexWrap: 'wrap'}}>
+							<button type="button" className="btn small" onClick={() => startEdit(c)}>
+								Edit
+							</button>
+							{!c.publicClient && (
+								<button type="button" className="btn small" onClick={() => rotateSecret(c)}>
+									Rotate secret
+								</button>
+							)}
+							<button type="button" className="btn small" style={{color: 'var(--red)'}} onClick={() => deleteClient(c)}>
+								Remove
+							</button>
+						</div>
+					</div>
+				))}
+				{clients.isSuccess && (clients.data?.length ?? 0) === 0 && <div className="row static muted">No OIDC apps registered yet. Pick a preset above to get started.</div>}
+			</Group>
 		</Sheet>
 	)
 }
