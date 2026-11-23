@@ -933,6 +933,10 @@ WantedBy=graphical-session.target
 			refuse('500 Internal Server Error')
 		}
 	})
+	// Node's default gives a whole request, body included, 5 minutes: a big upload would be cut off with a 408.
+	// Headers still have to arrive in time (headersTimeout). Note: no socket idle timeout is set, so a body that
+	// trickles in very slowly can hold a connection open (the relay server already runs with 0 the same way).
+	server.requestTimeout = 0
 	await apps.ready
 	await new Promise((resolve, reject) => {
 		server.once('error', reject)
@@ -959,7 +963,7 @@ WantedBy=graphical-session.target
 		}
 	}, 20_000).unref?.()
 
-	return {url: `http://${host}:${server.address().port}`, accounts, terminals, close: () => (sampler.stop(), apps.close(), backups.close(), unraid.close(), updater.stop(), connector.close(), assistant.chatgpt.close(), terminals.close(), new Promise((r) => server.close(r)))}
+	return {url: `http://${host}:${server.address().port}`, server, accounts, terminals, close: () => (sampler.stop(), apps.close(), backups.close(), unraid.close(), updater.stop(), connector.close(), assistant.chatgpt.close(), terminals.close(), new Promise((r) => server.close(r)))}
 }
 
 // The "always use the secure address" choice made while omarchyd kept its own certificate folder.

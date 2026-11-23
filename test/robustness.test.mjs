@@ -195,3 +195,20 @@ test('#321 update: two requests at once start one update', async () => {
 		await rm(dir, {recursive: true, force: true})
 	}
 })
+
+test('#485 neither HTTP server cuts a long upload off after Node’s 5 minute request limit', async () => {
+	const {startOmarchyd} = await import('../omarchyd/server.mjs')
+	const root = await tmp()
+	const d = await startOmarchyd({port: 0, dataDir: join(root, 'data'), home: root})
+	try {
+		assert.equal(d.server.requestTimeout, 0)
+		// A request that is still being sent is not an idle one: headers keep their own limit.
+		assert.ok(d.server.headersTimeout > 0)
+	} finally {
+		await d.close()
+		await rm(root, {recursive: true, force: true})
+	}
+	// The web server's listener lives in the command line entry, which starts on import; check its source.
+	const cli = await readFile(new URL('../server/cli.mjs', import.meta.url), 'utf8')
+	assert.match(cli, /httpServer\.requestTimeout = 0/)
+})

@@ -106,6 +106,8 @@ try {
 const secure = tlsContext({dir: defaultTlsDir()})
 const app = createApp({store, staticDir, tls: secure, secureCookies: process.env.OMARCHY_SERVER_SECURE_COOKIES === '1', relayHost: host})
 const httpServer = http.createServer(app)
+// Node's default gives a whole request, body included, 5 minutes: a big file upload would be cut off with a 408.
+httpServer.requestTimeout = 0
 const server = dualProtocolServer(httpServer, secure.get)
 server.listen(port, host, () => {
 	console.log(`\n  MODC ${VERSION}`)
