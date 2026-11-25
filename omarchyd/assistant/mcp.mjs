@@ -155,7 +155,11 @@ export function forgetMcpTools(urls) {
 	for (const url of urls) cache.delete(url)
 }
 
-export async function listMcpTools({url, transport, fetchImpl = fetch, ttlMs = 60_000, now = () => Date.now(), signal} = {}) {
+// A tool list is a quick question. An app that takes the connection and never answers must not hold up
+// every chat message while the turn waits for it.
+export const LIST_TIMEOUT_MS = 8000
+
+export async function listMcpTools({url, transport, fetchImpl = fetch, ttlMs = 60_000, now = () => Date.now(), signal: turnSignal, timeoutMs = LIST_TIMEOUT_MS} = {}) {
 	if (transport !== 'http' && transport !== 'sse') return []
 	if (!loopback(url)) return []
 	const at = typeof now === 'function' ? now() : Date.now()
@@ -163,6 +167,7 @@ export async function listMcpTools({url, transport, fetchImpl = fetch, ttlMs = 6
 	const hit = cache.get(url)
 	const age = hit ? at - hit.at : 0
 	if (hit && Number.isFinite(ttl) && age >= 0 && age < ttl) return copyTools(hit.tools)
+	const signal = typeof AbortSignal.any === 'function' && turnSignal ? AbortSignal.any([turnSignal, AbortSignal.timeout(timeoutMs)]) : (turnSignal ?? AbortSignal.timeout(timeoutMs))
 	try {
 		const session = await handshake(url, fetchImpl, signal)
 		const tools = []
@@ -183,7 +188,8 @@ export async function listMcpTools({url, transport, fetchImpl = fetch, ttlMs = 6
 		cache.set(url, {at, tools})
 		return copyTools(tools)
 	} catch (e) {
-		if (e?.name === 'AbortError') throw e
+		// Only the turn being stopped ends the listing; running out of time just means this app has no tools now.
+		if (turnSignal?.aborted) throw e
 		cache.delete(url)
 		return []
 	}
