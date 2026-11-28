@@ -129,6 +129,12 @@ export function libraryFrom(images, arch = ARCH, {all = false} = {}) {
 const gib = (bytes) => Math.round((bytes / 1024 ** 3) * 10) / 10
 const bool = (v) => v === true || v === 'true'
 
+function nixCacheConfText({enabled, substituter}) {
+	const sub = String(substituter ?? '').trim()
+	if (!enabled || !sub) return ''
+	return `extra-substituters = ${sub}\n`
+}
+
 /** One container from `incus list --format json`, in the shape the web app shows. */
 export function containerFrom(c) {
 	const cfg = c?.config ?? {}
@@ -454,9 +460,9 @@ export function createContainers({run = defaultRun, reservedPorts = [], user = o
 		return bool(cfg['user.modc.nixos']) || isNixosOs(cfg['image.os'])
 	}
 	async function requireNixosContainer(n) {
-		const row = (await raw()).find((c) => c.name === n)
+		const row = (await list()).find((c) => c.name === n)
 		if (!row) throw new RpcError('NOT_FOUND', 'No such container')
-		if (!containerIsNixos(row)) throw new RpcError('BAD_REQUEST', 'That container isn’t a NixOS guest.')
+		if (!row.nixos) throw new RpcError('BAD_REQUEST', 'That container isn’t a NixOS guest.')
 		return row
 	}
 
@@ -487,9 +493,39 @@ export function createContainers({run = defaultRun, reservedPorts = [], user = o
 		const config = limits({cpus: input.cpus ?? 1, memoryMiB: input.memoryMiB ?? 1024, ...(input.cpuAllowance !== undefined ? {cpuAllowance: input.cpuAllowance} : {}), ...(input.swap !== undefined ? {swap: input.swap} : {})})
 		const diskGiB = intIn(input.diskGiB ?? 8, 1, 4096, 'Use 1 to 4096 GB of disk')
 		if (input.autostart) config.push('boot.autostart=true')
+		if (nixos) config.push('security.nesting=true', 'user.modc.nixos=true')
+		const cred = secrets(input)
+		if (pending.has(n) && !pending.get(n).error) throw new RpcError('CONFLICT', `${n} is already being created`)
+		if (hostId !== 'server') {
+			if (image.startsWith('template:')) throw new RpcError('BAD_REQUEST', 'Templates on another computer aren’t supported yet. Use a library image.')
+			if ((await list()).some((c) => c.name === n)) throw new RpcError('CONFLICT', `There’s already a container named ${n}`)
+			const remote = await remoteHostStatus({connector, agents: await listedAgents(), hostId})
+			if (!remote.available) {
+				const who = remote.hostName || 'That computer'
+				throw new RpcError('PRECONDITION_FAILED', `${who} needs Incus set up first. ${remote.reason} Run ${remote.setupCommand ?? setupCommand()} on ${who}.`)
+			}
+			if (nixos) {
+				const writeBody = {name: n}
+				if (input.nixosConfig) {
+					const checked = validateNixosConfig(input.nixosConfig)
+					if (!checked.ok) throw new RpcError('BAD_REQUEST', checked.error)
+					writeBody.configuration = checked.config
+					const cache = await readNixCache(nixosShare())
+					writeBody.cacheConf = nixCacheConfText(cache)
+				}
+				await remoteContainerCall(connector, hostId, 'lxc-write-config', writeBody, 60_000)
+			}
+			await remoteContainerCall(
+				connector,
+				hostId,
+				'lxc-launch',
+				{name: n, source, configs: config, diskGiB, ...(nixos ? {nixosShare: true} : {})},
+				30 * 60_000,
+			)
+			return {name: n, hostId, ...(nixos ? {nixos: true} : {})}
+		}
 		if (nixos) {
 			const root = nixosShare()
-			config.push('security.nesting=true', 'user.modc.nixos=true')
 			await ensureConfigDir(root, n)
 			if (input.nixosConfig) {
 				const checked = validateNixosConfig(input.nixosConfig)
@@ -502,28 +538,6 @@ export function createContainers({run = defaultRun, reservedPorts = [], user = o
 				const cache = await readNixCache(root)
 				await writeCacheFragment(root, n, cache)
 			}
-		}
-		const cred = secrets(input)
-		if (pending.has(n) && !pending.get(n).error) throw new RpcError('CONFLICT', `${n} is already being created`)
-		if (hostId !== 'server') {
-			if (image.startsWith('template:')) throw new RpcError('BAD_REQUEST', 'Templates on another computer aren’t supported yet. Use a library image.')
-			if (nixos) throw new RpcError('PRECONDITION_FAILED', 'NixOS containers on another computer aren’t supported yet. Use Debian or Alpine for now.')
-			if ((await list()).some((c) => c.name === n)) throw new RpcError('CONFLICT', `There’s already a container named ${n}`)
-			const remote = await remoteHostStatus({connector, agents: await listedAgents(), hostId})
-			if (!remote.available) {
-				const who = remote.hostName || 'That computer'
-				throw new RpcError('PRECONDITION_FAILED', `${who} needs Incus set up first. ${remote.reason} Run ${remote.setupCommand ?? setupCommand()} on ${who}.`)
-			}
-			const launchConfig = [...config]
-			if (nixos) launchConfig.push('security.nesting=true', 'user.modc.nixos=true')
-			await remoteContainerCall(
-				connector,
-				hostId,
-				'lxc-launch',
-				{name: n, source, configs: launchConfig, diskGiB},
-				30 * 60_000,
-			)
-			return {name: n, hostId}
 		}
 		if ((await raw()).some((c) => c.name === n)) throw new RpcError('CONFLICT', `There’s already a container named ${n}`)
 		const shareRoot = nixos ? nixosShare() : null
@@ -1034,6 +1048,11 @@ export function createContainers({run = defaultRun, reservedPorts = [], user = o
 	async function nixosConfig(input = {}) {
 		const n = name(input.name)
 		await requireNixosContainer(n)
+		const hostId = await containerHost(n)
+		if (hostId !== 'server') {
+			const out = await remoteContainerCall(connector, hostId, 'lxc-read-config', {name: n}, 30_000)
+			return JSON.parse(String(out))
+		}
 		return readConfiguration(nixosShare(), n)
 	}
 	async function setNixosConfig(input = {}) {
@@ -1041,6 +1060,18 @@ export function createContainers({run = defaultRun, reservedPorts = [], user = o
 		await requireNixosContainer(n)
 		const checked = validateNixosConfig(input.config ?? '')
 		if (!checked.ok) throw new RpcError('BAD_REQUEST', checked.error)
+		const hostId = await containerHost(n)
+		if (hostId !== 'server') {
+			const cache = await readNixCache(nixosShare())
+			await remoteContainerCall(
+				connector,
+				hostId,
+				'lxc-write-config',
+				{name: n, configuration: checked.config, cacheConf: nixCacheConfText(cache)},
+				60_000,
+			)
+			return nixosConfig({name: n})
+		}
 		const root = nixosShare()
 		try {
 			await writeConfiguration(root, n, checked.config)

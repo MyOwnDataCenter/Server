@@ -3409,6 +3409,8 @@ LXC_ACTIONS = {
     "lxc-stop": "stop",
     "lxc-restart": "restart",
     "lxc-delete": "delete",
+    "lxc-write-config": "write-config",
+    "lxc-read-config": "read-config",
 }
 _LXC_POSITIONALS = {
     "status": (),
@@ -3418,8 +3420,10 @@ _LXC_POSITIONALS = {
     "stop": ("name",),
     "restart": ("name",),
     "delete": ("name",),
+    "write-config": (),
+    "read-config": ("name",),
 }
-_LXC_JSON = frozenset(("launch",))
+_LXC_JSON = frozenset(("launch", "write-config"))
 
 
 def _lxc_spawn(argv, stdin=None):

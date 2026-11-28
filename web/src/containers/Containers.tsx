@@ -425,7 +425,7 @@ function CreateContainer({
 					rootPassword: password || undefined,
 					sshKey: sshKey.trim() || undefined,
 					...(host && host.id !== SERVER_FLEET_ID ? {hostId: host.id} : {}),
-					...(nixosImage && !remote && nixosConfig.trim() ? {nixosConfig} : {}),
+					...(nixosImage && nixosConfig.trim() ? {nixosConfig} : {}),
 				},
 				done: `Creating ${name}. The first container of a system takes a minute to download.`,
 			},
@@ -532,7 +532,7 @@ function CreateContainer({
 					/>
 					<TextField id="ct-pw" label="Root password (optional)" type="password" value={password} onChange={setPassword} hint="For signing in on this container or over SSH. It isn’t stored by My Own Data Center." />
 					<TextField id="ct-key" label="SSH public key (optional)" value={sshKey} onChange={setSshKey} placeholder="ssh-ed25519 AAAA… you@laptop" area hint="Added for root. Install an SSH server inside to use it." />
-					{nixosImage && !remote ? (
+					{nixosImage ? (
 						<TextField
 							id="ct-nixos-config"
 							label="NixOS configuration"
@@ -540,11 +540,14 @@ function CreateContainer({
 							onChange={setNixosConfig}
 							area
 							placeholder={NIXOS_EXAMPLE_LXC}
-							hint="Optional. Saved on this server and mounted into the container; the guest applies it on boot."
+							hint={
+								remote
+									? 'Optional. Saved on that computer and mounted into the container; the guest applies it on boot.'
+									: 'Optional. Saved on this server and mounted into the container; the guest applies it on boot.'
+							}
 						/>
 					) : null}
-					{remote && nixosImage ? <p className="quiet">NixOS containers on another computer aren’t supported yet.</p> : null}
-					<button type="button" className="btn block" style={{marginTop: 8}} disabled={!!nameProblem || action.isPending || (remote && nixosImage)} onClick={create}>
+					<button type="button" className="btn block" style={{marginTop: 8}} disabled={!!nameProblem || action.isPending} onClick={create}>
 						{action.isPending ? <span className="spinner" /> : <Icon name="plus" size={18} />} Create container
 					</button>
 				</div>

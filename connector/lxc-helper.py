@@ -7,8 +7,19 @@ import shutil
 import subprocess
 import sys
 
-VERBS = frozenset(("status", "list", "launch", "start", "stop", "restart", "delete"))
-ARITY = {"status": (0, 0), "list": (0, 0), "launch": (0, 0), "start": (1, 1), "stop": (1, 1), "restart": (1, 1), "delete": (1, 1)}
+VERBS = frozenset(("status", "list", "launch", "start", "stop", "restart", "delete", "write-config", "read-config"))
+ARITY = {
+    "status": (0, 0),
+    "list": (0, 0),
+    "launch": (0, 0),
+    "start": (1, 1),
+    "stop": (1, 1),
+    "restart": (1, 1),
+    "delete": (1, 1),
+    "write-config": (0, 0),
+    "read-config": (1, 1),
+}
+NIXOS_GUEST_MOUNT = "/modc/nixos-config"
 NAME = re.compile(r"^[a-z]([a-z0-9-]{0,61}[a-z0-9])?$")
 SETUP = "machines-add-lxc"
 
@@ -90,6 +101,51 @@ def valid_name(name):
         raise HelperError("That container name isn’t valid")
 
 
+def config_root(name):
+    valid_name(name)
+    base = os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share")
+    return os.path.join(base, "omarchy-connector", "nixos-configs", name)
+
+
+def write_nixos_config(run=None, body=None):
+    run = run or default_run
+    if not isinstance(body, dict):
+        raise HelperError("Unknown action")
+    name = body.get("name")
+    valid_name(name)
+    root = config_root(name)
+    os.makedirs(root, mode=0o700, exist_ok=True)
+    configuration = body.get("configuration")
+    if configuration is not None:
+        if not isinstance(configuration, str):
+            raise HelperError("Unknown action")
+        if configuration and not configuration.endswith("\n"):
+            configuration += "\n"
+        with open(os.path.join(root, "configuration.nix"), "w", encoding="utf-8") as fh:
+            fh.write(configuration)
+    cache_conf = body.get("cacheConf")
+    cache_path = os.path.join(root, "nix-cache.conf")
+    if cache_conf is not None:
+        if not isinstance(cache_conf, str):
+            raise HelperError("Unknown action")
+        if cache_conf.strip():
+            with open(cache_path, "w", encoding="utf-8") as fh:
+                fh.write(cache_conf if cache_conf.endswith("\n") else cache_conf + "\n")
+        elif os.path.isfile(cache_path):
+            os.remove(cache_path)
+    return json.dumps({"ok": True, "path": root})
+
+
+def read_nixos_config(name=None):
+    valid_name(name)
+    root = config_root(name)
+    cfg_path = os.path.join(root, "configuration.nix")
+    if not os.path.isfile(cfg_path):
+        return json.dumps({"config": "", "present": False})
+    with open(cfg_path, encoding="utf-8") as fh:
+        return json.dumps({"config": fh.read(), "present": True})
+
+
 def launch_containers(run=None, body=None):
     run = run or default_run
     incus = incus_path()
@@ -117,6 +173,24 @@ def launch_containers(run=None, body=None):
         args.extend(["--config", cfg])
     args.extend(["--device", "root,size=%dGiB" % disk_gib])
     run(incus, args, timeout=20 * 60)
+    if body.get("nixosShare"):
+        share_dir = config_root(name)
+        os.makedirs(share_dir, mode=0o700, exist_ok=True)
+        run(
+            incus,
+            [
+                "config",
+                "device",
+                "add",
+                name,
+                "modc-nixos-config",
+                "disk",
+                "source=" + share_dir,
+                "path=" + NIXOS_GUEST_MOUNT,
+                "readonly=true",
+            ],
+            timeout=120,
+        )
     return json.dumps({"name": name})
 
 
@@ -147,7 +221,7 @@ def main():
         sys.stderr.write("Unknown action\n")
         return 2
     body = None
-    if verb == "launch":
+    if verb in ("launch", "write-config"):
         raw = sys.stdin.read()
         try:
             body = json.loads(raw) if raw.strip() else {}
@@ -161,6 +235,10 @@ def main():
             sys.stdout.write(list_containers())
         elif verb == "launch":
             sys.stdout.write(launch_containers(body=body))
+        elif verb == "write-config":
+            sys.stdout.write(write_nixos_config(body=body))
+        elif verb == "read-config":
+            sys.stdout.write(read_nixos_config(name=pos[0]))
         elif verb == "delete":
             sys.stdout.write(delete_container(name=pos[0]))
         else:

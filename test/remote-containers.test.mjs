@@ -1,4 +1,7 @@
 import assert from 'node:assert/strict'
+import {mkdtemp} from 'node:fs/promises'
+import os from 'node:os'
+import {join} from 'node:path'
 import {test} from 'node:test'
 
 import {createContainers} from '../omarchyd/containers.mjs'
@@ -106,6 +109,62 @@ test('list merges local and remote containers with hostId', async () => {
 			['local', 'server'],
 		],
 	)
+})
+
+const NIXOS_IMAGE = {
+	type: 'container',
+	architecture: 'x86_64',
+	aliases: [{name: 'nixos/24.11'}],
+	properties: {os: 'nixos', release: '24.11', variant: 'default', architecture: 'amd64'},
+}
+
+const NIXOS_CONFIG = `{ config, pkgs, modulesPath, ... }:
+{
+  imports = [ "\${modulesPath}/virtualisation/lxc-container.nix" ];
+  system.stateVersion = "24.11";
+}
+`
+
+test('remote NixOS create writes config on host then launches with share', async () => {
+	const hostId = 'abcdabcdabcd'
+	const calls = []
+	const dir = await mkdtemp(join(os.tmpdir(), 'remote-nix-'))
+	const mod = createContainers({
+		dataDir: dir,
+		run: async (args) => {
+			if (args[0] === 'list') return '[]'
+			if (args[0] === 'image') return JSON.stringify([NIXOS_IMAGE, DEB_IMG])
+			return ''
+		},
+		connector: {
+			list: async () => [{id: hostId, name: 'Kitchen', online: true}],
+			call: async (id, name, args) => {
+				calls.push({id, name, args})
+				if (name === 'lxc-status') return JSON.stringify({available: true, version: '6', project: 'default'})
+				if (name === 'lxc-list') return '[]'
+				if (name === 'lxc-write-config') return JSON.stringify({ok: true, path: '/tmp/share'})
+				if (name === 'lxc-launch') return JSON.stringify({name: args.name})
+				throw new Error('unexpected ' + name)
+			},
+		},
+	})
+	await mod.procedures['containers.create'].run({
+		hostId,
+		name: 'nixedge',
+		image: 'nixos/24.11',
+		diskGiB: 8,
+		nixosConfig: NIXOS_CONFIG,
+	})
+	const names = calls.map((c) => c.name)
+	assert.ok(names.includes('lxc-status'))
+	assert.ok(names.includes('lxc-write-config'))
+	assert.ok(names.includes('lxc-launch'))
+	const write = calls.find((c) => c.name === 'lxc-write-config')
+	assert.equal(write.args.name, 'nixedge')
+	assert.match(write.args.configuration, /stateVersion/)
+	const launch = calls.find((c) => c.name === 'lxc-launch')
+	assert.equal(launch.args.nixosShare, true)
+	assert.ok(launch.args.configs.some((c) => c === 'security.nesting=true'))
 })
 
 test('remoteHostStatus requires an online agent', async () => {

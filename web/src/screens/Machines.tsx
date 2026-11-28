@@ -214,6 +214,7 @@ export function Machines({onOpenApp, onTerminal, windowId, prefs, setPrefs}: {on
 						name: c.name,
 						state: containerState(c),
 						hostId: c.hostId,
+						hostName: c.hostId && c.hostId !== SERVER_FLEET_ID ? agents.find((a) => a.id === c.hostId)?.name : undefined,
 						connector: !!containerAgent(agents, c.name),
 					}),
 				),
