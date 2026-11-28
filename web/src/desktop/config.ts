@@ -35,6 +35,8 @@ export type DeskConfig = {
 	omarchySuperKeys: boolean
 	dock: {position: DockPos; iconSize: number; hover: DockHover; magnify: number; bounce: boolean; floating: boolean; autohide: boolean; showRunning: boolean; items: string[]; homeAdded?: boolean}
 	icons: DeskIcon[]
+	/** Once true, a Home folder shortcut on the desktop stays a folder. The first load turns the old Home folder icon into the Home page. */
+	homePageIcon?: boolean
 	showIcons: boolean
 	// 'auto': a window when the app allows being shown inside one, otherwise a browser tab
 	appsOpenIn: 'auto' | 'tab'
@@ -54,6 +56,24 @@ export function withTerminals(keys: readonly string[], show: boolean): string[] 
 }
 
 const KEY = 'omarchy-server:desktop-config'
+
+function isDeskIcon(i: unknown): i is DeskIcon {
+	return !!i && typeof i === 'object' && typeof (i as DeskIcon).key === 'string' && Number.isInteger((i as DeskIcon).col) && Number.isInteger((i as DeskIcon).row)
+}
+
+/** The old desktop Home icon was the home folder, so a double-click opened Files. It becomes the Home page once. */
+function desktopIcons(raw: unknown, homePageIcon: boolean): DeskIcon[] {
+	const icons = Array.isArray(raw) ? raw.filter(isDeskIcon) : DEFAULT_CONFIG.icons.map((i) => ({...i}))
+	if (homePageIcon) return icons
+	let seenHome = icons.some((i) => i.key === 'home')
+	return icons.flatMap((i) => {
+		if (i.key !== 'folder:/Home') return [i]
+		if (seenHome) return []
+		seenHome = true
+		return [{...i, key: 'home'}]
+	})
+}
+
 export const DEFAULT_CONFIG: DeskConfig = {
 	v: 1,
 	preset: null,
@@ -64,9 +84,10 @@ export const DEFAULT_CONFIG: DeskConfig = {
 	omarchySuperKeys: false,
 	dock: {position: 'left', iconSize: 46, hover: 'lift', magnify: 1.6, bounce: true, floating: false, autohide: false, showRunning: true, items: [...SYSTEM_DOCK]},
 	icons: [
-		{key: 'folder:/Home', col: 0, row: 0},
+		{key: 'home', col: 0, row: 0},
 		{key: 'folder:/Trash', col: 0, row: 1},
 	],
+	homePageIcon: true,
 	showIcons: true,
 	appsOpenIn: 'auto',
 }
@@ -109,7 +130,8 @@ function clean(raw: unknown): DeskConfig {
 			items: [...new Set([...dockItems, ...(c.dock ? [] : legacyPins)])],
 			homeAdded: true,
 		},
-		icons: Array.isArray(c.icons) ? c.icons.filter((i) => i && typeof i.key === 'string' && Number.isInteger(i.col) && Number.isInteger(i.row)) : d.icons,
+		icons: desktopIcons(c.icons, c.homePageIcon === true),
+		homePageIcon: true,
 		showIcons: c.showIcons !== false,
 		appsOpenIn: c.appsOpenIn === 'tab' ? 'tab' : 'auto',
 	}
