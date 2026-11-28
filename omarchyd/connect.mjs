@@ -86,7 +86,7 @@ function validState(v) {
 	return true
 }
 
-export function createConnect({dataDir, apiBase = CONNECT_API, fetchImpl = fetch, now = () => Date.now(), version = '', autoStart = true, log = (m) => console.error(m), tunnelOptions = {}, remoteOptions = {}, accounts = null, ssoOptions = {}}) {
+export function createConnect({dataDir, apiBase = CONNECT_API, fetchImpl = fetch, now = () => Date.now(), version = '', autoStart = true, autoConnect = autoStart, log = (m) => console.error(m), tunnelOptions = {}, remoteOptions = {}, accounts = null, ssoOptions = {}}) {
 	const base = String(apiBase).replace(/\/+$/, '')
 	if (!/^https:\/\//.test(base)) throw new Error('MODC Connect needs an https address')
 	const dir = join(dataDir, 'connect')
@@ -307,6 +307,8 @@ export function createConnect({dataDir, apiBase = CONNECT_API, fetchImpl = fetch
 			await save()
 			log('[connect] paired with myowndatacenter.com')
 			tunnel.begin(5_000).catch(() => {})
+			// Pairing is the yes to connecting: the connector turns on by itself (see tunnel.autoEnable).
+			if (autoConnect) tunnel.autoEnable().catch(() => {})
 			remote.begin(6_000).catch(() => {})
 			return schedule(0)
 		}

@@ -731,3 +731,30 @@ test('probeAnswer speaks the website’s words', () => {
 	assert.equal(probeAnswer(r(200)), 'exposed')
 	assert.equal(probeAnswer(r(404, {'x-modc-gate': 'sso_only'})), 'exposed')
 })
+
+// Create an account, pair, and it just works: pairing turns the connector on by itself, unless the
+// owner turned it off; the website's state and the probe still decide whether it runs.
+test('pairing turns the connector on by itself; turned off on purpose, it stays off after pairing again', async () => {
+	const t = await setup({connectOpts: {autoConnect: true}})
+	try {
+		for (let i = 0; i < 80 && !t.logs.some((l) => /turned on by itself/.test(l)); i++) await new Promise((r) => setTimeout(r, 25))
+		const s = (await t.connect.status()).tunnel
+		assert.equal(s.enabled, true)
+		assert.ok(t.logs.some((l) => /turned on by itself after pairing/.test(l)))
+		await t.call('connect.tunnel.disable')
+		assert.equal(await t.tunnel.autoEnable(), null, 'off on purpose stays off')
+		assert.equal((await t.connect.status()).tunnel.enabled, false)
+		await t.call('connect.tunnel.enable')
+		assert.equal((await t.connect.status()).tunnel.enabled, true, 'the owner can always turn it back on')
+	} finally {
+		await t.cleanup()
+	}
+})
+test('pairing without autoConnect leaves the connector for the owner to turn on', async () => {
+	const t = await setup()
+	try {
+		assert.equal((await t.connect.status()).tunnel.enabled, false)
+	} finally {
+		await t.cleanup()
+	}
+})

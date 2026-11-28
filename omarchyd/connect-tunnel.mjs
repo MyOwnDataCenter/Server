@@ -694,6 +694,7 @@ export function createTunnel({
 			const bin = await binary(true)
 			if (!bin.compatible) throw new RpcError('PRECONDITION_FAILED', bin.installed ? `This computer’s cloudflared (${bin.version}) is too old. Install the newer one here.` : 'Install cloudflared first')
 			state.enabled = true
+			delete state.ownerOff
 			if (state.block?.code === 'token_failed' || state.block?.code === 'bad_request') state.block = null
 			live.tokenTries = 0
 			await save()
@@ -706,6 +707,9 @@ export function createTunnel({
 		await ready
 		return serial(async () => {
 			state.enabled = false
+			// Turned off on purpose (by the owner, or by remote access's emergency stop): pairing again
+			// doesn't turn it back on by itself.
+			state.ownerOff = true
 			await removeUnit()
 			await wipeToken()
 			state.tokenIssuedAt = null
@@ -743,6 +747,24 @@ export function createTunnel({
 			await save()
 		})
 	}
+	// Pairing is the owner's yes to connecting, so the connector turns on by itself (downloading the
+	// pinned, checksum-verified cloudflared if this computer has none), unless it was turned off on
+	// purpose. Turning on only allows it to run: the website's state and this server's own probe of its
+	// address still decide, on every check, whether it runs.
+	async function autoEnable() {
+		await ready
+		if (!credential() || state.enabled || state.ownerOff) return null
+		try {
+			const bin = await binary(true)
+			if (!bin.compatible) await install()
+			const s = await enable()
+			log('[connect] the connector turned on by itself after pairing')
+			return s
+		} catch (e) {
+			log(`[connect] the connector couldn’t turn on by itself (${String(e?.message ?? e).slice(0, 120)}); turn it on in Settings → MODC Connect`)
+			return null
+		}
+	}
 	// omarchyd started: line things up again (the unit itself already starts at boot when enabled).
 	async function begin(delay = 10_000) {
 		await ready
@@ -759,6 +781,7 @@ export function createTunnel({
 		status: async () => (await ready, status()),
 		enable,
 		disable,
+		autoEnable,
 		check,
 		install,
 		teardown,
