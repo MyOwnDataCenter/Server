@@ -549,7 +549,13 @@ export async function startOmarchyd({port = 2021, host = '127.0.0.1', dataDir, t
 						: [name, p],
 			),
 		),
-		...Object.fromEntries(Object.entries(containers.procedures).map(([name, p]) => [name, {kind: p.kind, run: (input, {auth}) => (ownerOnly(auth, 'manage containers'), p.run(input))}])),
+		...Object.fromEntries(
+			Object.entries(containers.procedures).map(([name, p]) =>
+				name === 'containers.list' || name === 'containers.status'
+					? [name, p]
+					: [name, {kind: p.kind, run: (input, {auth}) => (ownerOnly(auth, 'manage containers'), p.run(input))}],
+			),
+		),
 		...Object.fromEntries(
 			Object.entries(machines.procedures).map(([name, p]) =>
 				name === 'machines.installConnector'
