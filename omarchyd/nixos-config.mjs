@@ -1,11 +1,22 @@
-import {mkdir, readFile, writeFile, rm} from 'node:fs/promises'
+import {mkdir, readFile, rm} from 'node:fs/promises'
 import {join} from 'node:path'
+import {writeAtomic} from './atomic.mjs'
 
 export const NIXOS_CONFIG_MAX = 512 * 1024
 export const NIXOS_GUEST_MOUNT = '/modc/nixos-config'
 
+const CACHE_URL = /^https?:\/\/[A-Za-z0-9._:~%/?#@[\]!$&'()*+,;=-]+$/
+
 export function isNixosOs(os = '') {
 	return /^nixos$/i.test(String(os).trim())
+}
+
+export function validateNixosConfigId(id) {
+	const safe = String(id ?? '').trim()
+	if (!safe || safe.includes('/') || safe.includes('\\') || safe.includes('..')) {
+		throw new Error('That guest id is not valid.')
+	}
+	return safe
 }
 
 export function validateNixosConfig(text) {
@@ -20,6 +31,7 @@ export function validateNixosConfig(text) {
 }
 
 export function configDir(dataDir, id) {
+	validateNixosConfigId(id)
 	return join(String(dataDir), 'nixos-configs', String(id))
 }
 
@@ -35,7 +47,7 @@ export async function writeConfiguration(dataDir, id, config) {
 	if (!checked.config.trim()) throw new Error('Paste a NixOS configuration first.')
 	const dir = await ensureConfigDir(dataDir, id)
 	const body = checked.config.endsWith('\n') ? checked.config : `${checked.config}\n`
-	await writeFile(join(dir, 'configuration.nix'), body)
+	await writeAtomic(join(dir, 'configuration.nix'), body, {mode: 0o644})
 	return {path: join(dir, 'configuration.nix')}
 }
 
@@ -43,8 +55,9 @@ export async function readConfiguration(dataDir, id) {
 	try {
 		const config = await readFile(join(configDir(dataDir, id), 'configuration.nix'), 'utf8')
 		return {config, present: true}
-	} catch {
-		return {config: '', present: false}
+	} catch (e) {
+		if (e?.code === 'ENOENT') return {config: '', present: false}
+		throw e
 	}
 }
 
@@ -56,6 +69,6 @@ export async function writeCacheFragment(dataDir, id, {enabled, substituter}) {
 		await rm(path, {force: true})
 		return
 	}
-	if (!/^https?:\/\/[A-Za-z0-9._:~%/?#@[\]!$&'()*+,;=-]+$/.test(sub)) throw new Error('Use an http(s) URL for the binary cache.')
-	await writeFile(path, `extra-substituters = ${sub}\n`)
+	if (!CACHE_URL.test(sub)) throw new Error('Use an http(s) URL for the binary cache.')
+	await writeAtomic(path, `extra-substituters = ${sub}\n`, {mode: 0o644})
 }

@@ -8,6 +8,13 @@ import {NIXOS_EXAMPLE_LXC, NIXOS_EXAMPLE_VM} from './example'
 
 type NixCache = {enabled: boolean; substituter: string}
 
+const CACHE_URL = /^https?:\/\/[A-Za-z0-9._:~%/?#@[\]!$&'()*+,;=-]+$/
+
+function cacheUrlValid(url: string) {
+	const sub = url.trim()
+	return sub.length > 0 && CACHE_URL.test(sub)
+}
+
 export type NixosConfigPanelProps = {
 	id: string
 	kind: 'vm' | 'lxc'
@@ -45,6 +52,7 @@ export function NixosConfigPanel({id, kind, busy, running, onApply, readConfig, 
 	const [draft, setDraft] = useState('')
 	const [dirty, setDirty] = useState(false)
 	const [cacheUrl, setCacheUrl] = useState('')
+	const [wantsCache, setWantsCache] = useState(false)
 
 	const configQ = useQuery({
 		queryKey: ['nixos.config', id, running],
@@ -61,7 +69,10 @@ export function NixosConfigPanel({id, kind, busy, running, onApply, readConfig, 
 	}, [configQ.data, dirty])
 
 	useEffect(() => {
-		if (cacheQ.data) setCacheUrl(cacheQ.data.substituter)
+		if (cacheQ.data) {
+			setCacheUrl(cacheQ.data.substituter)
+			setWantsCache(cacheQ.data.enabled)
+		}
 	}, [cacheQ.data])
 
 	const setCache = useMutation({
@@ -105,13 +116,25 @@ export function NixosConfigPanel({id, kind, busy, running, onApply, readConfig, 
 		const url = URL.createObjectURL(blob)
 		const a = document.createElement('a')
 		a.href = url
-		a.download = `${id}-configuration.nix`
+		a.download = 'configuration.nix'
 		a.click()
 		URL.revokeObjectURL(url)
 	}
 
-	const cacheEnabled = cacheQ.data?.enabled ?? false
 	const cacheBusy = setCache.isPending
+
+	const onCacheToggle = (enabled: boolean) => {
+		setWantsCache(enabled)
+		if (!enabled) {
+			setCache.mutate({enabled: false, substituter: cacheUrl})
+			return
+		}
+		if (cacheUrlValid(cacheUrl)) setCache.mutate({enabled: true, substituter: cacheUrl.trim()})
+	}
+
+	const onCacheUrlBlur = () => {
+		if (wantsCache && cacheUrlValid(cacheUrl)) setCache.mutate({enabled: true, substituter: cacheUrl.trim()})
+	}
 
 	return (
 		<>
@@ -163,11 +186,11 @@ export function NixosConfigPanel({id, kind, busy, running, onApply, readConfig, 
 			<Group title="Binary cache" footer="Optional HTTP substituter shared by every NixOS guest. When enabled, a fragment is written into each config share.">
 				<Switch
 					label="Use a binary cache"
-					on={cacheEnabled}
+					on={wantsCache}
 					disabled={cacheQ.isLoading || cacheBusy}
-					onChange={(enabled) => setCache.mutate({enabled, substituter: cacheUrl})}
+					onChange={onCacheToggle}
 				/>
-				{cacheEnabled ? (
+				{wantsCache ? (
 					<CacheUrlField
 						id={`nix-cache-url-${id}`}
 						value={cacheUrl}
@@ -177,7 +200,7 @@ export function NixosConfigPanel({id, kind, busy, running, onApply, readConfig, 
 						spellCheck={false}
 						disabled={cacheBusy}
 						onChange={(e) => setCacheUrl(e.target.value)}
-						onBlur={() => setCache.mutate({enabled: true, substituter: cacheUrl})}
+						onBlur={onCacheUrlBlur}
 					/>
 				) : null}
 			</Group>

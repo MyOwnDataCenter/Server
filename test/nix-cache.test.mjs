@@ -4,6 +4,7 @@ import {mkdtemp} from 'node:fs/promises'
 import os from 'node:os'
 import {join} from 'node:path'
 import {readNixCache, writeNixCache} from '../omarchyd/nix-cache.mjs'
+import {RpcError} from '../omarchyd/rpc.mjs'
 
 test('nix cache defaults off and persists', async () => {
 	const dataDir = await mkdtemp(join(os.tmpdir(), 'nix-cache-'))
@@ -17,7 +18,7 @@ test('writeNixCache rejects enabled with empty or invalid substituter URL', asyn
 	const msg = /http\(s\) URL/
 	await assert.rejects(
 		() => writeNixCache(dataDir, {enabled: true, substituter: ''}),
-		err => err instanceof Error && msg.test(err.message),
+		err => err instanceof RpcError && err.code === 'BAD_REQUEST' && msg.test(err.message),
 	)
 	await assert.rejects(
 		() => writeNixCache(dataDir, {enabled: true, substituter: 'ftp://cache.example'}),

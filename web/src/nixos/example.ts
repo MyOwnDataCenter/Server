@@ -24,11 +24,11 @@ export const NIXOS_EXAMPLE_VM = `# Example NixOS configuration for a libvirt VM 
 
 export const NIXOS_EXAMPLE_LXC = `# Example NixOS configuration for an Incus system container (no flakes).
 
-{ config, pkgs, ... }:
+{ config, pkgs, modulesPath, ... }:
 
 {
   imports = [
-    "\${nixpkgs}/nixos/modules/virtualisation/lxc-container.nix"
+    "\${modulesPath}/virtualisation/lxc-container.nix"
   ];
 
   networking.hostName = "nixos-lxc";

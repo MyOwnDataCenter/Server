@@ -6,6 +6,7 @@ import {join} from 'node:path'
 import {
 	isNixosOs,
 	validateNixosConfig,
+	validateNixosConfigId,
 	writeConfiguration,
 	readConfiguration,
 	writeCacheFragment,
@@ -16,6 +17,13 @@ test('isNixosOs', () => {
 	assert.equal(isNixosOs('nixos'), true)
 	assert.equal(isNixosOs('NixOS'), true)
 	assert.equal(isNixosOs('debian'), false)
+})
+
+test('validateNixosConfigId rejects unsafe ids', () => {
+	assert.throws(() => validateNixosConfigId(''), /not valid/)
+	assert.throws(() => validateNixosConfigId('a/b'), /not valid/)
+	assert.throws(() => validateNixosConfigId('..'), /not valid/)
+	assert.equal(validateNixosConfigId('vm1'), 'vm1')
 })
 
 test('validate rejects null bytes and junk', () => {
