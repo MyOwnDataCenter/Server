@@ -571,7 +571,9 @@ export async function startOmarchyd({port = 2021, host = '127.0.0.1', dataDir, t
 		),
 		...Object.fromEntries(
 			Object.entries(machines.procedures).map(([name, p]) =>
-				name === 'machines.installConnector'
+				['machines.localDiskImages', 'machines.inspectDiskImage', 'machines.importDiskImage'].includes(name)
+					? [name, {kind: p.kind, run: (input, ctx) => (ownerOnly(ctx.auth, 'import disk images'), p.run(input, ctx))}]
+					: name === 'machines.installConnector'
 					? [name, {kind: p.kind, run: (input, {auth}) => (ownerOnly(auth, 'install a guest connector'), p.run(input))}]
 					: name === 'machines.downloadIso' || name === 'machines.isoDownloads'
 						? [name, {kind: p.kind, run: (input, {auth}) => (ownerOnly(auth, 'download ISOs to this server'), p.run(input))}]

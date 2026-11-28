@@ -1,7 +1,9 @@
 import {useEffect, useMemo, useRef, useState} from 'react'
 import {useQuery, useQueryClient} from '@tanstack/react-query'
 
-import {AddFile, type Download} from './AddFile'
+import {AddFile, AddFileCard, type Download} from './AddFile'
+import {ImportDiskImage} from './ImportDiskImage'
+import {MachineStepper} from './MachineStepper'
 import {query, type MachineCapabilities, type MemoryUsage, type OsImage} from './api'
 import {useAction, useCpu, useMachines, useMemory, useUser} from './data'
 import {isOwner} from './isOwner'
@@ -44,29 +46,6 @@ const SPECS: Record<string, Spec> = {
 }
 const specFor = (os: OsImage) => SPECS[`${os.familyId}:${os.variantName}`] ?? SPECS[os.familyId] ?? FALLBACK
 
-function Stepper({label, value, unit, min, max, step = 1, next, onChange}: {label: string; value: number; unit: string; min: number; max: number; step?: number; next?: (value: number, direction: -1 | 1) => number; onChange: (v: number) => void}) {
-	const set = (v: number) => {
-		haptic(4)
-		onChange(Math.min(max, Math.max(min, v)))
-	}
-	const go = (direction: -1 | 1) => set(next ? next(value, direction) : value + direction * step)
-	return (
-		<div className="stepper row static">
-			<span className="k">{label}</span>
-			<button className="step-btn" aria-label={`Less ${label}`} onClick={() => go(-1)} disabled={value <= min}>
-				−
-			</button>
-			<span className="step-val num" role="status">
-				<span className="sr-only">{label} </span>
-				{value} <small>{unit}</small>
-			</span>
-			<button className="step-btn" aria-label={`More ${label}`} onClick={() => go(1)} disabled={value >= max}>
-				+
-			</button>
-		</div>
-	)
-}
-
 type HostCaps = MachineCapabilities & {threads?: number; memoryTotalMb?: number}
 
 export function CreateMachine({open, onClose, host}: {open: boolean; onClose: () => void; host?: {id: string; name: string}}) {
@@ -106,8 +85,10 @@ function LocalCreateMachine({open, onClose, host}: {open: boolean; onClose: () =
 		wasDownloading.current = downloadingIsos
 	}, [downloadingIsos, qcIso])
 	const [picked, setPicked] = useState<OsImage | null>(null)
+	const [importing, setImporting] = useState(false)
 	const close = () => {
 		setPicked(null)
+		setImporting(false)
 		onClose()
 	}
 	const hostArch = caps.data?.hostArchitecture ?? 'amd64'
@@ -164,7 +145,7 @@ function LocalCreateMachine({open, onClose, host}: {open: boolean; onClose: () =
 
 	return (
 		<Sheet open={open} onClose={close} label="New machine" tall>
-			{picked ? (
+			{importing ? <ImportDiskImage onBack={() => setImporting(false)} onDone={close} /> : picked ? (
 				<Configure os={picked} hostArch={hostArch} host={host} caps={caps.data} onBack={() => setPicked(null)} onDone={close} />
 			) : (
 				<>
@@ -206,7 +187,7 @@ function LocalCreateMachine({open, onClose, host}: {open: boolean; onClose: () =
 						) : (
 							<>
 								<div className="section-head" style={{marginTop: 18}}>
-									<h2>Your own ISO</h2>
+									<h2>Your own image</h2>
 								</div>
 								{(ownIsos.data ?? []).length > 0 && (
 									<div className="glass group" style={{borderRadius: 18, '--inset': '74px'} as React.CSSProperties}>
@@ -214,19 +195,28 @@ function LocalCreateMachine({open, onClose, host}: {open: boolean; onClose: () =
 									</div>
 								)}
 								{isOwnerHere && (
-									<AddFile
-										what="an ISO"
-										accept=".iso"
-										linkProcedure="machines.downloadIso"
-										linkPlaceholder="https://…/installer.iso"
-										downloads={isoDownloads.data ?? []}
-										onAdded={() => (qcIso.invalidateQueries({queryKey: ['machines.isoDownloads']}), qcIso.invalidateQueries({queryKey: ['machines.localIsos']}))}
-									/>
+									<div style={{display: 'grid', gap: 12}}>
+										<AddFile
+											what="an ISO"
+											accept=".iso"
+											linkProcedure="machines.downloadIso"
+											linkPlaceholder="https://…/installer.iso"
+											downloads={isoDownloads.data ?? []}
+											onAdded={() => (qcIso.invalidateQueries({queryKey: ['machines.isoDownloads']}), qcIso.invalidateQueries({queryKey: ['machines.localIsos']}))}
+										>
+											<p className="footer-note" style={{textAlign: 'left'}}>
+												{(ownIsos.data ?? []).length ? 'ISOs found in your Home folder. ' : 'Put an .iso file anywhere in Files (Downloads is fine) and it shows up here. '}
+												Windows 10 and 11 install by themselves with your account: get the ISO from microsoft.com/software-download. Other ISOs boot their installer on the Desktop for you to finish.
+											</p>
+										</AddFile>
+										<AddFileCard title="Import disk image">
+											<button type="button" className="btn small" style={{justifySelf: 'start'}} onClick={() => (haptic(6), setImporting(true))}>
+												<Icon name="disk" size={14} /> Choose an image
+											</button>
+											<span className="quiet" style={{fontSize: 13}}>Create a machine from a RAW or QCOW2 disk. The original file stays unchanged.</span>
+										</AddFileCard>
+									</div>
 								)}
-								<p className="footer-note" style={{textAlign: 'left'}}>
-									{(ownIsos.data ?? []).length ? 'ISOs found in your Home folder. ' : 'Put an .iso file anywhere in Files (Downloads is fine) and it shows up here. '}
-									Windows 10 and 11 install by themselves with your account: get the ISO from microsoft.com/software-download. Other ISOs boot their installer on the Desktop for you to finish.
-								</p>
 							</>
 						)}
 					</div>
@@ -344,9 +334,9 @@ function ConfigureForm({os, hostArch, host, onBack, onDone, threads, memory, max
 					error={nameTaken ? 'You already have a machine with this name.' : undefined}
 				/>
 				<div className="glass group" style={{borderRadius: 18, marginBottom: 16, '--inset': '16px'} as React.CSSProperties}>
-					<Stepper label="CPU cores" value={cores} unit={cores === 1 ? 'core' : 'cores'} min={Math.min(profile.minCores, threads)} max={threads} onChange={setCores} />
-					<Stepper label="Memory" value={memoryGb} unit="GB" min={Math.min(profile.minMemoryGb, maxMemoryGb)} max={Math.max(maxMemoryGb, 1)} onChange={setMemoryGb} />
-					<Stepper label="Disk" value={diskSizeGb} unit="GB" min={disk.min} max={disk.max} next={(v, d) => nextDiskGb(v, d, disk)} onChange={setDisk} />
+					<MachineStepper label="CPU cores" value={cores} unit={cores === 1 ? 'core' : 'cores'} min={Math.min(profile.minCores, threads)} max={threads} onChange={setCores} />
+					<MachineStepper label="Memory" value={memoryGb} unit="GB" min={Math.min(profile.minMemoryGb, maxMemoryGb)} max={Math.max(maxMemoryGb, 1)} onChange={setMemoryGb} />
+					<MachineStepper label="Disk" value={diskSizeGb} unit="GB" min={disk.min} max={disk.max} next={(v, d) => nextDiskGb(v, d, disk)} onChange={setDisk} />
 				</div>
 				{os.requiresCredentials && (
 					<>
