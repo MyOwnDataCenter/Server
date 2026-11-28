@@ -128,7 +128,7 @@ export const WRITE_TOOLS = [
 		sshKey: {type: 'string'},
 	}, true, ['name', 'image']),
 	mutation('containers_delete', 'containers.delete', 'Delete a system container (LXC)', {name: {type: 'string', description: 'Container name'}}, true, ['name']),
-	mutation('containers_installConnector', 'containers.installConnector', 'Install the connector inside a system container so Files, Terminal, and Apps can use it', {
+	mutation('containers_installConnector', 'containers.installConnector', 'Install the connector inside a system container so Files and Terminal can use it', {
 		name: {type: 'string', description: 'Container name'},
 		username: {type: 'string', description: 'Lower-case Linux account inside the container'},
 	}, true, ['name', 'username']),
