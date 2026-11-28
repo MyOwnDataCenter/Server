@@ -5,13 +5,14 @@ import {batteryColor, batteryGaugeItem, combineBatteries} from '../battery'
 import {queryProblem, useBrowserOnline} from '../connection'
 import {useApps, useBattery, useBootstrap, useCpu, useDisk, useGpus, useMachines, useMemory, useTemp, useUptime, useUser} from '../data'
 import {computerSample, fleetRings, samplePercent, serverSample, type FleetRings, type GaugeKind} from '../fleet/aggregate'
-import {computerFleetInput, fleetList, guestFleetInput, type FleetMember} from '../fleet/list'
+import {containerState, useContainers, useContainerStatus} from '../containers/Containers'
+import {computerFleetInput, containerFleetInput, fleetList, guestFleetInput, type FleetMember} from '../fleet/list'
 import {openFleetMember} from '../fleet/openMember'
 import {usePins} from '../fleet/PinButton'
 import {pinKey, type DashboardPin} from '../fleet/pins'
 import {gpuGaugeItems} from '../gauges'
 import {Icon, type IconName} from '../icons'
-import {guestAgent, isGuestAgent} from '../swarm/guestLink'
+import {containerAgent, guestAgent, isContainerAgent, isGuestAgent} from '../swarm/guestLink'
 import {useSwarm} from '../swarm/Swarm'
 import {useStatView} from '../fleet/StatRegion'
 import {formatTemp} from '../fleet/temperatures'
@@ -70,6 +71,7 @@ export function Gauges({onOpen, fleet}: {onOpen?: (gauge: {title: string; kind: 
 
 function machineIcon(member: FleetMember): IconName {
 	if (member.kind === 'guest') return 'machine'
+	if (member.kind === 'container') return 'category'
 	if (member.kind === 'server') return 'server'
 	return 'devices'
 }
@@ -92,7 +94,10 @@ export function Home({onOpenApp}: {onOpenApp: (app: UserApp) => void; go: (tab: 
 	const uptime = useUptime()
 	const {pins} = usePins()
 	const [gauge, setGauge] = useState<{title: string; kind: GaugeKind; gpuId?: string} | null>(null)
-	const swarmList = (swarm.data ?? []).filter((a) => !isGuestAgent(a))
+	const swarmList = (swarm.data ?? []).filter((a) => !isGuestAgent(a) && !isContainerAgent(a))
+	const containerStatus = useContainerStatus(true)
+	const containersQ = useContainers(containerStatus.data?.available === true)
+	const containerRows = containersQ.data ?? []
 	const list = apps.data ?? []
 	const running = list.filter((a) => appStatus(a.state).kind === 'running').length
 	const problems = list.filter((a) => a.error || a.state === 'unknown')
@@ -111,7 +116,8 @@ export function Home({onOpenApp}: {onOpenApp: (app: UserApp) => void; go: (tab: 
 				gpus: (gpus.data?.gpus ?? []).map((g) => ({id: g.id, used: g.used})),
 				battery: combineBatteries(battery.data?.batteries ?? [])?.percent ?? null,
 			}),
-			...(swarm.data ?? []).filter((a) => !isGuestAgent(a)).map(computerSample),
+			// Guests and system containers already show up inside this server's readings.
+			...(swarm.data ?? []).filter((a) => !isGuestAgent(a) && !isContainerAgent(a)).map(computerSample),
 		],
 		[serverName, cpu.data, mem.data, disk.data, temp.data, gpus.data, battery.data, swarm.data],
 	)
@@ -121,10 +127,20 @@ export function Home({onOpenApp}: {onOpenApp: (app: UserApp) => void; go: (tab: 
 		() =>
 			fleetList({
 				server: {name: serverName},
-				computers: (swarm.data ?? []).filter((a) => !isGuestAgent(a)).map((a) => computerFleetInput({id: a.id, name: a.name, online: a.online, allowed: a.allowed, on: a.on, libvirt: a.libvirt === true})),
+				computers: (swarm.data ?? [])
+					.filter((a) => !isGuestAgent(a) && !isContainerAgent(a))
+					.map((a) => computerFleetInput({id: a.id, name: a.name, online: a.online, allowed: a.allowed, on: a.on, libvirt: a.libvirt === true})),
 				guests: (machines.data ?? []).map((m) => guestFleetInput({id: m.id, name: m.name, state: m.state, hostId: m.hostId, connector: !!guestAgent(swarm.data ?? [], m.id)})),
+				containers: containerRows.map((c) =>
+					containerFleetInput({
+						id: c.name,
+						name: c.name,
+						state: containerState(c),
+						connector: !!containerAgent(swarm.data ?? [], c.name),
+					}),
+				),
 			}),
-		[serverName, swarm.data, machines.data],
+		[serverName, swarm.data, machines.data, containerRows],
 	)
 	const machinePins = pins.filter((p) => p.kind === 'machine' || p.kind === 'vm')
 	const appPins = pins.filter((p) => p.kind === 'app')

@@ -10,6 +10,7 @@ import {isOwner} from '../isOwner'
 import {Icon} from '../icons'
 import {openTerminalWith} from '../terminalEvent'
 import {AddFile, type Download} from '../AddFile'
+import {SERVER_FLEET_ID} from '../fleet/list'
 import {MachineActions} from '../fleet/machineActions'
 import {MachineTabs} from '../fleet/MachineTabs'
 import {openStore} from '../fleet/openStore'
@@ -868,7 +869,7 @@ export function ContainerDetail({c, all, onBack, onOpen}: {c: Container; all: Co
 							desktop={false}
 							onTerminal={() => setAgentTerm(true)}
 							onDesktop={() => {}}
-							pin={<PinButton pin={{kind: 'machine', id: agent.id, computer: ''}} name={c.name} />}
+							pin={<PinButton pin={{kind: 'machine', id: c.name, computer: SERVER_FLEET_ID}} name={c.name} />}
 						/>
 					)}
 
