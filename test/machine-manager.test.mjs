@@ -35,7 +35,7 @@ test('Machines uses the manager list on phone and desktop, and Manage opens the 
 	assert.doesNotMatch(machines, /usePreRelease/)
 	assert.doesNotMatch(machines, /phoneManager/)
 	assert.match(machines, /<MachineManager/)
-	assert.match(machines, /wide && \(selected \|\| computerId \|\| serverOpen\)/)
+	assert.match(machines, /wide && \(selected \|\| computerId \|\| selectedContainer \|\| serverOpen\)/)
 	assert.match(machines, /machines-split is-resizable/)
 	assert.match(machines, /className="machines-list"/)
 	assert.match(machines, /className="machines-detail"/)
@@ -209,6 +209,18 @@ test('Virtual filter includes containers and guests', () => {
 	assert.deepEqual(reachLabel('container', true, 'running'), {kind: 'running', label: 'Online'})
 	assert.deepEqual(reachLabel('container', false, 'stopped'), {kind: 'stopped', label: 'Offline'})
 	assert.deepEqual(reachLabel('container', false, 'frozen'), {kind: 'stopped', label: 'Paused'})
+})
+
+test('Machines list has no LXC containers appendix and wires containers into the fleet', async () => {
+	const ui = await read('../web/src/fleet/MachineManager.tsx')
+	assert.doesNotMatch(ui, /ContainersInList/)
+	assert.doesNotMatch(ui, /LXC containers/)
+	assert.match(ui, /member\.kind === 'container'/)
+	const machines = await read('../web/src/screens/Machines.tsx')
+	assert.match(machines, /containerFleetInput/)
+	assert.match(machines, /containers:/)
+	assert.match(machines, /isContainerAgent/)
+	assert.match(machines, /containerAgent/)
 })
 
 test('unhealthy and offline sit beside the type filters', () => {

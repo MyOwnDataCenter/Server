@@ -1,6 +1,6 @@
 export const OPEN_FLEET = 'omarchy-open-fleet'
 
-export type FleetOpen = {kind: 'server' | 'computer' | 'guest'; id: string}
+export type FleetOpen = {kind: 'server' | 'computer' | 'guest' | 'container'; id: string}
 
 let pending: FleetOpen | null = null
 

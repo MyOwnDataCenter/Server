@@ -14,7 +14,7 @@ import {DevicesPanel} from '../usb'
 import {Icon} from '../icons'
 import {osLook} from '../osLook'
 import {hostedVms} from '../fleet/hostedVms'
-import {computerFleetInput, fleetList, guestFleetInput, SERVER_FLEET_ID} from '../fleet/list'
+import {computerFleetInput, containerFleetInput, fleetList, guestFleetInput, SERVER_FLEET_ID} from '../fleet/list'
 import type {ManagerFilter} from '../fleet/machineManagerLogic'
 import {OPEN_FLEET, takePendingFleet, type FleetOpen} from '../fleet/openMember'
 import {openStore} from '../fleet/openStore'
@@ -22,7 +22,8 @@ import {GuestLive} from '../fleet/GuestLive'
 import {MachineShell, MachineTabs, type MachineTab} from '../fleet/MachineTabs'
 import {PinButton} from '../fleet/PinButton'
 import {ServerSheet} from '../fleet/ServerSheet'
-import {guestAgent, isGuestAgent} from '../swarm/guestLink'
+import {containerState, ContainerDetail, ContainerSheet, useContainers, useContainerStatus} from '../containers/Containers'
+import {containerAgent, guestAgent, isContainerAgent, isGuestAgent} from '../swarm/guestLink'
 import {LocalSwarm, useSwarm} from '../swarm/Swarm'
 import {StoragePanel} from './Storage'
 import {applyPrefsUpdate} from '../photoPrefs'
@@ -183,6 +184,7 @@ export function Machines({onOpenApp, onTerminal, windowId, prefs, setPrefs}: {on
 	const owner = isOwner(useUser().data)
 	const [selectedId, setSelectedId] = useState<string | null>(null)
 	const [computerId, setComputerId] = useState<string | null>(null)
+	const [containerId, setContainerId] = useState<string | null>(null)
 	const [serverOpen, setServerOpen] = useState(false)
 	const [consoleId, setConsoleId] = useState<string | null>(null)
 	const [createHost, setCreateHost] = useState<{id: string; name: string} | null>(null)
@@ -192,18 +194,32 @@ export function Machines({onOpenApp, onTerminal, windowId, prefs, setPrefs}: {on
 	const [queryText, setQueryText] = useState('')
 	const [filter, setFilter] = useState<ManagerFilter>('all')
 	const list = machines.data ?? []
+	const containerStatus = useContainerStatus(true)
+	const containersQ = useContainers(containerStatus.data?.available === true)
+	const containerRows = containersQ.data ?? []
 	const serverName = boot.server?.device || 'This server'
 	const agents = swarm.data ?? []
 	const members = useMemo(
 		() =>
 			fleetList({
 				server: {name: serverName},
-				computers: agents.filter((a) => !isGuestAgent(a)).map((a) => computerFleetInput({id: a.id, name: a.name, online: a.online, allowed: a.allowed, on: a.on, libvirt: a.libvirt === true})),
+				computers: agents
+					.filter((a) => !isGuestAgent(a) && !isContainerAgent(a))
+					.map((a) => computerFleetInput({id: a.id, name: a.name, online: a.online, allowed: a.allowed, on: a.on, libvirt: a.libvirt === true})),
 				guests: list.map((m) => guestFleetInput({id: m.id, name: m.name, state: m.state, hostId: m.hostId, connector: !!guestAgent(agents, m.id)})),
+				containers: containerRows.map((c) =>
+					containerFleetInput({
+						id: c.name,
+						name: c.name,
+						state: containerState(c),
+						connector: !!containerAgent(agents, c.name),
+					}),
+				),
 			}),
-		[serverName, agents, list],
+		[serverName, agents, list, containerRows],
 	)
 	const selected = list.find((m) => m.id === selectedId) ?? null
+	const selectedContainer = containerRows.find((c) => c.name === containerId) ?? null
 	const consoleAgent = consoleId?.startsWith('agent-') ? agents.find((a) => `agent-${a.id}` === consoleId) : undefined
 	const consoleMachine =
 		consoleId === 'desktop' ? SERVER_DESKTOP : consoleAgent ? {id: `agent-${consoleAgent.id}`, name: consoleAgent.name, state: 'running' as const} : (list.find((m) => m.id === consoleId) ?? null)
@@ -213,6 +229,7 @@ export function Machines({onOpenApp, onTerminal, windowId, prefs, setPrefs}: {on
 			if (!member) return
 			setSelectedId(member.kind === 'guest' ? member.id : null)
 			setComputerId(member.kind === 'computer' ? member.id : null)
+			setContainerId(member.kind === 'container' ? member.id : null)
 			setServerOpen(member.kind === 'server')
 		}
 		apply(takePendingFleet())
@@ -223,9 +240,10 @@ export function Machines({onOpenApp, onTerminal, windowId, prefs, setPrefs}: {on
 		window.addEventListener(OPEN_FLEET, onOpen)
 		return () => window.removeEventListener(OPEN_FLEET, onOpen)
 	}, [])
-	const openMember = (kind: 'server' | 'computer' | 'guest', id: string) => {
+	const openMember = (kind: 'server' | 'computer' | 'guest' | 'container', id: string) => {
 		setSelectedId(kind === 'guest' ? id : null)
 		setComputerId(kind === 'computer' ? id : null)
+		setContainerId(kind === 'container' ? id : null)
 		setServerOpen(kind === 'server')
 	}
 	const onListWidth = (n: number, persist: boolean) => {
@@ -272,7 +290,15 @@ export function Machines({onOpenApp, onTerminal, windowId, prefs, setPrefs}: {on
 		applyPrefsUpdate(setPrefs, (current) => (current.machinesCompact != null ? current : {...current, machinesCompact: true}))
 	}, [prefs?.machinesCompact, setPrefs])
 	const showCompact = wide && compact
-	const selectedKey = serverOpen ? `server:${SERVER_FLEET_ID}` : computerId ? `computer:${computerId}` : selected ? `guest:${selected.id}` : null
+	const selectedKey = serverOpen
+		? `server:${SERVER_FLEET_ID}`
+		: computerId
+			? `computer:${computerId}`
+			: selectedContainer
+				? `container:${selectedContainer.name}`
+				: selected
+					? `guest:${selected.id}`
+					: null
 	const setCompactMode = (on: boolean) => {
 		if (!setPrefs) return
 		transitionMachines(() => {
@@ -292,6 +318,9 @@ export function Machines({onOpenApp, onTerminal, windowId, prefs, setPrefs}: {on
 						else setConsoleId(selected.id)
 					}}
 				/>
+			)}
+			{selectedContainer && (
+				<ContainerSheet c={selectedContainer} all={containerRows} onClose={() => setContainerId(null)} onOpen={(name) => setContainerId(name)} />
 			)}
 			<LocalSwarm
 				bare={wide}
@@ -332,6 +361,7 @@ export function Machines({onOpenApp, onTerminal, windowId, prefs, setPrefs}: {on
 			swarmProblem={swarmProblem}
 			members={members}
 			machines={list}
+			containers={containerRows}
 			agents={agents}
 			lines={lines}
 			selectedKey={selectedKey}
@@ -408,6 +438,14 @@ export function Machines({onOpenApp, onTerminal, windowId, prefs, setPrefs}: {on
 											else openMember('computer', hostId)
 										}}
 									/>
+								) : selectedContainer ? (
+									<ContainerDetail
+										key={selectedContainer.name}
+										c={selectedContainer}
+										all={containerRows}
+										onBack={() => openMember('server', SERVER_FLEET_ID)}
+										onOpen={(name) => setContainerId(name)}
+									/>
 								) : (
 									<ServerSheet
 										layout="nav"
@@ -429,7 +467,7 @@ export function Machines({onOpenApp, onTerminal, windowId, prefs, setPrefs}: {on
 							</>
 						}
 					/>
-				) : wide && (selected || computerId || serverOpen) ? (
+				) : wide && (selected || computerId || selectedContainer || serverOpen) ? (
 					<MachinesSplit preferred={listPreferred} onPreferred={onListWidth} list={manager(false)} detail={detail} />
 				) : (
 					<>

@@ -54,6 +54,8 @@ export type Agent = {
 	on: Abilities
 	/** Set when this connector was installed on a virtual machine. Empty for a physical computer. */
 	guestOf?: string
+	/** Set when this connector was installed inside a system container (LXC name). */
+	containerOf?: string
 	updateAvailable?: boolean
 	helperUpdateAvailable?: boolean
 	info: {

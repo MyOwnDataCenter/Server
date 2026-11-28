@@ -69,16 +69,25 @@ const osLabel = (c: {os: string; release: string}) => [OS_NAME[c.os] ?? (c.os ? 
 const bytes = (n: number) => (n >= 1024 ** 3 ? `${(n / 1024 ** 3).toFixed(1)} GB` : n >= 1024 ** 2 ? `${Math.round(n / 1024 ** 2)} MB` : `${Math.max(1, Math.round(n / 1024))} KB`)
 const plain = (e: Error) => e.message.replace(/^[A-Z_]+: /, '')
 
-/** What the list shows for a container's state (Running/Stopped — not machine Online/Offline). */
+/** Machine reach for a system container: Online / Offline / Paused, same words as other machines. */
 export function containerPill(c: Pick<Container, 'status' | 'job'>): {kind: 'running' | 'stopped' | 'busy' | 'error'; label: string} {
 	if (c.job) return {kind: 'busy', label: c.job}
 	const s = c.status
-	if (s === 'running') return {kind: 'running', label: 'Running'}
-	if (s === 'stopped') return {kind: 'stopped', label: 'Stopped'}
+	if (s === 'running') return {kind: 'running', label: 'Online'}
+	if (s === 'stopped') return {kind: 'stopped', label: 'Offline'}
 	if (['creating', 'cloning', 'restoring', 'starting', 'stopping'].includes(s)) return {kind: 'busy', label: s.charAt(0).toUpperCase() + s.slice(1)}
 	if (s === 'frozen') return {kind: 'stopped', label: 'Paused'}
 	return {kind: 'error', label: s === 'error' ? 'Failed' : s}
 }
+
+export function containerState(c: Pick<Container, 'status'>): string {
+	if (c.status === 'frozen') return 'frozen'
+	if (c.status === 'running') return 'running'
+	if (['creating', 'cloning', 'restoring', 'starting', 'stopping', 'error'].includes(c.status)) return c.status
+	return 'stopped'
+}
+
+export {osColor}
 
 export function useContainerStatus(enabled = true) {
 	return useQuery({
@@ -101,7 +110,7 @@ export function useContainers(enabled: boolean) {
 	})
 }
 
-function useContainerAction() {
+export function useContainerAction() {
 	const qc = useQueryClient()
 	const toast = useToast()
 	return useMutation({
@@ -149,13 +158,13 @@ export function ContainersPanel({serverName}: {serverName: string}) {
 			{list.isLoading ? (
 				<div className="skeleton" style={{height: 80, borderRadius: 16}} />
 			) : rows.length === 0 ? (
-				<p className="quiet">No LXC containers on {serverName}. An LXC container is a lightweight Linux system that shares this server’s kernel: it starts in seconds and uses far less memory than a virtual machine.</p>
+				<p className="quiet">No containers on {serverName}. A container is a lightweight Linux system that shares this server’s kernel: it starts in seconds and uses far less memory than a virtual machine.</p>
 			) : (
 				rows.map((c) => <ContainerRow key={c.name} c={c} onOpen={() => setOpen(c.name)} />)
 			)}
-			{open && current && <LxcPage c={current} all={rows} onClose={() => setOpen(null)} onOpen={setOpen} />}
+			{open && current && <ContainerSheet c={current} all={rows} onClose={() => setOpen(null)} onOpen={setOpen} />}
 			<button type="button" className="btn small" style={{margin: '8px 12px 12px'}} onClick={() => (haptic(6), setCreating(true))}>
-				<Icon name="plus" size={15} /> New LXC container
+				<Icon name="plus" size={15} /> New container
 			</button>
 		</>
 	)
@@ -190,90 +199,12 @@ export function NewContainerSheet({onClose}: {onClose: () => void}) {
 	)
 }
 
-/** Containers as their own entries in the Machines list; each opens in a sheet. */
-/** An LXC container's page: like a virtual machine's (header, its screen, then its sections). */
-function LxcPage({c, all, onClose, onOpen}: {c: Container; all: Container[]; onClose: () => void; onOpen: (name: string) => void}) {
+/** An LXC container's page in a sheet: like a virtual machine's (header, its screen, then its sections). */
+export function ContainerSheet({c, all, onClose, onOpen}: {c: Container; all: Container[]; onClose: () => void; onOpen: (name: string) => void}) {
 	return (
 		<Sheet open onClose={onClose} label={c.name} tall>
 			<ContainerDetail c={c} all={all} onBack={onClose} onOpen={onOpen} />
 		</Sheet>
-	)
-}
-
-type RowFrameProps = {
-	open: boolean
-	name: string
-	icon: 'category'
-	iconBg: string
-	reach: {kind: 'running' | 'stopped' | 'busy' | 'error' | 'update'; label: string}
-	health: {kind: 'running' | 'stopped' | 'busy' | 'error' | 'update'; label: string}
-	onToggle: () => void
-	children: ReactNode
-}
-
-/** One LXC container in the Machines list, like a virtual machine's row: open it for a summary,
- * power, and Manage, which opens its page with its console. */
-function LxcRow({c, open, onToggle, onManage, Frame}: {c: Container; open: boolean; onToggle: () => void; onManage: () => void; Frame: (p: RowFrameProps) => ReactNode}) {
-	const action = useContainerAction()
-	const pill = containerPill(c)
-	const busy = action.isPending || pill.kind === 'busy'
-	const run = (path: string, done: string) => action.mutate({path, input: {name: c.name}, done})
-	return (
-		<Frame open={open} name={c.name} icon="category" iconBg={osColor(c.os)} reach={pill} health={{kind: 'stopped', label: 'LXC'}} onToggle={onToggle}>
-			<div className="mm-panel">
-				<p className="quiet" style={{margin: 0, overflowWrap: 'anywhere'}}>
-					{c.progress || [osLabel(c) || (c.from ? `from ${c.from}` : ''), c.addresses.find((a) => a.family === 'IPv4')?.address, c.memoryUsedGiB !== null ? `${c.memoryUsedGiB} GB memory in use` : null].filter(Boolean).join(' · ') || 'LXC container'}
-				</p>
-				{!c.pending && (
-					<div style={{display: 'flex', gap: 8, flexWrap: 'wrap'}}>
-						{c.status !== 'running' ? (
-							<button type="button" className="btn small" disabled={busy} onClick={() => run('containers.start', `${c.name} is starting`)}>
-								<Icon name="play" size={14} /> Start
-							</button>
-						) : (
-							<>
-								<button type="button" className="btn small" disabled={busy} onClick={() => run('containers.restart', `${c.name} is restarting`)}>
-									<Icon name="restart" size={14} /> Restart
-								</button>
-								<button type="button" className="btn small" disabled={busy} onClick={() => run('containers.stop', `${c.name} is shut down`)}>
-									<Icon name="power" size={14} /> Shut down
-								</button>
-							</>
-						)}
-					</div>
-				)}
-				<div className="mm-foot">
-					<span />
-					<button type="button" className="btn small" onClick={() => (haptic(6), onManage())}>
-						Manage
-					</button>
-				</div>
-			</div>
-		</Frame>
-	)
-}
-
-/** LXC containers in the Machines list, in the same spot as before. Each row is like a virtual
- * machine's; Manage opens its page. */
-export function ContainersInList({owner, filterText, Frame}: {owner: boolean; filterText?: string; Frame: (p: RowFrameProps) => ReactNode}) {
-	const status = useContainerStatus(owner)
-	const list = useContainers(owner && status.data?.available === true)
-	const [open, setOpen] = useState<string | null>(null)
-	const [expanded, setExpanded] = useState<string | null>(null)
-	const q = (filterText ?? '').trim().toLowerCase()
-	const rows = (list.data ?? []).filter((c) => !q || c.name.includes(q) || c.tags.some((t) => t.includes(q)) || c.os.includes(q) || 'lxc'.includes(q))
-	if (!owner || !rows.length) return null
-	const current = open ? (list.data ?? []).find((c) => c.name === open) : null
-	return (
-		<>
-			<div className="section-head" style={{marginTop: 18}}>
-				<h2>LXC containers</h2>
-			</div>
-			{rows.map((c) => (
-				<LxcRow key={c.name} c={c} Frame={Frame} open={expanded === c.name} onToggle={() => setExpanded(expanded === c.name ? null : c.name)} onManage={() => setOpen(c.name)} />
-			))}
-			{current && <LxcPage c={current} all={list.data ?? []} onClose={() => setOpen(null)} onOpen={setOpen} />}
-		</>
 	)
 }
 
@@ -820,7 +751,7 @@ export function ContainerDetail({c, all, onBack, onOpen}: {c: Container; all: Co
 				subtitle={
 					<span style={{display: 'inline-flex', gap: 8, alignItems: 'center', flexWrap: 'wrap'}}>
 						<StatusPill {...pill} />
-						<span className="muted">LXC · {osLabel(c) || (c.from ? `from ${c.from}` : 'Linux')}</span>
+						<span className="muted">Container · {osLabel(c) || (c.from ? `from ${c.from}` : 'Linux')}</span>
 						{c.protected && <Icon name="shield" size={14} />}
 					</span>
 				}

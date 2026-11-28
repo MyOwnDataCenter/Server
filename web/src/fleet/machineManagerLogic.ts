@@ -158,8 +158,8 @@ export function worstAlert(severities: readonly ('info' | 'warning' | 'critical'
 }
 
 export function managerHealth(input: {kind: ManagerKind; online: boolean; connectorOnline: boolean; alert: 'warning' | 'critical' | null; gauges: readonly GaugeSnap[]}): ManagerHealth {
-	// A guest with no live connector has no health reading, even while its power is on.
-	if (input.kind === 'guest' && !input.connectorOnline) return 'unknown'
+	// A guest or container with no live connector has no health reading, even while its power is on.
+	if ((input.kind === 'guest' || input.kind === 'container') && !input.connectorOnline) return 'unknown'
 	if (!input.online) return 'unknown'
 	if (input.alert === 'critical') return 'danger'
 	if (input.alert === 'warning') return 'warning'

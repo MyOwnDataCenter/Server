@@ -17,9 +17,21 @@ export function isGuestAgent(agent: {guestOf?: string}): boolean {
 	return typeof agent.guestOf === 'string' && /^[a-f0-9]{8}$/.test(agent.guestOf)
 }
 
+const CONTAINER_OF = /^[a-z]([a-z0-9-]{0,61}[a-z0-9])?$/
+
+export function isContainerAgent(agent: {containerOf?: string}): boolean {
+	return typeof agent.containerOf === 'string' && CONTAINER_OF.test(agent.containerOf)
+}
+
 /** The connector installed on this virtual machine. An online one wins over an older install. */
 export function guestAgent<T extends {guestOf?: string; online: boolean; enrolledAt: number}>(agents: readonly T[], machineId: string): T | undefined {
 	const linked = agents.filter((agent) => agent.guestOf === machineId && isGuestAgent(agent))
+	return linked.find((agent) => agent.online) ?? [...linked].sort((a, b) => b.enrolledAt - a.enrolledAt)[0]
+}
+
+/** The connector installed inside this system container. */
+export function containerAgent<T extends {containerOf?: string; online: boolean; enrolledAt: number}>(agents: readonly T[], name: string): T | undefined {
+	const linked = agents.filter((agent) => agent.containerOf === name && isContainerAgent(agent))
 	return linked.find((agent) => agent.online) ?? [...linked].sort((a, b) => b.enrolledAt - a.enrolledAt)[0]
 }
 
