@@ -31,6 +31,8 @@ import {RpcError} from './rpc.mjs'
 import {hostdevXml, parseUsbLive} from './usb.mjs'
 import {stoppedMessage} from './exec-error.mjs'
 import {checkLink, fileNameFor, listDownloads, startDownload} from './download.mjs'
+import {readNixCache} from './nix-cache.mjs'
+import {validateNixosConfig, writeCacheFragment, writeConfiguration} from './nixos-config.mjs'
 
 export const CATALOG_URL = 'https://raw.githubusercontent.com/MyOwnDataCenter/app-store/main/machines/catalog.json'
 const BUNDLED_CATALOG = fileURLToPath(new URL('./machine-catalog.json', import.meta.url))
@@ -762,6 +764,20 @@ export function createMachines({dataDir, catalogUrl = CATALOG_URL, fetchImpl = f
 		for (const d of layout.disks) if (d.file) d.file = basename(d.file)
 		return layout
 	}
+	async function recordNixosOnCreate(input, img, id) {
+		const nixos = img?.nixos === true || img?.familyId === 'nixos'
+		if (input.nixosConfig && !nixos) throw new RpcError('BAD_REQUEST', 'NixOS configuration is only for NixOS images.')
+		if (nixos && input.nixosConfig) {
+			const checked = validateNixosConfig(input.nixosConfig)
+			if (!checked.ok) throw new RpcError('BAD_REQUEST', checked.error)
+			if (checked.config.trim()) {
+				await writeConfiguration(dataDir, id, checked.config)
+				const cache = await readNixCache(dataDir)
+				await writeCacheFragment(dataDir, id, cache)
+			}
+		}
+		return nixos
+	}
 	async function hostCall(hostId, guestId, name, args) {
 		const timeout = name === 'vm-fetch' || name === 'vm-disk-create' ? 30 * 60_000 : name === 'vm-status' ? 30_000 : 120_000
 		const apply = () => {
@@ -838,6 +854,7 @@ export function createMachines({dataDir, catalogUrl = CATALOG_URL, fetchImpl = f
 			let id
 			do id = randomBytes(4).toString('hex')
 			while (machines.some((m) => m.id === id))
+			const nixos = await recordNixosOnCreate(input, img, id)
 			const layout = layoutBasenames(kind === 'cloud' ? 'cloud' : kind === 'windows' ? 'windows' : 'iso', img)
 			if (kind === 'omarchy' || kind === 'windows' || kind === 'manual') {
 				layout.disks.splice(1, 0, {id: 'cd0', file: `image:${img.id}`, device: 'cdrom', bus: 'sata', format: 'raw'})
@@ -860,6 +877,7 @@ export function createMachines({dataDir, catalogUrl = CATALOG_URL, fetchImpl = f
 				layout,
 				...(kind === 'omarchy' || kind === 'windows' || kind === 'manual' ? {boot: ['disk0', 'cd0']} : {}),
 			})
+			if (nixos) m.nixos = true
 			if (kind === 'cloud' || kind === 'omarchy') m.cloudInit = {username, hostname: hostnameFor(name, id), sshKeys: []}
 			machines.push(m)
 			try {
@@ -1001,8 +1019,10 @@ export function createMachines({dataDir, catalogUrl = CATALOG_URL, fetchImpl = f
 			let id
 			do id = randomBytes(4).toString('hex')
 			while (machines.some((m) => m.id === id))
+			const nixos = await recordNixosOnCreate(input, img, id)
 			const dir = join(vmsDir, id)
 			const m = normalize({id, name, osId, cores, memoryGb, memoryMb: memoryGb * 1024, diskSizeGb, portForwards: [], createdAt: Date.now(), state: 'installing', options: {agent: true}, layout: layoutFor(kind === 'cloud' ? 'cloud' : kind === 'windows' || local?.platform === 'windows' ? 'windows' : 'iso', dir, img)})
+			if (nixos) m.nixos = true
 			if (kind === 'cloud' || kind === 'omarchy') m.cloudInit = {username, hostname: hostnameFor(name, id), sshKeys: []}
 			machines.push(m)
 			try {

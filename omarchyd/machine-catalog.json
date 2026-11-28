@@ -287,6 +287,19 @@
       "sizeMb": 420,
       "adminGroup": "sudo",
       "firmware": "efi"
+    },
+    {
+      "id": "modc-nixos-24.11-amd64",
+      "familyId": "nixos",
+      "nixos": true,
+      "name": "NixOS",
+      "version": "24.11",
+      "arch": "amd64",
+      "kind": "cloud",
+      "url": "https://example.test/modc-nixos-24.11-amd64.qcow2",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "sizeMb": 1,
+      "adminGroup": "wheel"
     }
   ]
 }
