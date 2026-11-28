@@ -15,7 +15,7 @@ import {errorText} from '../queryNotice'
 import {Icon, type IconName} from '../icons'
 import {osLook} from '../osLook'
 import {extraDisks, type SwarmBattery} from './gauges'
-import {isGuestAgent, linuxConnectorOs} from './guestLink'
+import {isContainerAgent, isGuestAgent, linuxConnectorOs} from './guestLink'
 import {connectorInstallCommand, connectorInstallCommandWindows} from './installCommand'
 import {newlyJoined} from './join'
 import {loadPluginNames} from './pluginNames'
@@ -168,7 +168,7 @@ export function LocalSwarm({
 	const swarm = useSwarm()
 	const browserOnline = useBrowserOnline()
 	const problem = queryProblem(swarm, browserOnline)
-	const list = (swarm.data ?? []).filter((a) => !isGuestAgent(a) && (!onlyId || a.id === onlyId))
+	const list = (swarm.data ?? []).filter((a) => !isGuestAgent(a) && !isContainerAgent(a) && (!onlyId || a.id === onlyId))
 	const [innerSel, setInnerSel] = useState<string | null>(null)
 	const [innerAdd, setInnerAdd] = useState(false)
 	const selectedId = selectedProp !== undefined ? selectedProp : innerSel
@@ -184,7 +184,7 @@ export function LocalSwarm({
 	const [terminal, setTerminal] = useState<{agent: Agent; input?: string} | null>(null)
 	const [screen, setScreen] = useState<Agent | null>(null)
 	const desk = useDesktop()
-	const selected = (swarm.data ?? []).find((a) => a.id === selectedId && !isGuestAgent(a)) ?? null
+	const selected = (swarm.data ?? []).find((a) => a.id === selectedId && !isGuestAgent(a) && !isContainerAgent(a)) ?? null
 	const online = list.filter((a) => a.online).length
 	const outdated = list.filter((a) => a.online && may(a, 'manage') && a.updateAvailable)
 	const alertsQuery = useQuery({queryKey: ['swarm.alerts'], queryFn: () => query<SwarmAlert[]>('swarm.alerts'), refetchInterval: 10_000, enabled: list.length > 0})

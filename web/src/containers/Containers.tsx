@@ -10,10 +10,15 @@ import {isOwner} from '../isOwner'
 import {Icon} from '../icons'
 import {openTerminalWith} from '../terminalEvent'
 import {AddFile, type Download} from '../AddFile'
+import {MachineActions} from '../fleet/machineActions'
 import {MachineTabs} from '../fleet/MachineTabs'
+import {openStore} from '../fleet/openStore'
+import {PinButton} from '../fleet/PinButton'
 import {containerAgent, linuxConnectorOs} from '../swarm/guestLink'
 import {agentMay, useSwarm} from '../swarm/Swarm'
 import {Group, PortalRoot, Row, Sheet, SheetHeader, Spark, StatusPill, Switch, haptic, useConfirm, useToast} from '../ui'
+
+const MachineFiles = lazy(() => import('../screens/Files').then((m) => ({default: m.Files})))
 
 const TerminalScreen = lazy(() => import('../Terminal').then((m) => ({default: m.TerminalScreen})))
 
@@ -723,6 +728,7 @@ export function ContainerDetail({c, all, onBack, onOpen}: {c: Container; all: Co
 	const [askUser, setAskUser] = useState(false)
 	const [installUser, setInstallUser] = useState('')
 	const [installing, setInstalling] = useState(false)
+	const [agentTerm, setAgentTerm] = useState(false)
 	const pill = containerPill(c)
 	const busy = action.isPending || pill.kind === 'busy' || installing || c.job === 'installing connector'
 	const run = (path: string, done?: string, extra: Record<string, unknown> = {}) => action.mutate({path, input: {name: c.name, ...extra}, done})
@@ -856,8 +862,14 @@ export function ContainerDetail({c, all, onBack, onOpen}: {c: Container; all: Co
 					{owner && c.status === 'running' && !agent && !linux && swarm.isFetched && (
 						<p className="quiet">This operating system can’t run the connector. It runs on Linux with systemd or Alpine OpenRC.</p>
 					)}
-					{agent && agentMay(agent, 'terminal') && (
-						<p className="quiet">Connector online{agent.online ? '' : ' (offline)'}: Files and Terminal use the joined connector when granted.</p>
+					{agent && (
+						<MachineActions
+							terminal={!!agent.online && agentMay(agent, 'terminal')}
+							desktop={false}
+							onTerminal={() => setAgentTerm(true)}
+							onDesktop={() => {}}
+							pin={<PinButton pin={{kind: 'machine', id: agent.id, computer: ''}} name={c.name} />}
+						/>
 					)}
 
 					{c.status === 'running' ? (
@@ -866,6 +878,11 @@ export function ContainerDetail({c, all, onBack, onOpen}: {c: Container; all: Co
 						<div className="glass" style={{padding: 16, minWidth: 0}}>
 							<span className="quiet">Start {c.name} to see its console.</span>
 						</div>
+					)}
+					{agentTerm && agent && (
+						<Suspense fallback={null}>
+							<TerminalScreen agent={{id: agent.id, name: c.name}} overSheet onClose={() => setAgentTerm(false)} />
+						</Suspense>
 					)}
 					{askUser && (
 						<Sheet open onClose={() => setAskUser(false)} label="Install connector">
@@ -972,8 +989,23 @@ export function ContainerDetail({c, all, onBack, onOpen}: {c: Container; all: Co
 					<Backups c={c} busy={busy} all={all} />
 							)},
 							{id: 'files', label: 'Files', body: (
-					<Files c={c} />
+					agent && agent.online && agentMay(agent, 'files') ? (
+						<div className="ct-col" style={{display: 'grid', gap: 12, minWidth: 0}}>
+							<Suspense fallback={<div className="skeleton" style={{height: 180, borderRadius: 16}} />}>
+								<MachineFiles scope={{kind: 'computer', id: agent.id, name: c.name}} windowId={`container:${c.name}`} />
+							</Suspense>
+							<p className="quiet">Host files (Incus) stay available below while the connector is online.</p>
+							<Files c={c} />
+						</div>
+					) : (
+						<Files c={c} />
+					)
 							)},
+							...(agent?.online
+								? [{id: 'apps', label: 'Apps', body: (
+					<Row icon="store" color="var(--accent)" label="App Store" sub={`Installs on ${c.name}`} onClick={() => (haptic(6), openStore({id: agent.id, kind: 'computer', name: c.name}))} />
+								)}]
+								: []),
 							{id: 'options', label: 'Options', body: (<div className="ct-col" style={{display: 'grid', gridTemplateColumns: 'minmax(0, 1fr)', gap: 12, minWidth: 0}}>
 					<Boot key={`${c.bootOrder}-${c.bootDelay}`} c={c} busy={busy} run={run} />
 					<Group title="Signing in" footer="The console is the container’s own screen, like Proxmox’s: sign in there as root with the password set here.">
