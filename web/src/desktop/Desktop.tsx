@@ -170,10 +170,9 @@ export function SysIcon({kind, size = 44}: {kind: string; size?: number}) {
 }
 function FolderIcon({path, size}: {path: string; size: number}) {
 	const trash = path === '/Trash'
-	const home = path === '/Home'
 	return (
 		<span className="app-icon folder-icon sys-ico" style={{width: size, height: size, '--grad': trash ? 'linear-gradient(150deg,#a1a1aa,#52525b 70%)' : 'linear-gradient(150deg,#93c5fd,#3b82f6 70%)', '--tone': trash ? 'var(--muted)' : 'var(--blue)'} as CSSProperties}>
-			<Icon name={trash ? 'trash' : home ? 'home' : 'folder-filled'} size={size * 0.52} stroke={1.8} />
+			<Icon name={trash ? 'trash' : 'folder-filled'} size={size * 0.52} stroke={1.8} />
 		</span>
 	)
 }
@@ -292,7 +291,7 @@ export function useItems() {
 			}
 			if (key.startsWith('folder:')) {
 				const path = key.slice(7)
-				const label = path === '/Home' ? 'Home' : path === '/Trash' ? 'Trash' : path.slice(path.lastIndexOf('/') + 1)
+				const label = path === '/Home' ? 'Home folder' : path === '/Trash' ? 'Trash' : path.slice(path.lastIndexOf('/') + 1)
 				return {key, label, icon: (s) => <FolderIcon path={path} size={s} />}
 			}
 			return {key, label: key, icon: (s) => <SysIcon kind="window" size={s} />, missing: true}
