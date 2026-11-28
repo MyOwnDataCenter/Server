@@ -32,7 +32,7 @@ import {hostdevXml, parseUsbLive} from './usb.mjs'
 import {stoppedMessage} from './exec-error.mjs'
 import {checkLink, fileNameFor, listDownloads, startDownload} from './download.mjs'
 import {readNixCache} from './nix-cache.mjs'
-import {validateNixosConfig, writeCacheFragment, writeConfiguration} from './nixos-config.mjs'
+import {configDir, ensureConfigDir, validateNixosConfig, writeCacheFragment, writeConfiguration} from './nixos-config.mjs'
 
 export const CATALOG_URL = 'https://raw.githubusercontent.com/MyOwnDataCenter/app-store/main/machines/catalog.json'
 const BUNDLED_CATALOG = fileURLToPath(new URL('./machine-catalog.json', import.meta.url))
@@ -56,6 +56,15 @@ function execP(cmd, args, {input, cwd, timeout = 120_000} = {}) {
 }
 
 const xml = (s) => String(s).replace(/[<>&'"]/g, (c) => ({'<': '&lt;', '>': '&gt;', '&': '&amp;', "'": '&apos;', '"': '&quot;'})[c])
+const NIXOS_CONFIG_SHARE_TARGET = 'modc-nixos-config'
+export function nixosConfigFilesystemXml(sourceDir) {
+	return `<filesystem type='mount' accessmode='passthrough'>
+  <driver type='virtio-9p' wrpolicy='immediate'/>
+  <source dir='${xml(sourceDir)}'/>
+  <target dir='${NIXOS_CONFIG_SHARE_TARGET}'/>
+  <readonly/>
+</filesystem>`
+}
 // XML 1.0 Char. Tab, LF, and CR are allowed; other controls make libvirt reject the domain.
 function xmlChars(s) {
 	for (const ch of String(s)) {
@@ -471,10 +480,10 @@ export function createMachines({dataDir, catalogUrl = CATALOG_URL, fetchImpl = f
 	const CPU_TYPES = ['host', 'host-model', 'max', 'qemu64']
 	// The list carries the start of each machine's notes, so they can be searched; the full text is in its details.
 	const LIST_NOTES_MAX = 500
-	const NICS = ['virtio', 'e1000e', 'e1000', 'rtl8139']
-	const CACHES = ['default', 'none', 'writeback', 'writethrough', 'directsync', 'unsafe']
-	const BUSES = ['virtio', 'sata', 'scsi', 'ide']
-	function domainXml(m, kvm, uuid = '') {
+const NICS = ['virtio', 'e1000e', 'e1000', 'rtl8139']
+const CACHES = ['default', 'none', 'writeback', 'writethrough', 'directsync', 'unsafe']
+const BUSES = ['virtio', 'sata', 'scsi', 'ide']
+function domainXml(m, kvm, uuid = '') {
 		const dir = join(vmsDir, m.id)
 		const layout = m.layout ?? layoutFor('cloud', dir)
 		const o = m.options ?? {}
@@ -541,7 +550,7 @@ export function createMachines({dataDir, catalogUrl = CATALOG_URL, fetchImpl = f
     <graphics type='vnc' socket='${xml(join(dir, 'vnc.sock'))}'/>
     <video><model type='${arm && layout.video !== 'none' ? 'virtio' : layout.video}'/></video>${o.tablet === false ? '' : "\n    <input type='tablet' bus='usb'/>"}${o.agent ? "\n    <channel type='unix'><target type='virtio' name='org.qemu.guest_agent.0'/></channel>" : ''}
     <rng model='virtio'><backend model='random'>/dev/urandom</backend></rng>
-    ${(m.usbDevices ?? []).map((d) => hostdevXml(d)).join('\n    ')}
+    ${(m.usbDevices ?? []).map((d) => hostdevXml(d)).join('\n    ')}${m.nixos ? `\n    ${nixosConfigFilesystemXml(configDir(dataDir, m.id))}` : ''}
   </devices>
 </domain>
 `
@@ -557,6 +566,7 @@ export function createMachines({dataDir, catalogUrl = CATALOG_URL, fetchImpl = f
 		}
 	}
 	async function define(m) {
+		if (m.nixos) await ensureConfigDir(dataDir, m.id)
 		if (hostOf(m) !== 'server') {
 			const status = readVmStatus(await remoteCall(hostOf(m), 'vm-status', {}))
 			await remoteCall(hostOf(m), 'vm-define', {guestId: m.id, spec: defineSpec(m, status)})
@@ -757,6 +767,11 @@ export function createMachines({dataDir, catalogUrl = CATALOG_URL, fetchImpl = f
 			boot: m.boot ?? [layout.disks.find((d) => d.device === 'disk')?.id ?? 'disk0'],
 			disks,
 			portForwards: (m.portForwards ?? []).map((f) => ({protocol: f.protocol, hostPort: f.hostPort, guestPort: f.guestPort})),
+			...(m.nixos
+				? {
+						filesystems: [{source: configDir(dataDir, m.id), target: NIXOS_CONFIG_SHARE_TARGET, readonly: true}],
+					}
+				: {}),
 		}
 	}
 	function layoutBasenames(kind, img) {

@@ -7,7 +7,7 @@ import {fileURLToPath} from 'node:url'
 
 import {readNixCache, writeNixCache} from '../omarchyd/nix-cache.mjs'
 import {configDir, validateNixosConfig} from '../omarchyd/nixos-config.mjs'
-import {createMachines} from '../omarchyd/machines.mjs'
+import {createMachines, nixosConfigFilesystemXml} from '../omarchyd/machines.mjs'
 import {RpcError} from '../omarchyd/rpc.mjs'
 
 const EXAMPLE = `{ config, pkgs, ... }:
@@ -69,6 +69,18 @@ async function openMachines(dataDir, catalogUrl) {
 	await m.ready
 	return m
 }
+
+test('domain XML helper mounts host NixOS config share at modc-nixos-config', () => {
+	const dataDir = join('/data', 'omarchyd')
+	const id = 'abcd1234'
+	const source = configDir(dataDir, id)
+	const fragment = nixosConfigFilesystemXml(source)
+	assert.match(fragment, /virtio-9p/)
+	assert.match(fragment, /accessmode='passthrough'/)
+	assert.match(fragment, new RegExp(`source dir='${source.replaceAll('/', '\\/')}'`))
+	assert.match(fragment, /target dir='modc-nixos-config'/)
+	assert.match(fragment, /<readonly\/>/)
+})
 
 test('bundled catalog includes NixOS stub', async () => {
 	const bundled = fileURLToPath(new URL('../omarchyd/machine-catalog.json', import.meta.url))
