@@ -98,8 +98,19 @@ export async function startOmarchyd({port = 2021, host = '127.0.0.1', dataDir, t
 		},
 		...machineOptions,
 	})
-	// Containers (LXC through per-user Incus): owner-only, like the server's terminal.
-	const containers = createContainers({reservedPorts: [port, webPort], backupsDir: join(dataDir, 'container-backups'), files, ...containerOptions})
+	// Containers (LXC through per-user Incus): list/status for everyone; Incus mutations owner-only.
+	// Connector install uses the local swarm (bound below once createConnector runs).
+	const containers = createContainers({
+		reservedPorts: [port, webPort],
+		backupsDir: join(dataDir, 'container-backups'),
+		files,
+		connector: {
+			pair: (input) => connector.procedures['swarm.pair'].run(input),
+			list: () => connector.procedures['swarm.list'].run(),
+			caCertificate: () => connector.caCertificate(),
+		},
+		...containerOptions,
+	})
 	const storage = createStorage({dataDir, home, files, ...storageOptions})
 	const updater = createUpdater({appDir, dataDir, currentVersion: OMARCHYD_VERSION, webPort, ...(sourceDir ? {sourceDir} : {}), ...(storeDir ? {appStoreDir: storeDir} : {}), ...updaterOptions})
 	// One certificate context for the app gateways and the Security settings. On a server this is

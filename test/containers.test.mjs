@@ -189,7 +189,7 @@ test('omarchyd: members can list containers; Incus mutations stay owner-only', a
 	const {openAccounts} = await import('../omarchyd/accounts.mjs')
 	const {startOmarchyd} = await import('../omarchyd/server.mjs')
 	const {ALLOWED} = await import('../server/app.mjs')
-	for (const name of ['containers.status', 'containers.list', 'containers.images', 'containers.create', 'containers.delete', 'containers.addPort']) assert.ok(ALLOWED[name], name)
+	for (const name of ['containers.status', 'containers.list', 'containers.images', 'containers.create', 'containers.delete', 'containers.addPort', 'containers.installConnector']) assert.ok(ALLOWED[name], name)
 	const root = await mkdtemp(join(os.tmpdir(), 'omarchy-ct-'))
 	const data = join(root, 'd')
 	const accounts = await openAccounts(data)

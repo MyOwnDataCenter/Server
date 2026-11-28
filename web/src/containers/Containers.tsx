@@ -5,10 +5,14 @@ import {Suspense, lazy, useEffect, useRef, useState, type ReactNode} from 'react
 import {useMutation, useQuery, useQueryClient} from '@tanstack/react-query'
 
 import {mutate, query} from '../api'
+import {useUser} from '../data'
+import {isOwner} from '../isOwner'
 import {Icon} from '../icons'
 import {openTerminalWith} from '../terminalEvent'
 import {AddFile, type Download} from '../AddFile'
 import {MachineTabs} from '../fleet/MachineTabs'
+import {containerAgent, linuxConnectorOs} from '../swarm/guestLink'
+import {agentMay, useSwarm} from '../swarm/Swarm'
 import {Group, PortalRoot, Row, Sheet, SheetHeader, Spark, StatusPill, Switch, haptic, useConfirm, useToast} from '../ui'
 
 const TerminalScreen = lazy(() => import('../Terminal').then((m) => ({default: m.TerminalScreen})))
@@ -121,6 +125,7 @@ export function useContainerAction() {
 			qc.invalidateQueries({queryKey: ['containers.list']})
 			if (/Template/.test(a.path) || a.path === 'containers.create') qc.invalidateQueries({queryKey: ['containers.templates']})
 			if (/ackup/.test(a.path)) qc.invalidateQueries({queryKey: ['containers.backups']})
+			if (a.path === 'containers.installConnector') qc.invalidateQueries({queryKey: ['swarm.list']})
 		},
 	})
 }
@@ -703,6 +708,11 @@ function NotesAndTags({c, busy, run}: {c: Container; busy: boolean; run: (path: 
 export function ContainerDetail({c, all, onBack, onOpen}: {c: Container; all: Container[]; onBack: () => void; onOpen: (name: string) => void}) {
 	const action = useContainerAction()
 	const confirm = useConfirm()
+	const toast = useToast()
+	const owner = isOwner(useUser().data)
+	const swarm = useSwarm()
+	const agent = containerAgent(swarm.data ?? [], c.name)
+	const linux = linuxConnectorOs(c.os)
 	const [term, setTerm] = useState<null | 'console'>(null)
 	const [tab, setTab] = useState('summary')
 	const [pw, setPw] = useState('')
@@ -710,10 +720,41 @@ export function ContainerDetail({c, all, onBack, onOpen}: {c: Container; all: Co
 	const [port, setPort] = useState({host: '', inner: '', protocol: 'tcp' as 'tcp' | 'udp'})
 	const [copy, setCopy] = useState<null | 'clone' | 'template'>(null)
 	const [copyName, setCopyName] = useState('')
+	const [askUser, setAskUser] = useState(false)
+	const [installUser, setInstallUser] = useState('')
+	const [installing, setInstalling] = useState(false)
 	const pill = containerPill(c)
-	const busy = action.isPending || pill.kind === 'busy'
+	const busy = action.isPending || pill.kind === 'busy' || installing || c.job === 'installing connector'
 	const run = (path: string, done?: string, extra: Record<string, unknown> = {}) => action.mutate({path, input: {name: c.name, ...extra}, done})
 	const taken = all.map((x) => x.name)
+	const canInstall = owner && c.status === 'running' && !agent && linux && swarm.isFetched
+	useEffect(() => {
+		if (agent) setInstalling(false)
+	}, [agent])
+	useEffect(() => {
+		if (!installing || agent || c.job === 'installing connector') return
+		// Job finished without an agent: clear the spinner and show the list error if any.
+		if (c.error && /connector/i.test(c.error)) {
+			toast(c.error, true)
+			setInstalling(false)
+		}
+	}, [agent, c.error, c.job, installing, toast])
+	const runInstall = (username: string) => {
+		haptic(6)
+		setInstalling(true)
+		setAskUser(false)
+		void mutate<{status: string; message?: string}>('containers.installConnector', {name: c.name, username})
+			.then((out) => {
+				if (out.status === 'unsupported') {
+					toast(out.message ?? 'This operating system can’t run the connector.', true)
+					setInstalling(false)
+				}
+			})
+			.catch((e) => {
+				toast(e instanceof Error ? e.message : 'Install failed', true)
+				setInstalling(false)
+			})
+	}
 
 	// Container pages live in sheets, which sit above the usual terminal layer: open it above them.
 	const terminal = term ? (
@@ -805,12 +846,44 @@ export function ContainerDetail({c, all, onBack, onOpen}: {c: Container; all: Co
 						</button>
 					</div>
 
+					{canInstall && (
+						<div className="primary-row">
+							<button type="button" className="btn primary" disabled={busy} onClick={() => setAskUser(true)}>
+								{busy ? <span className="spinner" /> : <Icon name="plus" size={20} />} Install connector
+							</button>
+						</div>
+					)}
+					{owner && c.status === 'running' && !agent && !linux && swarm.isFetched && (
+						<p className="quiet">This operating system can’t run the connector. It runs on Linux with systemd or Alpine OpenRC.</p>
+					)}
+					{agent && agentMay(agent, 'terminal') && (
+						<p className="quiet">Connector online{agent.online ? '' : ' (offline)'}: Files and Terminal use the joined connector when granted.</p>
+					)}
+
 					{c.status === 'running' ? (
 						<EmbeddedConsole name={c.name} onFull={() => setTerm('console')} />
 					) : (
 						<div className="glass" style={{padding: 16, minWidth: 0}}>
 							<span className="quiet">Start {c.name} to see its console.</span>
 						</div>
+					)}
+					{askUser && (
+						<Sheet open onClose={() => setAskUser(false)} label="Install connector">
+							<SheetHeader title="Install connector" subtitle={c.name} onClose={() => setAskUser(false)} />
+							<form
+								onSubmit={(e) => {
+									e.preventDefault()
+									const username = installUser.trim()
+									if (!username) return
+									runInstall(username)
+								}}
+							>
+								<TextField id="ct-install-user" label="Account inside the container" value={installUser} onChange={(v) => setInstallUser(v.toLowerCase())} hint="A lower-case Linux username. Created if it isn’t there yet. Not root." placeholder="joseph" />
+								<button type="submit" className="btn primary" disabled={busy || !/^[a-z_][a-z0-9_-]{0,31}$/.test(installUser.trim()) || installUser.trim() === 'root'} style={{width: '100%', marginTop: 12}}>
+									{busy ? <><span className="spinner" /><span className="sr-only">Install connector</span></> : 'Install connector'}
+								</button>
+							</form>
+						</Sheet>
 					)}
 					<MachineTabs
 						label={`${c.name} sections`}
