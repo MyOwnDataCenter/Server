@@ -82,13 +82,16 @@ test('domain XML helper mounts host NixOS config share at modc-nixos-config', ()
 	assert.match(fragment, /<readonly\/>/)
 })
 
-test('bundled catalog includes NixOS stub', async () => {
+test('bundled catalog includes NixOS image', async () => {
 	const bundled = fileURLToPath(new URL('../omarchyd/machine-catalog.json', import.meta.url))
 	const {images} = JSON.parse(await readFile(bundled, 'utf8'))
 	const img = images.find((i) => i.id === 'modc-nixos-24.11-amd64')
 	assert.ok(img)
 	assert.equal(img.familyId, 'nixos')
 	assert.equal(img.nixos, true)
+	assert.match(img.url, /nixos-v24\.11\.0\/modc-nixos-24\.11-amd64\.qcow2$/)
+	assert.match(img.sha256, /^[0-9a-f]{64}$/)
+	assert.notEqual(img.sha256, '0'.repeat(64))
 })
 
 test('create refuses nixosConfig on non-NixOS image', async () => {
