@@ -559,6 +559,8 @@ export function createApp({store, staticDir, connectorDir = staticDir ? join(sta
 		['install.sh', 'text/plain; charset=utf-8'],
 		['agent.py', 'text/plain; charset=utf-8'],
 		['helper.py', 'text/plain; charset=utf-8'],
+		['vm-helper.py', 'text/plain; charset=utf-8'],
+		['lxc-helper.py', 'text/plain; charset=utf-8'],
 		['install.ps1', 'text/plain; charset=utf-8'],
 	])
 	app.get('/api/connector/:name', async (req, res) => {
