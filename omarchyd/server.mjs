@@ -41,6 +41,7 @@ import {createHermes} from './hermes.mjs'
 import * as system from './system.mjs'
 import {createSampler} from './stats.mjs'
 import {createOsInfo} from './os-info.mjs'
+import {createHistory, RANGES as HISTORY_RANGES} from './history.mjs'
 import {WebSocketServer} from 'ws'
 import {viewerBackpressure} from './backpressure.mjs'
 
@@ -212,6 +213,9 @@ export async function startOmarchyd({port = 2021, host = '127.0.0.1', dataDir, t
 	// Live gauges: hardware is sampled on its own interval while a screen is reading.
 	// The timer starts on the first read and stops about 15s after the last one,
 	// so an idle server is not running nvidia-smi or podman stats.
+	// The dashboard's graphs: a small always-on recorder (one /proc read every 10 s), kept for a week.
+	const history = createHistory({dataDir})
+	void history.start().catch(() => {})
 	const sampler = createSampler({
 		read: {
 			cpu: () => system.cpuUsage(),
@@ -335,6 +339,14 @@ export async function startOmarchyd({port = 2021, host = '127.0.0.1', dataDir, t
 			},
 		},
 		'system.stats': {kind: 'query', run: () => sampler.get()},
+		'system.history': {
+			kind: 'query',
+			run: (input = {}) => {
+				const range = input?.range ?? '1h'
+				if (!HISTORY_RANGES.includes(range)) throw new RpcError('BAD_REQUEST', 'Range must be live, 1h, 24h or 7d')
+				return history.get(range)
+			},
+		},
 		'system.uptime': {kind: 'query', run: async () => (await sampler.get()).uptime},
 		'system.cpuUsage': {kind: 'query', run: async () => (await sampler.get()).cpu},
 		'system.memoryUsage': {kind: 'query', run: async () => (await sampler.get()).memory},
@@ -1520,7 +1532,7 @@ WantedBy=graphical-session.target
 		}
 	}, 20_000).unref?.()
 
-	return {url: `http://${host}:${server.address().port}`, accounts, terminals, hyprland, close: () => (sampler.stop(), apps.close(), backups.close(), unraid.close(), updater.stop(), connector.close(), revokeAllHyprStreams(), hyprland.close(), assistant.chatgpt.close(), terminals.close(), new Promise((r) => server.close(r)))}
+	return {url: `http://${host}:${server.address().port}`, accounts, terminals, hyprland, close: () => (sampler.stop(), void history.stop(), apps.close(), backups.close(), unraid.close(), updater.stop(), connector.close(), revokeAllHyprStreams(), hyprland.close(), assistant.chatgpt.close(), terminals.close(), new Promise((r) => server.close(r)))}
 }
 
 // The "always use the secure address" choice made while omarchyd kept its own certificate folder.

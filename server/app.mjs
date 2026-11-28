@@ -89,6 +89,7 @@ export const ALLOWED = {
 	'system.deviceName': 'query',
 	'system.cpuTemperature': 'query',
 	'system.stats': 'query',
+	'system.history': 'query',
 	'system.bootStart': 'query',
 	'system.enableBootStart': 'mutation',
 	'system.cpuUsage': 'query',

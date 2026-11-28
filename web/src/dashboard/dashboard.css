@@ -1,0 +1,329 @@
+/* System dashboard. Colours come from the theme tokens, so it follows every theme (Studio, Daylight, Omarchy…). */
+.dash {
+	display: flex;
+	flex-direction: column;
+	gap: 14px;
+	margin: 8px 0 22px;
+}
+.dash-head {
+	display: flex;
+	align-items: flex-end;
+	justify-content: space-between;
+	gap: 12px;
+	flex-wrap: wrap;
+}
+.dash-head h2 {
+	margin: 0;
+	font-size: 18px;
+}
+.dash-head .segmented {
+	margin: 0;
+	min-width: min(100%, 340px);
+}
+.dash-note {
+	margin: 2px 0 0;
+	color: var(--muted);
+	font-size: 13px;
+}
+.dash-tiles {
+	display: grid;
+	grid-template-columns: repeat(auto-fit, minmax(min(100%, 150px), 1fr));
+	gap: 12px;
+}
+.dash-tile {
+	position: relative;
+	display: flex;
+	flex-direction: column;
+	gap: 2px;
+	padding: 12px 14px 10px;
+	overflow: hidden;
+	min-width: 0;
+}
+.dash-tile.is-warn {
+	box-shadow: inset 3px 0 0 var(--yellow);
+}
+.dash-tile.is-crit {
+	box-shadow: inset 3px 0 0 var(--red);
+}
+.dash-tile-head {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	font-size: 13px;
+	color: var(--fg-2);
+}
+.dash-ico {
+	display: inline-grid;
+	place-items: center;
+}
+.dash-tile-label {
+	flex: 1;
+	font-weight: 600;
+}
+.dash-state {
+	font-size: 11.5px;
+	font-weight: 600;
+	padding: 1px 7px;
+	border-radius: 999px;
+	color: var(--c);
+	background: color-mix(in srgb, var(--c) 14%, transparent);
+}
+.dash-state.is-ok { --c: var(--green); }
+.dash-state.is-warn { --c: var(--yellow); }
+.dash-state.is-crit { --c: var(--red); }
+.dash-tile-value {
+	font-size: 26px;
+	font-weight: 650;
+	letter-spacing: -0.02em;
+	line-height: 1.15;
+}
+.dash-tile-sub {
+	font-size: 12.5px;
+	color: var(--muted);
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+.dash-spark {
+	width: 100%;
+	height: 26px;
+	margin-top: 6px;
+	opacity: 0.9;
+}
+.dash-grid {
+	display: grid;
+	grid-template-columns: repeat(auto-fit, minmax(min(100%, 380px), 1fr));
+	gap: 12px;
+}
+.dash-card {
+	padding: 12px 14px;
+	min-width: 0;
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+}
+.dash-card header {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 8px;
+	min-height: 28px;
+}
+.dash-card h3 {
+	margin: 0;
+	font-size: 14px;
+	font-weight: 600;
+}
+.dash-dev {
+	font-size: 12px;
+	color: var(--muted);
+}
+.dash-select select {
+	font: inherit;
+	font-size: 12.5px;
+	color: var(--fg);
+	background: var(--glass-2);
+	border: 1px solid var(--line-2);
+	border-radius: 6px;
+	padding: 3px 8px;
+}
+
+/* chart */
+.tchart {
+	position: relative;
+	width: 100%;
+	min-width: 0;
+	outline-offset: 2px;
+	border-radius: 6px;
+}
+.tchart svg {
+	display: block;
+	overflow: visible;
+}
+.tchart-grid {
+	stroke: var(--line);
+	stroke-width: 1;
+}
+.tchart-axis {
+	fill: var(--muted);
+	font-size: 10.5px;
+	font-variant-numeric: tabular-nums;
+}
+.tchart-cross {
+	stroke: var(--fg-2);
+	stroke-width: 1;
+	stroke-dasharray: 3 3;
+}
+.tchart-empty {
+	display: grid;
+	place-items: center;
+	text-align: center;
+	color: var(--muted);
+	font-size: 13px;
+	border: 1px dashed var(--line-2);
+	border-radius: 8px;
+	padding: 0 16px;
+}
+.tchart-tip {
+	position: absolute;
+	top: 4px;
+	width: 150px;
+	display: flex;
+	flex-direction: column;
+	gap: 2px;
+	padding: 7px 9px;
+	font-size: 12px;
+	background: var(--sheet, var(--bg-solid));
+	border: 1px solid var(--line-2);
+	border-radius: 8px;
+	box-shadow: var(--shadow);
+	pointer-events: none;
+	z-index: 2;
+}
+.tchart-tip span,
+.tchart-legend span {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+}
+.tchart-tip em {
+	margin-left: auto;
+	font-style: normal;
+	font-weight: 600;
+	font-variant-numeric: tabular-nums;
+}
+.tchart-tip i,
+.tchart-legend i,
+.dash-keys i {
+	width: 9px;
+	height: 9px;
+	border-radius: 3px;
+	flex: none;
+}
+.tchart-legend {
+	display: flex;
+	gap: 14px;
+	font-size: 12px;
+	color: var(--fg-2);
+	padding-left: 46px;
+}
+
+/* consumers table */
+.dash-table {
+	width: 100%;
+	border-collapse: collapse;
+	font-size: 13px;
+}
+.dash-table th {
+	text-align: left;
+	font-size: 11.5px;
+	font-weight: 600;
+	color: var(--muted);
+	text-transform: uppercase;
+	letter-spacing: 0.05em;
+	padding: 0 0 6px;
+}
+.dash-table td {
+	padding: 6px 0;
+	border-top: 1px solid var(--line);
+	vertical-align: middle;
+}
+.dash-table td b {
+	display: block;
+	font-weight: 550;
+}
+.dash-table td span:not(.dash-bar) {
+	font-size: 12px;
+	color: var(--muted);
+}
+.dash-table td.num {
+	width: 30%;
+	font-variant-numeric: tabular-nums;
+}
+.dash-bar {
+	display: block;
+	height: 4px;
+	margin: 0 12px 4px 0;
+	border-radius: 2px;
+	background: linear-gradient(90deg, var(--c) var(--w), var(--line) var(--w));
+}
+
+/* storage */
+.dash-storage {
+	display: flex;
+	flex-direction: column;
+	gap: 10px;
+}
+.dash-stack {
+	display: flex;
+	height: 14px;
+	border-radius: 7px;
+	overflow: hidden;
+	gap: 2px;
+}
+.dash-stack span {
+	min-width: 3px;
+}
+.dash-keys {
+	list-style: none;
+	margin: 0;
+	padding: 0;
+	display: grid;
+	grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+	gap: 6px 12px;
+	font-size: 13px;
+}
+.dash-keys li {
+	display: flex;
+	align-items: center;
+	gap: 7px;
+}
+.dash-keys b {
+	margin-left: auto;
+	font-weight: 550;
+}
+
+/* The System window uses the whole window for the dashboard (other windows keep their reading width). */
+.win-screen:has(> .stagger > .dash) {
+	max-width: 2400px;
+	padding-left: clamp(16px, 2vw, 32px);
+	padding-right: clamp(16px, 2vw, 32px);
+}
+/* The server facts and actions under the dashboard stay at a comfortable reading width. */
+.stagger:has(> .dash) > section:not(.dash),
+.stagger:has(> .dash) > .footer-note {
+	max-width: 1040px;
+}
+@media (min-width: 1600px) {
+	.dash-grid {
+		grid-template-columns: repeat(3, minmax(0, 1fr));
+	}
+}
+
+/* Live indicator: a pulsing dot plus the words, so it isn't colour or motion alone. */
+.dash-live {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	margin-right: 8px;
+	font-weight: 600;
+	color: var(--green);
+}
+.dash-live i {
+	width: 8px;
+	height: 8px;
+	border-radius: 50%;
+	background: var(--green);
+	animation: dash-pulse 1.6s ease-in-out infinite;
+}
+@keyframes dash-pulse {
+	50% {
+		opacity: 0.35;
+		transform: scale(0.8);
+	}
+}
+@media (prefers-reduced-motion: reduce) {
+	.dash-live i {
+		animation: none;
+	}
+}

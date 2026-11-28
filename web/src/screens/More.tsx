@@ -15,6 +15,7 @@ import {RADIO_SELECTOR, rovingKeyDown, rovingTabIndex} from '../roving'
 import {ThemeChooser} from '../ThemeChooser'
 import {ACCENTS, Card, KV, Row, VersionTag, customBackgroundUrl, haptic, preparePhoto, useConfirm, useToast, type Prefs, type ThemeId} from '../ui'
 import {FactoryReset} from './machineHost'
+import {Dashboard} from '../dashboard/Dashboard'
 
 export function Appearance({prefs, setPrefs, wallpaper, onTheme}: {prefs: Prefs; setPrefs: (p: Prefs) => void; wallpaper?: Wallpaper | null; onTheme?: (id: ThemeId) => void}) {
 	const toast = useToast()
@@ -122,6 +123,7 @@ export function More({prefs, setPrefs, onSignedOut, onSettings, onClips, onTermi
 				<h1 className="title">System</h1>
 				<p className="subtitle">{boot.server?.device ?? 'server'}</p>
 			</div>
+			<Dashboard />
 			<section>
 				<div className="section-head">
 					<h2>Your server</h2>
