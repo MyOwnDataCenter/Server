@@ -28,6 +28,7 @@ import {PUBLIC_KEY, cloudMetaData, cloudUserData, hostnameFor, isWindowsClientLa
 import {createQemuAgent} from './qemu-agent.mjs'
 import {remoteGuestAgentRun} from './remote-guest-agent.mjs'
 import {RpcError} from './rpc.mjs'
+import {inspectDiskImage} from './machine-disk-image.mjs'
 import {hostdevXml, parseUsbLive} from './usb.mjs'
 import {stoppedMessage} from './exec-error.mjs'
 import {checkLink, fileNameFor, listDownloads, startDownload} from './download.mjs'
@@ -293,6 +294,67 @@ export function createMachines({dataDir, catalogUrl = CATALOG_URL, fetchImpl = f
 			(e) => (downloads.delete(img.id), failedImages.set(img.id, e.message)),
 		)
 		return entry.promise
+	}
+
+	// Files already uploaded through Files. Listing never opens an image with QEMU.
+	async function localDiskImages() {
+		if (!files) return []
+		const {real: home} = await files.resolve('/Home')
+		const found = []
+		const walk = async (dir, depth) => {
+			if (depth > 4 || found.length >= 50) return
+			for (const entry of await readdir(dir, {withFileTypes: true}).catch(() => [])) {
+				if (entry.name.startsWith('.') || ['node_modules', 'Pools'].includes(entry.name)) continue
+				const full = join(dir, entry.name)
+				if (entry.isDirectory()) await walk(full, depth + 1)
+				else if (entry.isFile() && /\.(raw|img|qcow2)$/i.test(entry.name) && found.length < 50) found.push({path: `/Home${full.slice(home.length)}`, name: entry.name})
+			}
+		}
+		await walk(home, 0)
+		return found.sort((a, b) => a.path.localeCompare(b.path))
+	}
+	async function localDisk(input) {
+		if (!files || typeof input.path !== 'string' || !input.path.startsWith('/Home/') || input.path.split('/').some((part) => part.startsWith('.'))) throw new RpcError('BAD_REQUEST', 'Choose a disk image in Files → Home')
+		const {real} = await files.resolve(input.path)
+		return {real, ...await inspectDiskImage(real, run)}
+	}
+	async function inspectLocalDisk(input = {}) {
+		const {real, ...info} = await localDisk(input)
+		return info
+	}
+	async function importDiskImage(input = {}, ctx) {
+		await ready
+		if (!isOwner(ctx)) throw new RpcError('FORBIDDEN', 'Only the server’s owner can import disk images')
+		if (input.hostId && input.hostId !== 'server') throw new RpcError('BAD_REQUEST', 'Import disk images on this server')
+		const caps = await capabilities()
+		if (!caps.libvirtAvailable) throw new RpcError('PRECONDITION_FAILED', 'Virtual machines need libvirt and QEMU')
+		const name = String(input.name ?? '').trim()
+		if (!name || [...name].length > 64 || !xmlChars(name)) throw new RpcError('BAD_REQUEST', 'Enter a name up to 64 characters')
+		return lock(`create:${name.toLowerCase()}`, async () => {
+			if (machines.some((m) => m.name.toLowerCase() === name.toLowerCase())) throw new RpcError('CONFLICT', 'A machine with that name already exists')
+			const cores = Number(input.cores)
+			const memoryGb = Number(input.memoryGb)
+			if (!Number.isInteger(cores) || cores < 1 || cores > (os.cpus().length || 1)) throw new RpcError('BAD_REQUEST', 'Choose an available number of CPU cores')
+			if (!Number.isInteger(memoryGb) || memoryGb < 1 || memoryGb > Math.max(1, Math.floor(os.totalmem() / 1024 ** 3) - 1)) throw new RpcError('BAD_REQUEST', 'Choose an available amount of memory')
+			if (!['efi', 'bios'].includes(input.firmware)) throw new RpcError('BAD_REQUEST', 'Choose UEFI or BIOS firmware')
+			const image = await localDisk(input)
+			const diskSizeGb = Number(input.diskSizeGb)
+			if (!Number.isInteger(diskSizeGb) || diskSizeGb < Math.ceil(image.virtualSize / 1024 ** 3) || diskSizeGb > 4096) throw new RpcError('BAD_REQUEST', 'The new disk must fit the image and be no larger than 4096 GB')
+			const fs = await statfs(vmsDir)
+			if (fs.bavail * fs.bsize < image.virtualSize + 1024 ** 3) throw new RpcError('PRECONDITION_FAILED', 'Not enough free space to import that image')
+			const source = {name, osId: 'imported', cores, memoryMb: memoryGb * 1024, memoryGb, diskSizeGb, options: {agent: false}, layout: {firmware: input.firmware, machineType: 'q35', nic: 'virtio', video: 'vga', disks: [{id: 'disk0', file: image.real, device: 'disk', bus: 'virtio', format: image.format, sizeGb: diskSizeGb}]}}
+			return adopt(source, {name, keepIds: false, taskType: 'import', copyDisk: async (d, dst) => {
+				const part = `${dst}.part`
+				try {
+					await inspectDiskImage(d.file, run)
+					await run('qemu-img', ['convert', '-f', image.format, '-O', 'qcow2', d.file, part], {timeout: 12 * 60 * 60_000})
+					await run('qemu-img', ['resize', part, `${diskSizeGb}G`])
+					await rename(part, dst)
+				} finally {
+					await rm(part, {force: true}).catch(() => {})
+				}
+			}})
+		})
 	}
 
 	// ---- libvirt --------------------------------------------------------------------------------
@@ -2511,7 +2573,7 @@ export function createMachines({dataDir, catalogUrl = CATALOG_URL, fetchImpl = f
 		}
 	}
 	// A new machine from copied disks and settings (used by restore and clone).
-	async function adopt(source, {name, copyDisk, keepIds, sourceTask}) {
+	async function adopt(source, {name, copyDisk, keepIds, sourceTask, taskType}) {
 		let id
 		do id = randomBytes(4).toString('hex')
 		while (machines.some((x) => x.id === id))
@@ -2552,7 +2614,7 @@ export function createMachines({dataDir, catalogUrl = CATALOG_URL, fetchImpl = f
 		const previous = liveSource ? busy.get(liveSource.id) : null
 		const sourceHold = liveSource && (!previous || previous.settling) ? {state: 'stopped'} : null
 		if (sourceHold) busy.set(liveSource.id, sourceHold)
-		const t = beginTask(m, keepIds ? 'restore' : 'clone', source.name)
+		const t = beginTask(m, taskType ?? (keepIds ? 'restore' : 'clone'), source.name)
 		;(async () => {
 			try {
 				await mkdir(dir, {recursive: true, mode: 0o700})
@@ -2612,6 +2674,7 @@ export function createMachines({dataDir, catalogUrl = CATALOG_URL, fetchImpl = f
 				Object.assign(m, {state: 'error', errorMessage: error.message})
 				endTask(m, t, error)
 				if (sourceTask) endTask(sourceTask.m, sourceTask.t, error)
+				if (taskType === 'import') await rm(dir, {recursive: true, force: true}).catch(() => {})
 			} finally {
 				busy.delete(id)
 				if (sourceHold && busy.get(liveSource.id) === sourceHold) busy.delete(liveSource.id)
@@ -2838,6 +2901,9 @@ export function createMachines({dataDir, catalogUrl = CATALOG_URL, fetchImpl = f
 			'machines.capabilities': {kind: 'query', run: capabilities},
 			'machines.osImages': {kind: 'query', run: osImages},
 			'machines.localIsos': {kind: 'query', run: localIsos},
+			'machines.localDiskImages': {kind: 'query', run: localDiskImages},
+			'machines.inspectDiskImage': {kind: 'query', run: inspectLocalDisk},
+			'machines.importDiskImage': {kind: 'mutation', run: importDiskImage},
 			'machines.isoDownloads': {kind: 'query', run: async () => listDownloads(isoDownloads)},
 			'machines.downloadIso': {kind: 'mutation', run: downloadIso},
 			'machines.list': {kind: 'query', run: list},

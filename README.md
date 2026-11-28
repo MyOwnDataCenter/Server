@@ -131,6 +131,19 @@ where you left off; add `--purge` to delete those too.
 
 ![Machines in the desktop layout: the server's summary, status and its virtual machines](docs/screenshots/desktop-machines.jpg)
 
+### Import an existing VM disk
+
+In Machines, choose Add a machine → Virtual Machine → Your own image → Import disk image. Upload a
+standalone RAW (`.raw` or `.img`) or QCOW2 file, or select one already in Files →
+Home. Choose the image's firmware (UEFI or BIOS), CPU, memory, and disk capacity.
+The server copies the image into a managed disk and can enlarge that copy. The
+source stays unchanged, and the new machine stays stopped until you start it.
+Existing guest accounts and configuration are preserved; no cloud-init drive or
+guest connector is added. Imports are owner-only and run on this server. QCOW2
+backing files, external data files, and QCOW2 encryption are not supported.
+
+![Import an existing RAW or QCOW2 disk](docs/screenshots/import-disk-image.jpg)
+
 ### Your Omarchy desktop, remotely
 
 - The server's own Omarchy desktop, live in the browser, signed in from anywhere when it's at its
