@@ -4,6 +4,17 @@ export type Release = {version: string; date: string; title: string; added?: str
 
 export const CHANGELOG: Release[] = [
 	{
+		version: '0.9.107',
+		date: '2026-11-27',
+		title: 'An encrypted server can start by itself after a power cut',
+		added: [
+			'The installer asks whether to turn on unattended boot when the system disk is encrypted. Why: until now, after a restart or power cut the computer waited at the disk password screen, so this server stayed off until someone typed it at the keyboard.',
+			'With it on, the disk unlocks itself and the server starts on its own. The screen asks for your Linux password instead of signing in automatically. Your disk password still works.',
+			'Trade-off: anyone who takes the computer or its drive could read the data. It is off unless you say yes, and it is never turned on by an in-app update.',
+			'Restart from the app is no longer blocked by the disk password warning once unattended boot is on.',
+		],
+	},
+	{
 		version: '0.9.106',
 		date: '2026-11-27',
 		title: 'Toasts follow you, and chat tries your providers in order',
