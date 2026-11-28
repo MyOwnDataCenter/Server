@@ -37,6 +37,8 @@ export const READ_TOOLS = [
 	tool('machines_details', 'machines.details', 'One virtual machine', {id: {type: 'string', description: 'Machine id'}}),
 	tool('machines_osImages', 'machines.osImages', 'Operating system images available for a new machine'),
 	tool('machines_capabilities', 'machines.capabilities', 'What this server can give a virtual machine'),
+	tool('containers_status', 'containers.status', 'Whether system containers (LXC/Incus) are set up on this server'),
+	tool('containers_list', 'containers.list', 'System containers (LXC) on this server — machines that share this server’s kernel, not App Store apps'),
 	tool('usb_list', 'usb.list', 'USB serial and Zigbee sticks plugged into this server, and which app or virtual machine holds each one'),
 	tool('swarm_list', 'swarm.list', 'Computers in the Local swarm', {}, true),
 	tool('swarm_alerts', 'swarm.alerts', 'Active health alerts across computers in the Local swarm (offline nodes, high disk usage, high temperature, waiting updates, outdated connectors)', {}, true),
@@ -112,6 +114,24 @@ export const WRITE_TOOLS = [
 			},
 		},
 	}, false, ['id', 'portForwards']),
+	mutation('containers_start', 'containers.start', 'Start a system container (LXC)', {name: {type: 'string', description: 'Container name'}}, true, ['name']),
+	mutation('containers_stop', 'containers.stop', 'Shut down a system container (LXC)', {name: {type: 'string', description: 'Container name'}}, true, ['name']),
+	mutation('containers_restart', 'containers.restart', 'Restart a system container (LXC)', {name: {type: 'string', description: 'Container name'}}, true, ['name']),
+	mutation('containers_create', 'containers.create', 'Create a system container (LXC) on this server', {
+		name: {type: 'string', description: 'Lowercase name'},
+		image: {type: 'string', description: 'Library alias such as debian/12, or template:modc/name'},
+		cpus: {type: 'integer'},
+		memoryMiB: {type: 'integer'},
+		diskGiB: {type: 'integer'},
+		autostart: {type: 'boolean'},
+		rootPassword: {type: 'string'},
+		sshKey: {type: 'string'},
+	}, true, ['name', 'image']),
+	mutation('containers_delete', 'containers.delete', 'Delete a system container (LXC)', {name: {type: 'string', description: 'Container name'}}, true, ['name']),
+	mutation('containers_installConnector', 'containers.installConnector', 'Install the connector inside a system container so Files, Terminal, and Apps can use it', {
+		name: {type: 'string', description: 'Container name'},
+		username: {type: 'string', description: 'Lower-case Linux account inside the container'},
+	}, true, ['name', 'username']),
 	mutation('usb_attach', 'usb.attach', 'Bind a host USB serial or Zigbee stick to one virtual machine or app on this server. Exclusive: only one guest can hold a stick. A running app may need a restart.', {
 		deviceId: {type: 'string', description: 'Stable USB id from usb_list'},
 		guest: {
