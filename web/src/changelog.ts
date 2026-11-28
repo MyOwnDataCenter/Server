@@ -4,6 +4,17 @@ export type Release = {version: string; date: string; title: string; added?: str
 
 export const CHANGELOG: Release[] = [
 	{
+		version: '0.9.106',
+		date: '2026-11-27',
+		title: 'Toasts follow you, and chat tries your providers in order',
+		added: [
+			'Copied, a VM starting, an install, and other feedback for you show in one list. When the floating assistant is on screen, that list sits in its speech bubble. When the assistant is hidden, the same list sits at the top of the page. The bell stays for news for the whole server, such as a software update.',
+			'Settings → Assistant lists the providers you added, from the top. Chat tries them in that order and names the one that answered. A new provider is added at the bottom. Open a provider to move it up or down.',
+			'The owner can offer one provider to other accounts. Those accounts can refuse it. A provider someone else added stays off your list, apart from that offer. When someone else uses the one you offered, chat names the service, not the private name you gave it.',
+			'Hermes answers only when its row is first. It is not a backup for the providers under it.',
+		],
+	},
+	{
 		version: '0.9.105',
 		date: '2026-11-27',
 		title: 'The store names the machine before you install',
