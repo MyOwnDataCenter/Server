@@ -71,6 +71,9 @@ async function installWithLogin(login) {
 	await stub(bin, 'podman', 'exit 0')
 	await stub(bin, 'npm', 'exit 0')
 	await stub(bin, 'ufw', 'exit 0')
+	// This computer's disk is not part of the test. An encrypted root would stop at the unattended-boot question.
+	await stub(bin, 'findmnt', 'exit 0')
+	await stub(bin, 'lsblk', 'exit 0')
 	await stub(
 		bin,
 		'git',
