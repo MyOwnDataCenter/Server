@@ -45,7 +45,7 @@ describe('omarchyd', () => {
 		const r = await call('query', 'system.version')
 		assert.equal(r.status, 200)
 		const v = r.body.result.data
-		assert.equal(v.version, '0.9.105')
+		assert.equal(v.version, '0.9.106')
 		assert.equal(typeof v.startedAt, 'number')
 		assert.ok(v.startedAt <= Date.now() && Date.now() - v.startedAt < 60_000)
 		let expectedRevision
