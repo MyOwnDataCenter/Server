@@ -57,6 +57,13 @@ function execP(cmd, args, {input, cwd, timeout = 120_000} = {}) {
 
 const xml = (s) => String(s).replace(/[<>&'"]/g, (c) => ({'<': '&lt;', '>': '&gt;', '&': '&amp;', "'": '&apos;', '"': '&quot;'})[c])
 const NIXOS_CONFIG_SHARE_TARGET = 'modc-nixos-config'
+/** Sentinel for vm-helper: resolve to that host’s nixos-configs/<guestId>. */
+const NIXOS_CONFIG_FS_SOURCE = 'nixos-config'
+function nixCacheConfText({enabled, substituter}) {
+	const sub = String(substituter ?? '').trim()
+	if (!enabled || !sub) return ''
+	return `extra-substituters = ${sub}\n`
+}
 export function nixosConfigFilesystemXml(sourceDir) {
 	return `<filesystem type='mount' accessmode='passthrough'>
   <driver type='virtio-9p' wrpolicy='immediate'/>
@@ -566,7 +573,13 @@ function domainXml(m, kvm, uuid = '') {
 		}
 	}
 	async function define(m) {
-		if (m.nixos) await ensureConfigDir(dataDir, m.id)
+		if (m.nixos) {
+			if (hostOf(m) !== 'server') {
+				await remoteCall(hostOf(m), 'vm-write-nixos-config', {guestId: m.id})
+			} else {
+				await ensureConfigDir(dataDir, m.id)
+			}
+		}
 		if (hostOf(m) !== 'server') {
 			const status = readVmStatus(await remoteCall(hostOf(m), 'vm-status', {}))
 			await remoteCall(hostOf(m), 'vm-define', {guestId: m.id, spec: defineSpec(m, status)})
@@ -770,7 +783,7 @@ function domainXml(m, kvm, uuid = '') {
 			portForwards: (m.portForwards ?? []).map((f) => ({protocol: f.protocol, hostPort: f.hostPort, guestPort: f.guestPort})),
 			...(m.nixos
 				? {
-						filesystems: [{source: configDir(dataDir, m.id), target: NIXOS_CONFIG_SHARE_TARGET, readonly: true}],
+						filesystems: [{source: NIXOS_CONFIG_FS_SOURCE, target: NIXOS_CONFIG_SHARE_TARGET, readonly: true}],
 					}
 				: {}),
 		}
@@ -780,13 +793,13 @@ function domainXml(m, kvm, uuid = '') {
 		for (const d of layout.disks) if (d.file) d.file = basename(d.file)
 		return layout
 	}
-	async function recordNixosOnCreate(input, img, id) {
+	async function recordNixosOnCreate(input, img, id, {writeLocal = true} = {}) {
 		const nixos = img?.nixos === true || img?.familyId === 'nixos'
 		if (input.nixosConfig && !nixos) throw new RpcError('BAD_REQUEST', 'NixOS configuration is only for NixOS images.')
 		if (nixos && input.nixosConfig) {
 			const checked = validateNixosConfig(input.nixosConfig)
 			if (!checked.ok) throw new RpcError('BAD_REQUEST', checked.error)
-			if (checked.config.trim()) {
+			if (checked.config.trim() && writeLocal) {
 				await writeConfiguration(dataDir, id, checked.config)
 				const cache = await readNixCache(dataDir)
 				await writeCacheFragment(dataDir, id, cache)
@@ -870,7 +883,7 @@ function domainXml(m, kvm, uuid = '') {
 			let id
 			do id = randomBytes(4).toString('hex')
 			while (machines.some((m) => m.id === id))
-			const nixos = await recordNixosOnCreate(input, img, id)
+			const nixos = await recordNixosOnCreate(input, img, id, {writeLocal: false})
 			const layout = layoutBasenames(kind === 'cloud' ? 'cloud' : kind === 'windows' ? 'windows' : 'iso', img)
 			if (kind === 'omarchy' || kind === 'windows' || kind === 'manual') {
 				layout.disks.splice(1, 0, {id: 'cd0', file: `image:${img.id}`, device: 'cdrom', bus: 'sata', format: 'raw'})
@@ -953,6 +966,19 @@ function domainXml(m, kvm, uuid = '') {
 						await hostCall(hostId, id, 'vm-fetch', {imageId: img.id, catalogUrl})
 						step(80)
 						await hostCall(hostId, id, 'vm-disk-create', {guestId: id, sizeGb: diskSizeGb})
+					}
+					if (nixos) {
+						const writeBody = {guestId: id}
+						if (input.nixosConfig) {
+							const checked = validateNixosConfig(input.nixosConfig)
+							if (!checked.ok) throw new RpcError('BAD_REQUEST', checked.error)
+							if (checked.config.trim()) {
+								writeBody.configuration = checked.config
+								const cache = await readNixCache(dataDir)
+								writeBody.cacheConf = nixCacheConfText(cache)
+							}
+						}
+						await hostCall(hostId, id, 'vm-write-nixos-config', writeBody)
 					}
 					step(90)
 					await hostCall(hostId, id, 'vm-define', {guestId: id, spec: defineSpec(m, status)})
@@ -1971,6 +1997,15 @@ function domainXml(m, kvm, uuid = '') {
 		await ready
 		const m = find(input.id)
 		if (!m.nixos) throw new RpcError('BAD_REQUEST', 'That machine isn’t a NixOS guest.')
+		if (hostOf(m) !== 'server') {
+			const out = await remoteCall(hostOf(m), 'vm-read-nixos-config', {guestId: m.id})
+			if (out && typeof out === 'object' && !Array.isArray(out)) return out
+			try {
+				const parsed = JSON.parse(String(out ?? ''))
+				if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) return parsed
+			} catch {}
+			throw new RpcError('BAD_GATEWAY', 'That computer didn’t answer with a valid NixOS config')
+		}
 		return readConfiguration(dataDir, m.id)
 	}
 	async function setNixosConfig(input = {}) {
@@ -1979,6 +2014,15 @@ function domainXml(m, kvm, uuid = '') {
 		if (!m.nixos) throw new RpcError('BAD_REQUEST', 'That machine isn’t a NixOS guest.')
 		const checked = validateNixosConfig(input.config ?? '')
 		if (!checked.ok) throw new RpcError('BAD_REQUEST', checked.error)
+		if (hostOf(m) !== 'server') {
+			const cache = await readNixCache(dataDir)
+			await remoteCall(hostOf(m), 'vm-write-nixos-config', {
+				guestId: m.id,
+				configuration: checked.config,
+				cacheConf: nixCacheConfText(cache),
+			})
+			return nixosConfig({id: m.id})
+		}
 		try {
 			await writeConfiguration(dataDir, m.id, checked.config)
 		} catch (error) {

@@ -150,6 +150,128 @@ class BadBootList(unittest.TestCase):
                 self.assertIn("Invalid boot", str(err.exception))
 
 
+class NixosShare(unittest.TestCase):
+    def test_write_read_and_define_mounts_9p(self):
+        log = []
+
+        def run(cmd, args, input=None):
+            log.append([cmd, *args])
+            if cmd == "virsh" and "domuuid" in args:
+                raise HelperError("no domain")
+            return ""
+
+        with tempfile.TemporaryDirectory() as d:
+            guest = "abcd1234"
+            os.makedirs(os.path.join(d, "vms", guest))
+            open(os.path.join(d, "vms", guest, "disk.qcow2"), "wb").close()
+            cfg = '{ config, pkgs, ... }:\n{\n  system.stateVersion = "24.11";\n}\n'
+            out = handle(
+                "write-nixos-config",
+                [guest],
+                stdin=json.dumps({"configuration": cfg, "cacheConf": "extra-substituters = https://cache.example.test\n"}),
+                data_dir=d,
+                uid=1000,
+            )
+            body = json.loads(out)
+            self.assertTrue(body["ok"])
+            share = os.path.join(d, "nixos-configs", guest)
+            self.assertTrue(os.path.isfile(os.path.join(share, "configuration.nix")))
+            with open(os.path.join(share, "nix-cache.conf"), encoding="utf-8") as fh:
+                self.assertIn("cache.example.test", fh.read())
+            read = json.loads(handle("read-nixos-config", [guest], data_dir=d, uid=1000))
+            self.assertTrue(read["present"])
+            self.assertIn("24.11", read["config"])
+
+            spec = {
+                "id": guest, "name": "Nix", "memoryMb": 2048, "sockets": 1, "cores": 2,
+                "cpuType": "host", "mac": "52:54:00:11:22:33", "firmware": "bios", "arch": "amd64",
+                "machineType": "q35", "nic": "virtio", "video": "vga", "kvm": False, "tablet": True,
+                "acpi": True, "agent": False, "bootMenu": False, "notes": "",
+                "boot": ["disk0"],
+                "disks": [{"id": "disk0", "device": "disk", "bus": "virtio", "format": "qcow2", "file": "disk.qcow2"}],
+                "filesystems": [{"source": "nixos-config", "target": "modc-nixos-config", "readonly": True}],
+            }
+            handle("define", [guest], stdin=json.dumps(spec), run=run, data_dir=d, uid=1000, uname="x86_64", kvm_path=os.path.join(d, "no-kvm"))
+            with open(os.path.join(d, "vms", guest, "domain.xml"), encoding="utf-8") as xml_file:
+                xml = xml_file.read()
+            self.assertIn("virtio-9p", xml)
+            self.assertIn("modc-nixos-config", xml)
+            self.assertIn(share, xml)
+            with self.assertRaises(HelperError) as bad:
+                handle(
+                    "define",
+                    [guest],
+                    stdin=json.dumps(dict(spec, filesystems=[{"source": "/etc", "target": "modc-nixos-config", "readonly": True}])),
+                    run=run,
+                    data_dir=d,
+                    uid=1000,
+                    uname="x86_64",
+                    kvm_path=os.path.join(d, "no-kvm"),
+                )
+            self.assertIn("Invalid filesystem", str(bad.exception))
+
+
+class NixosShare(unittest.TestCase):
+    def test_write_read_and_define_mounts_9p(self):
+        log = []
+
+        def run(cmd, args, input=None):
+            log.append([cmd, *args])
+            if cmd == "virsh" and "domuuid" in args:
+                raise HelperError("no domain")
+            return ""
+
+        with tempfile.TemporaryDirectory() as d:
+            guest = "abcd1234"
+            os.makedirs(os.path.join(d, "vms", guest))
+            open(os.path.join(d, "vms", guest, "disk.qcow2"), "wb").close()
+            cfg = '{ config, pkgs, ... }:\n{\n  system.stateVersion = "24.11";\n}\n'
+            out = handle(
+                "write-nixos-config",
+                [guest],
+                stdin=json.dumps({"configuration": cfg, "cacheConf": "extra-substituters = https://cache.example.test\n"}),
+                data_dir=d,
+                uid=1000,
+            )
+            body = json.loads(out)
+            self.assertTrue(body["ok"])
+            share = os.path.join(d, "nixos-configs", guest)
+            self.assertTrue(os.path.isfile(os.path.join(share, "configuration.nix")))
+            with open(os.path.join(share, "nix-cache.conf"), encoding="utf-8") as fh:
+                self.assertIn("cache.example.test", fh.read())
+            read = json.loads(handle("read-nixos-config", [guest], data_dir=d, uid=1000))
+            self.assertTrue(read["present"])
+            self.assertIn("24.11", read["config"])
+
+            spec = {
+                "id": guest, "name": "Nix", "memoryMb": 2048, "sockets": 1, "cores": 2,
+                "cpuType": "host", "mac": "52:54:00:11:22:33", "firmware": "bios", "arch": "amd64",
+                "machineType": "q35", "nic": "virtio", "video": "vga", "kvm": False, "tablet": True,
+                "acpi": True, "agent": False, "bootMenu": False, "notes": "",
+                "boot": ["disk0"],
+                "disks": [{"id": "disk0", "device": "disk", "bus": "virtio", "format": "qcow2", "file": "disk.qcow2"}],
+                "filesystems": [{"source": "nixos-config", "target": "modc-nixos-config", "readonly": True}],
+            }
+            handle("define", [guest], stdin=json.dumps(spec), run=run, data_dir=d, uid=1000, uname="x86_64", kvm_path=os.path.join(d, "no-kvm"))
+            with open(os.path.join(d, "vms", guest, "domain.xml"), encoding="utf-8") as xml_file:
+                xml = xml_file.read()
+            self.assertIn("virtio-9p", xml)
+            self.assertIn("modc-nixos-config", xml)
+            self.assertIn(share, xml)
+            with self.assertRaises(HelperError) as bad:
+                handle(
+                    "define",
+                    [guest],
+                    stdin=json.dumps(dict(spec, filesystems=[{"source": "/etc", "target": "modc-nixos-config", "readonly": True}])),
+                    run=run,
+                    data_dir=d,
+                    uid=1000,
+                    uname="x86_64",
+                    kvm_path=os.path.join(d, "no-kvm"),
+                )
+            self.assertIn("Invalid filesystem", str(bad.exception))
+
+
 class SeedFileNames(unittest.TestCase):
     def test_a_seed_file_name_that_starts_with_a_dash_is_refused(self):
         # The names are handed to xorriso as arguments, where a leading dash is an option.

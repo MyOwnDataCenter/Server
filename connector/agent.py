@@ -3282,6 +3282,8 @@ VM_ACTIONS = {
     "vm-ga-ping": "ga-ping",
     "vm-ga-exec": "ga-exec",
     "vm-ga-status": "ga-status",
+    "vm-write-nixos-config": "write-nixos-config",
+    "vm-read-nixos-config": "read-nixos-config",
 }
 _VM_POSITIONALS = {
     "status": (),
@@ -3303,8 +3305,10 @@ _VM_POSITIONALS = {
     "ga-ping": ("guestId",),
     "ga-exec": ("guestId",),
     "ga-status": ("guestId", "pid"),
+    "write-nixos-config": ("guestId",),
+    "read-nixos-config": ("guestId",),
 }
-_VM_JSON = frozenset(("seed", "define", "ga-exec"))
+_VM_JSON = frozenset(("seed", "define", "ga-exec", "write-nixos-config"))
 _PROGRESS = re.compile(r"^PROGRESS (\d+)$")
 
 

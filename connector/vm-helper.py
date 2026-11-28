@@ -17,6 +17,7 @@ VERBS = frozenset([
     "status", "fetch", "disk-create", "seed", "define", "start", "shutdown",
     "reboot", "destroy", "suspend", "resume", "undefine", "state", "vnc-path",
     "inspect", "stats", "ga-ping", "ga-exec", "ga-status",
+    "write-nixos-config", "read-nixos-config",
 ])
 ARITY = {
     "status": (0, 0),
@@ -38,6 +39,8 @@ ARITY = {
     "ga-ping": (1, 1),
     "ga-exec": (1, 1),
     "ga-status": (2, 2),
+    "write-nixos-config": (1, 1),
+    "read-nixos-config": (1, 1),
 }
 IMAGE_ID = re.compile(r"^[a-z0-9][a-z0-9.-]{1,63}$")
 GUEST_ID = re.compile(r"^[a-f0-9]{8}$")
@@ -62,11 +65,15 @@ BUSES = ("virtio", "sata", "scsi", "ide")
 DEFINE_FIELDS = {
     "id", "name", "memoryMb", "sockets", "cores", "cpuType", "mac", "firmware",
     "arch", "machineType", "nic", "video", "kvm", "tablet", "acpi", "agent",
-    "bootMenu", "notes", "linkDown", "boot", "disks", "portForwards",
+    "bootMenu", "notes", "linkDown", "boot", "disks", "portForwards", "filesystems",
 }
 DISK_FIELDS = {"id", "device", "bus", "format", "role", "cache", "discard", "file"}
 FORWARD_FIELDS = {"protocol", "hostPort", "guestPort"}
+FS_FIELDS = {"source", "target", "readonly"}
 GA_EXEC_FIELDS = {"path", "args", "input", "capture"}
+NIXOS_FS_SOURCE = "nixos-config"
+NIXOS_FS_TARGET = "modc-nixos-config"
+NIXOS_CONFIG_MAX = 512 * 1024
 
 
 class HelperError(Exception):
@@ -270,6 +277,17 @@ def images_root(data_dir):
 
 def guest_root(data_dir, guest_id):
     return os.path.join(os.path.realpath(data_dir), "vms", guest_id)
+
+
+def nixos_configs_root(data_dir):
+    return os.path.join(os.path.realpath(data_dir), "nixos-configs")
+
+
+def nixos_config_root(data_dir, guest_id):
+    root = ensure_dir(nixos_configs_root(data_dir))
+    path = os.path.join(root, guest_id)
+    ensure_dir(path)
+    return require_inside(path, root)
 
 
 def domain(guest_id):
@@ -626,6 +644,20 @@ def validate_forward(fwd):
     return fwd
 
 
+def validate_filesystem(fs):
+    if not isinstance(fs, dict):
+        raise HelperError("Invalid filesystem")
+    if set(fs) - FS_FIELDS:
+        raise HelperError("Unexpected field")
+    if fs.get("source") != NIXOS_FS_SOURCE:
+        raise HelperError("Invalid filesystem")
+    if fs.get("target") != NIXOS_FS_TARGET:
+        raise HelperError("Invalid filesystem")
+    if "readonly" in fs and type(fs["readonly"]) is not bool:
+        raise HelperError("Invalid filesystem")
+    return fs
+
+
 def validate_spec(spec, guest_id, arch):
     if set(spec) - DEFINE_FIELDS:
         raise HelperError("Unexpected field")
@@ -679,6 +711,11 @@ def validate_spec(spec, guest_id, arch):
         raise HelperError("Invalid port forwards")
     for fwd in forwards:
         validate_forward(fwd)
+    filesystems = spec.get("filesystems", [])
+    if not isinstance(filesystems, list) or len(filesystems) > 4:
+        raise HelperError("Invalid filesystems")
+    for fs in filesystems:
+        validate_filesystem(fs)
     if spec.get("arch") != "arm64" and spec.get("machineType") == "q35":
         for disk in disks:
             if disk.get("bus") == "ide":
@@ -797,6 +834,22 @@ def domain_xml(spec, guest_dir, kvm_usable, uuid, files):
         if spec["agent"]
         else ""
     )
+    fs_xml = []
+    for fs in spec.get("filesystems") or []:
+        source = fs.get("_resolved_source") or ""
+        if not source:
+            continue
+        readonly = "" if fs.get("readonly") is False else "<readonly/>"
+        fs_xml.append(
+            "<filesystem type='mount' accessmode='passthrough'>"
+            "<driver type='virtio-9p' wrpolicy='immediate'/>"
+            "<source dir='%s'/>"
+            "<target dir='%s'/>"
+            "%s"
+            "</filesystem>"
+            % (xml_escape(source), xml_escape(fs["target"]), readonly)
+        )
+    filesystems = ("\n    " + "\n    ".join(fs_xml)) if fs_xml else ""
     vnc = xml_escape(os.path.join(guest_dir, "vnc.sock"))
     features = "%s%s" % ("" if spec["acpi"] is False else "<acpi/>", "" if arm else "<apic/>")
     return (
@@ -815,7 +868,7 @@ def domain_xml(spec, guest_dir, kvm_usable, uuid, files):
         "    <serial type='pty'/><console type='pty'/>\n"
         "    <graphics type='vnc' socket='%s'/>\n"
         "    <video><model type='%s'/></video>%s%s\n"
-        "    <rng model='virtio'><backend model='random'>/dev/urandom</backend></rng>\n"
+        "    <rng model='virtio'><backend model='random'>/dev/urandom</backend></rng>%s\n"
         "  </devices>\n"
         "</domain>\n"
         % (
@@ -836,6 +889,7 @@ def domain_xml(spec, guest_dir, kvm_usable, uuid, files):
             video,
             tablet,
             agent,
+            filesystems,
         )
     )
 
@@ -860,6 +914,8 @@ def do_define(args, stdin, run, data_dir, kvm_path, uname):
         if disk["device"] == "disk" and not os.path.isfile(path):
             raise HelperError("That disk isn’t on this computer")
         files[disk["id"]] = path
+    for fs in spec.get("filesystems") or []:
+        fs["_resolved_source"] = nixos_config_root(data_dir, guest_id)
     kvm_usable = os.access(kvm_path, os.R_OK | os.W_OK)
     uuid = defined_uuid(run, guest_id)
     xml = domain_xml(spec, guest, kvm_usable, uuid, files)
@@ -874,6 +930,54 @@ def do_define(args, stdin, run, data_dir, kvm_path, uname):
         pass
     virsh(run, "define", xml_path)
     return "ok"
+
+
+def do_write_nixos_config(args, stdin, data_dir):
+    guest_id = parse_guest_id(args[0])
+    body = read_object(stdin) if stdin and str(stdin).strip() else {}
+    if set(body) - {"configuration", "cacheConf"}:
+        raise HelperError("Unexpected field")
+    root = nixos_config_root(data_dir, guest_id)
+    configuration = body.get("configuration")
+    if configuration is not None:
+        if not isinstance(configuration, str):
+            raise HelperError("Unknown action")
+        if "\0" in configuration:
+            raise HelperError("The configuration can’t contain null bytes")
+        if len(configuration) > NIXOS_CONFIG_MAX:
+            raise HelperError("That configuration is too large (512 KB max)")
+        if configuration and not configuration.endswith("\n"):
+            configuration += "\n"
+        cfg_path = os.path.join(root, "configuration.nix")
+        require_inside(cfg_path, root)
+        fd = os.open(cfg_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(configuration)
+    cache_conf = body.get("cacheConf")
+    cache_path = os.path.join(root, "nix-cache.conf")
+    if cache_conf is not None:
+        if not isinstance(cache_conf, str):
+            raise HelperError("Unknown action")
+        if cache_conf.strip():
+            text = cache_conf if cache_conf.endswith("\n") else cache_conf + "\n"
+            require_inside(cache_path, root)
+            fd = os.open(cache_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(text)
+        elif os.path.isfile(cache_path):
+            os.remove(cache_path)
+    return json.dumps({"ok": True, "path": root})
+
+
+def do_read_nixos_config(args, data_dir):
+    guest_id = parse_guest_id(args[0])
+    root = nixos_configs_root(data_dir)
+    cfg_path = os.path.join(root, guest_id, "configuration.nix")
+    if not os.path.isfile(cfg_path):
+        return json.dumps({"config": "", "present": False})
+    require_inside(cfg_path, root)
+    with open(cfg_path, encoding="utf-8") as fh:
+        return json.dumps({"config": fh.read(), "present": True})
 
 
 def list_states(run):
@@ -1152,6 +1256,10 @@ def handle(verb, args, stdin=None, run=None, fetch=None, data_dir=None, kvm_path
         return do_ga_exec(args, stdin, run)
     if verb == "ga-status":
         return do_ga_status(args, run)
+    if verb == "write-nixos-config":
+        return do_write_nixos_config(args, stdin, data_dir)
+    if verb == "read-nixos-config":
+        return do_read_nixos_config(args, data_dir)
     raise HelperError("Unknown action")
 
 
