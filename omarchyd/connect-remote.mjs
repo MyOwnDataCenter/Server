@@ -267,6 +267,8 @@ export function createRemoteAccess({
 			hostname: s?.hostname ?? null,
 			configVersion: s?.configVersion ?? null,
 			accessProtected: !!(s?.audience && s?.issuer && s?.certsUrl),
+			// MODC sign-in only: no Cloudflare Access in front; this server's own gate asks for the MODC sign-in.
+			ssoOnly: s?.contractVersion === 2 && s?.protectionMode === 'modc_sso' && s?.sso?.stage === 'sso_only',
 			connectorValidated: s?.connectorValidated === true,
 			syncedAt: state.syncedAt,
 			stale,

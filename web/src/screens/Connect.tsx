@@ -31,6 +31,7 @@ export type RemoteStatus = {
 	hostname: string | null
 	configVersion: string | number | null
 	accessProtected: boolean
+	ssoOnly?: boolean
 	connectorValidated: boolean
 	syncedAt: number | null
 	stale: boolean
@@ -51,7 +52,7 @@ const REMOTE_PROBLEM: Record<string, string> = {
 }
 
 function RemoteSection({r, siteUrl, busy, run, now, confirm}: {r: RemoteStatus; siteUrl: string; busy: boolean; run: (path: string, done?: string) => void; now: number; confirm: ReturnType<typeof useConfirm>}) {
-	const on = r.state === 'enabled' && !r.blocked && !r.stale && r.accessProtected && r.connectorValidated
+	const on = r.state === 'enabled' && !r.blocked && !r.stale && (r.accessProtected || r.ssoOnly === true) && r.connectorValidated
 	const pill: {kind: StatusKind; label: string} = r.blocked ? {kind: 'error', label: 'Blocked here'} : on ? {kind: 'running', label: 'On'} : r.state === 'enabled' ? {kind: 'update', label: 'Paused'} : {kind: 'stopped', label: 'Off'}
 	const openSite = () => window.open(siteUrl, '_blank', 'noopener,noreferrer')
 	const enable = async () => {
@@ -93,10 +94,10 @@ function RemoteSection({r, siteUrl, busy, run, now, confirm}: {r: RemoteStatus; 
 			)}
 			<Group
 				title="Remote access"
-				footer="Turning remote access on is done on myowndatacenter.com, where you approve it. Every remote browser has to get past Cloudflare Access first, then sign in here as usual."
+				footer={r.ssoOnly ? 'Turning remote access on or off is done on myowndatacenter.com. Anyone opening your address must sign in with your MODC account (email or Google) first.' : 'Turning remote access on is done on myowndatacenter.com, where you approve it. Every remote browser has to get past Cloudflare Access first, then sign in here as usual.'}
 			>
 				<Row icon="link" color="var(--accent)" label="Remote access" value={<StatusPill kind={pill.kind} label={pill.label} />} sub={r.hostname ? <span className="mono connect-host">{r.hostname}</span> : undefined} />
-				<Row icon="shield" color="var(--green)" label="Access protection" value={r.accessProtected ? 'Cloudflare Access' : 'Not set up'} />
+				<Row icon="shield" color="var(--green)" label="Sign-in" value={r.ssoOnly ? 'Your MODC account' : r.accessProtected ? 'Cloudflare Access' : 'Not set up'} />
 				<Row icon="check" color="var(--teal)" label="Connector checked" value={r.connectorValidated ? 'Yes' : 'Not yet'} />
 				<Row
 					icon="history"
@@ -203,7 +204,7 @@ function TunnelSection({t, busy, run, now}: {t: TunnelStatus; busy: boolean; run
 				footer={
 					<>
 						{t.remoteAccess
-							? 'Remote access is on: Cloudflare Access stands in front of your address, then your MODC sign-in. This server checks that Access is there before it runs the connector.'
+							? 'Remote access is on: anyone opening your address meets a sign-in before anything on this server. This server checks that from outside before it runs the connector.'
 							: 'Remote access is off: the tunnel is deny-all, so every request to your address gets a 404, and nothing on this server is reachable from the internet.'}
 						{otherNames.length > 0 && ` Your own cloudflared (${otherNames.join(', ')}) is separate and left alone.`}
 					</>
@@ -257,8 +258,8 @@ function TunnelSection({t, busy, run, now}: {t: TunnelStatus; busy: boolean; run
 					icon="shield"
 					color="var(--green)"
 					label="Remote access"
-					value={!t.remoteAccess ? 'Off · deny-all' : t.accessVerified ? 'On · Access checked' : 'On · not checked'}
-					sub={t.remoteAccess ? 'Cloudflare Access is in front; then your MODC sign-in' : undefined}
+					value={!t.remoteAccess ? 'Off · deny-all' : t.accessVerified ? 'On · sign-in checked' : 'On · not checked'}
+					sub={t.remoteAccess ? 'Strangers meet a sign-in before anything on this server' : undefined}
 				/>
 				<Row icon="restart" color="var(--accent)" label="Check now" disabled={busy} onClick={() => run('connect.tunnel.check', 'Checked')} />
 			</Group>
