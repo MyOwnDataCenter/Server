@@ -112,6 +112,7 @@ export async function startOmarchyd({port = 2021, host = '127.0.0.1', dataDir, t
 		connector: {
 			pair: (input) => connector.procedures['swarm.pair'].run(input),
 			list: () => connector.procedures['swarm.list'].run(),
+			call: (id, name, args, timeout) => connector.call(id, name, args, timeout),
 			caCertificate: () => connector.caCertificate(),
 		},
 		...containerOptions,

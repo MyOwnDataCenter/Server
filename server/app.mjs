@@ -114,6 +114,7 @@ export const ALLOWED = {
 	'appStore.repositories': 'query',
 	'machines.list': 'query',
 	'containers.status': 'query',
+	'containers.hostStatus': 'query',
 	'containers.list': 'query',
 	'containers.images': 'query',
 	'containers.create': 'mutation',

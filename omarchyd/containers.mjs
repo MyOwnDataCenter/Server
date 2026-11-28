@@ -31,6 +31,12 @@ import {
 	writeConfiguration,
 } from './nixos-config.mjs'
 import {RpcError} from './rpc.mjs'
+import {
+	normalizeHostId,
+	parseRemoteContainerList,
+	remoteContainerCall,
+	remoteHostStatus,
+} from './remote-containers.mjs'
 
 const NAME = /^[a-z]([a-z0-9-]{0,61}[a-z0-9])?$/
 const SNAPSHOT = /^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$/
@@ -216,6 +222,7 @@ export function execIncus(bin, args, {timeout = 60_000, input, binary = false, o
  * @param {number[]} [o.reservedPorts] this server's own ports, never handed to a container
  * @param {string} [o.backupsDir] where container backups are kept
  * @param {{resolve: (virtual: string, o: {mustExist: boolean}) => Promise<{real: string}>}} [o.files] the server's Files, to copy files in and out
+ * @param {{pair?: Function, list?: Function, call?: Function, caCertificate?: Function}} [o.connector] local swarm for connector install and remote Incus
  * @param {string} [o.dataDir] MODC data dir (NixOS config shares live under `{dataDir}/nixos-configs/`)
  */
 export function createContainers({run = defaultRun, reservedPorts = [], user = os.userInfo().username, backupsDir = null, files = null, dataDir = null, now = Date.now, connector = null, connectorEnrollTimeoutMs = 10 * 60_000} = {}) {
@@ -261,6 +268,21 @@ export function createContainers({run = defaultRun, reservedPorts = [], user = o
 		jobs.delete(n)
 	}
 
+	async function listedAgents() {
+		if (!connector?.list) return []
+		try {
+			return (await connector.list()).filter((a) => a?.id && !a.guestOf && !a.containerOf)
+		} catch {
+			return []
+		}
+	}
+
+	async function hostStatus(input = {}) {
+		const hostId = normalizeHostId(input.hostId)
+		if (hostId === 'server') return status()
+		return remoteHostStatus({connector, agents: await listedAgents(), hostId})
+	}
+
 	async function status() {
 		let out
 		try {
@@ -295,7 +317,7 @@ export function createContainers({run = defaultRun, reservedPorts = [], user = o
 		}
 	}
 
-	async function list() {
+	async function localList() {
 		expire(pending)
 		expire(jobs)
 		const rows = (await raw()).map((c) => {
@@ -304,13 +326,48 @@ export function createContainers({run = defaultRun, reservedPorts = [], user = o
 			// Incus lists a new container (stopped) before `launch` has started it. Until launch
 			// finishes it's still being created: no Start button to race it.
 			const p = pending.get(row.name)
-			if (p && !p.error) return {...row, job: p.what, error: null, progress: p.progress ?? null, startedAt: p.startedAt ?? null}
-			return {...row, job: j && !j.error ? j.what : null, error: j?.error ?? null}
+			if (p && !p.error) return {...row, hostId: 'server', job: p.what, error: null, progress: p.progress ?? null, startedAt: p.startedAt ?? null}
+			return {...row, hostId: 'server', job: j && !j.error ? j.what : null, error: j?.error ?? null}
 		})
 		for (const [n, p] of pending)
 			if (!rows.some((r) => r.name === n))
-				rows.push({...containerFrom({name: n, status: p.error ? 'error' : p.what}), os: p.os ?? '', release: p.release ?? '', job: null, error: p.error ?? null, from: p.from ?? null, pending: true, progress: p.error ? null : (p.progress ?? null), startedAt: p.startedAt ?? null})
+				rows.push({
+					...containerFrom({name: n, status: p.error ? 'error' : p.what}),
+					hostId: 'server',
+					os: p.os ?? '',
+					release: p.release ?? '',
+					job: null,
+					error: p.error ?? null,
+					from: p.from ?? null,
+					pending: true,
+					progress: p.error ? null : (p.progress ?? null),
+					startedAt: p.startedAt ?? null,
+				})
+		return rows
+	}
+
+	async function list() {
+		const rows = await localList()
+		if (!connector?.call) return rows.sort((a, b) => a.name.localeCompare(b.name))
+		for (const agent of await listedAgents()) {
+			if (!agent.online) continue
+			try {
+				const remoteRaw = await remoteContainerCall(connector, agent.id, 'lxc-list', {}, 30_000)
+				for (const c of parseRemoteContainerList(remoteRaw))
+					rows.push({...containerFrom(c), hostId: agent.id, job: null, error: null})
+			} catch {
+				/* skip unreachable hosts */
+			}
+		}
 		return rows.sort((a, b) => a.name.localeCompare(b.name))
+	}
+
+	async function containerHost(name) {
+		if ((await raw()).some((c) => c.name === name)) return 'server'
+		if (!connector?.call) return 'server'
+		const row = (await list()).find((c) => c.name === name)
+		if (!row) throw new RpcError('NOT_FOUND', 'No such container')
+		return row.hostId || 'server'
 	}
 
 	async function images({refresh = false, all: everything = false} = {}) {
@@ -405,6 +462,7 @@ export function createContainers({run = defaultRun, reservedPorts = [], user = o
 
 	async function create(input = {}) {
 		const n = name(input.name)
+		const hostId = normalizeHostId(input.hostId)
 		const image = String(input.image ?? '')
 		let source
 		let meta = {}
@@ -447,6 +505,26 @@ export function createContainers({run = defaultRun, reservedPorts = [], user = o
 		}
 		const cred = secrets(input)
 		if (pending.has(n) && !pending.get(n).error) throw new RpcError('CONFLICT', `${n} is already being created`)
+		if (hostId !== 'server') {
+			if (image.startsWith('template:')) throw new RpcError('BAD_REQUEST', 'Templates on another computer aren’t supported yet. Use a library image.')
+			if (nixos) throw new RpcError('PRECONDITION_FAILED', 'NixOS containers on another computer aren’t supported yet. Use Debian or Alpine for now.')
+			if ((await list()).some((c) => c.name === n)) throw new RpcError('CONFLICT', `There’s already a container named ${n}`)
+			const remote = await remoteHostStatus({connector, agents: await listedAgents(), hostId})
+			if (!remote.available) {
+				const who = remote.hostName || 'That computer'
+				throw new RpcError('PRECONDITION_FAILED', `${who} needs Incus set up first. ${remote.reason} Run ${remote.setupCommand ?? setupCommand()} on ${who}.`)
+			}
+			const launchConfig = [...config]
+			if (nixos) launchConfig.push('security.nesting=true', 'user.modc.nixos=true')
+			await remoteContainerCall(
+				connector,
+				hostId,
+				'lxc-launch',
+				{name: n, source, configs: launchConfig, diskGiB},
+				30 * 60_000,
+			)
+			return {name: n, hostId}
+		}
 		if ((await raw()).some((c) => c.name === n)) throw new RpcError('CONFLICT', `There’s already a container named ${n}`)
 		const shareRoot = nixos ? nixosShare() : null
 		// Downloading a system the first time takes a while: the list shows it as being created.
@@ -477,8 +555,21 @@ export function createContainers({run = defaultRun, reservedPorts = [], user = o
 		return {name: n}
 	}
 
+	const remotePower = {start: 'lxc-start', stop: 'lxc-stop', restart: 'lxc-restart', forceStop: 'lxc-stop'}
 	const power = (verb) => async (input = {}) => {
 		const n = name(input.name)
+		const hostId = await containerHost(n)
+		if (hostId !== 'server') {
+			const call = remotePower[verb]
+			if (!call) throw new RpcError('PRECONDITION_FAILED', 'That isn’t available on a remote container yet.')
+			try {
+				await remoteContainerCall(connector, hostId, call, {name: n}, verb === 'restart' ? 90_000 : 120_000)
+			} catch (error) {
+				if (verb === 'stop' && error instanceof RpcError) throw new RpcError('PRECONDITION_FAILED', `STOP_TIMED_OUT: ${n} didn’t shut down within a minute. Force stop turns it off straight away.`)
+				throw error
+			}
+			return {ok: true}
+		}
 		jobs.get(n)?.error && jobs.delete(n)
 		if (verb === 'start') await incus(['start', n])
 		else if (verb === 'restart') await incus(['restart', n, '--timeout', '60'], {timeout: 90_000})
@@ -494,6 +585,7 @@ export function createContainers({run = defaultRun, reservedPorts = [], user = o
 
 	async function remove(input = {}) {
 		const n = name(input.name)
+		const hostId = await containerHost(n)
 		if (pending.get(n)?.error) {
 			pending.delete(n)
 			return {ok: true}
@@ -501,6 +593,11 @@ export function createContainers({run = defaultRun, reservedPorts = [], user = o
 		notBusy(n)
 		// Protection is enforced by Incus too; this gives the reason in plain words.
 		if ((await list()).find((c) => c.name === n)?.protected) throw new RpcError('PRECONDITION_FAILED', `${n} is protected. Turn off Protection first.`)
+		if (hostId !== 'server') {
+			await remoteContainerCall(connector, hostId, 'lxc-delete', {name: n}, 120_000)
+			samples.delete(n)
+			return {ok: true}
+		}
 		await incus(['delete', n, '--force'], {timeout: 120_000})
 		samples.delete(n)
 		return {ok: true}
@@ -967,6 +1064,7 @@ export function createContainers({run = defaultRun, reservedPorts = [], user = o
 		writeFile,
 		procedures: {
 			'containers.status': {kind: 'query', run: status},
+			'containers.hostStatus': {kind: 'query', run: hostStatus},
 			'containers.list': {kind: 'query', run: list},
 			'containers.images': {kind: 'query', run: (input) => images(input ?? {})},
 			'containers.templates': {kind: 'query', run: templates},
