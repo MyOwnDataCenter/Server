@@ -136,6 +136,7 @@ export function Home({onOpenApp}: {onOpenApp: (app: UserApp) => void; go: (tab: 
 						id: c.name,
 						name: c.name,
 						state: containerState(c),
+						hostId: c.hostId,
 						connector: !!containerAgent(swarm.data ?? [], c.name),
 					}),
 				),

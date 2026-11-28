@@ -213,6 +213,7 @@ export function Machines({onOpenApp, onTerminal, windowId, prefs, setPrefs}: {on
 						id: c.name,
 						name: c.name,
 						state: containerState(c),
+						hostId: c.hostId,
 						connector: !!containerAgent(agents, c.name),
 					}),
 				),

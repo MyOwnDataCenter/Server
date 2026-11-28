@@ -1,7 +1,7 @@
 // Containers (LXC, run by Incus in its per-user mode) on this server: the library of Linux systems
 // and your own templates, and each container's power, terminal, resources, start-with-server,
 // ports, snapshots, backups, files, notes and protection. Owner-only, like the server's terminal.
-import {Suspense, lazy, useEffect, useRef, useState, type ReactNode} from 'react'
+import {Suspense, lazy, useEffect, useMemo, useRef, useState, type ReactNode} from 'react'
 import {useMutation, useQuery, useQueryClient} from '@tanstack/react-query'
 
 import {mutate, query} from '../api'
@@ -15,7 +15,7 @@ import {MachineActions} from '../fleet/machineActions'
 import {MachineTabs} from '../fleet/MachineTabs'
 import {openStore} from '../fleet/openStore'
 import {PinButton} from '../fleet/PinButton'
-import {containerAgent, linuxConnectorOs} from '../swarm/guestLink'
+import {containerAgent, isContainerAgent, isGuestAgent, linuxConnectorOs} from '../swarm/guestLink'
 import {agentMay, useSwarm} from '../swarm/Swarm'
 import {NixosConfigPanel} from '../nixos/NixosConfigPanel'
 import {isNixosOs, NIXOS_EXAMPLE_LXC} from '../nixos/example'
@@ -56,6 +56,7 @@ export type Container = {
 	progress?: string | null
 	startedAt?: string | null
 	nixos?: boolean
+	hostId?: string
 }
 type Distro = {os: string; name: string; releases: {alias: string; release: string; description: string}[]}
 type Template = {alias: string; name: string; os: string; release: string; size: number; from: string}
@@ -167,7 +168,7 @@ export function ContainersPanel({serverName}: {serverName: string}) {
 
 	const rows = list.data ?? []
 	const current = open ? rows.find((c) => c.name === open) : null
-	if (creating) return <CreateContainer onDone={() => setCreating(false)} existing={rows.map((c) => c.name)} />
+	if (creating) return <CreateContainer onDone={() => setCreating(false)} existing={rows.map((c) => c.name)} serverName={serverName} />
 	return (
 		<>
 			{list.isLoading ? (
@@ -207,7 +208,7 @@ export function NewContainerSheet({onClose}: {onClose: () => void}) {
 				) : status.isError ? (
 					<p className="quiet">{(status.error as Error).message}</p>
 				) : (
-					<CreateContainer onDone={onClose} existing={(list.data ?? []).map((c) => c.name)} backLabel="Close" />
+					<CreateContainer onDone={onClose} existing={(list.data ?? []).map((c) => c.name)} backLabel="Close" serverName={undefined} />
 				)}
 			</div>
 		</Sheet>
@@ -300,7 +301,69 @@ function SwitchRow({label, sub, on, onChange, disabled}: {label: string; sub?: R
 	)
 }
 
-function CreateContainer({onDone, existing, backLabel = 'LXC containers'}: {onDone: () => void; existing: string[]; backLabel?: string}) {
+type CreateHost = {id: string; name: string}
+
+function HostPick({host, online, onPick}: {host: CreateHost; online: boolean; onPick: () => void}) {
+	const remote = host.id !== SERVER_FLEET_ID
+	const status = useQuery({
+		queryKey: ['containers.hostStatus', host.id],
+		queryFn: () => query<ContainerStatus>('containers.hostStatus', remote ? {hostId: host.id} : undefined),
+		enabled: remote && online,
+		staleTime: 60_000,
+	})
+	const unavailable = remote && status.data && !status.data.available
+	const setupReason = status.data && !status.data.available ? status.data.reason : ''
+	const sub = !online ? 'Offline right now' : unavailable ? setupReason : remote ? 'Joined computer' : 'This server'
+	return (
+		<Row
+			icon="machine"
+			label={host.name}
+			sub={sub}
+			onClick={() => online && !unavailable && (haptic(6), onPick())}
+			trailing={!online || unavailable ? <span className="quiet">Unavailable</span> : undefined}
+		/>
+	)
+}
+
+function HostStatusRow({host, onBack}: {host: CreateHost; onBack: () => void}) {
+	const remote = host.id !== SERVER_FLEET_ID
+	const status = useQuery({
+		queryKey: ['containers.hostStatus', host.id],
+		queryFn: () => query<ContainerStatus>('containers.hostStatus', remote ? {hostId: host.id} : undefined),
+		enabled: remote,
+		staleTime: 60_000,
+	})
+	if (!remote) return null
+	if (status.isLoading) return <div className="skeleton" style={{height: 56, borderRadius: 12}} />
+	if (status.isError) return <p className="quiet">{(status.error as Error).message}</p>
+	if (status.data && !status.data.available)
+		return (
+			<>
+				<Row icon="back" label={`Back to hosts`} onClick={onBack} />
+				<SetUp status={status.data} onCheck={() => status.refetch()} checking={status.isFetching} />
+			</>
+		)
+	return null
+}
+
+function CreateContainer({
+	onDone,
+	existing,
+	backLabel = 'LXC containers',
+	serverName = 'This server',
+}: {
+	onDone: () => void
+	existing: string[]
+	backLabel?: string
+	serverName?: string
+}) {
+	const swarm = useSwarm()
+	const computers = (swarm.data ?? []).filter((a) => !isGuestAgent(a) && !isContainerAgent(a))
+	const hosts = useMemo<CreateHost[]>(
+		() => [{id: SERVER_FLEET_ID, name: serverName}, ...computers.map((a) => ({id: a.id, name: a.name}))],
+		[computers, serverName],
+	)
+	const [host, setHost] = useState<CreateHost | null>(hosts.length > 1 ? null : hosts[0])
 	const [everything, setEverything] = useState(false)
 	const library = useQuery({queryKey: ['containers.images', everything], queryFn: () => query<Distro[]>('containers.images', {all: everything}), staleTime: 30 * 60_000, retry: false})
 	const mine = useQuery({queryKey: ['containers.templates'], queryFn: () => query<Template[]>('containers.templates'), retry: false})
@@ -341,6 +404,13 @@ function CreateContainer({onDone, existing, backLabel = 'LXC containers'}: {onDo
 	const nixosImage = image ? isNixosOs(image.os) : false
 	const nameProblem = nameProblemOf(name, existing)
 	const pick = (id: string, label: string, os: string, suggested: string) => (haptic(6), setImage({id, label, os}), setName(name || suggested))
+	const remote = host?.id !== SERVER_FLEET_ID
+	const hostReady = useQuery({
+		queryKey: ['containers.hostStatus', host?.id ?? SERVER_FLEET_ID],
+		queryFn: () => query<ContainerStatus>('containers.hostStatus', remote ? {hostId: host!.id} : undefined),
+		enabled: !!host && remote,
+		staleTime: 60_000,
+	})
 	const create = () =>
 		action.mutate(
 			{
@@ -354,56 +424,80 @@ function CreateContainer({onDone, existing, backLabel = 'LXC containers'}: {onDo
 					autostart,
 					rootPassword: password || undefined,
 					sshKey: sshKey.trim() || undefined,
-					...(nixosImage && nixosConfig.trim() ? {nixosConfig} : {}),
+					...(host && host.id !== SERVER_FLEET_ID ? {hostId: host.id} : {}),
+					...(nixosImage && !remote && nixosConfig.trim() ? {nixosConfig} : {}),
 				},
 				done: `Creating ${name}. The first container of a system takes a minute to download.`,
 			},
 			{onSuccess: onDone},
 		)
+	if (!host) {
+		return (
+			<div className="ct-col" style={{display: 'grid', gridTemplateColumns: 'minmax(0, 1fr)', gap: 12, minWidth: 0}}>
+				<div style={{display: 'flex', alignItems: 'center', gap: 8}}>
+					<button type="button" className="btn small" onClick={onDone}>
+						<Icon name={backLabel === 'Close' ? 'close' : 'back'} size={15} /> {backLabel}
+					</button>
+					<b>Where should it run?</b>
+				</div>
+				<Group title="Host">
+					{hosts.map((h) => (
+						<HostPick key={h.id} host={h} online={h.id === SERVER_FLEET_ID || !!computers.find((a) => a.id === h.id)?.online} onPick={() => setHost(h)} />
+					))}
+				</Group>
+			</div>
+		)
+	}
+	const remoteBlocked = remote && hostReady.data && !hostReady.data.available
 	return (
 		<div className="ct-col" style={{display: 'grid', gridTemplateColumns: 'minmax(0, 1fr)', gap: 12, minWidth: 0}}>
 			<div style={{display: 'flex', alignItems: 'center', gap: 8}}>
-				<button type="button" className="btn small" onClick={onDone}>
-					<Icon name={backLabel === 'Close' ? 'close' : 'back'} size={15} /> {backLabel}
+				<button type="button" className="btn small" onClick={hosts.length > 1 ? () => setHost(null) : onDone}>
+					<Icon name={hosts.length > 1 ? 'back' : backLabel === 'Close' ? 'close' : 'back'} size={15} /> {hosts.length > 1 ? 'Hosts' : backLabel}
 				</button>
-				<b>New LXC container</b>
+				<b>New LXC container{hosts.length > 1 ? ` on ${host.name}` : ''}</b>
 			</div>
-			{!image ? (
+			{remoteBlocked ? <HostStatusRow host={host} onBack={() => setHost(null)} /> : null}
+			{!remoteBlocked && !image ? (
 				<>
-					{!!mine.data?.length && (
+					{!remote && !!mine.data?.length && (
 						<Group title="Your templates">
 							{mine.data.map((t) => (
 								<Row key={t.alias} icon="save" color={osColor(t.os)} label={t.name} sub={[osLabel(t), t.from && `from ${t.from}`, t.size ? bytes(t.size) : ''].filter(Boolean).join(' · ')} onClick={() => pick(`template:${t.alias}`, t.name, t.os, `${t.name}-1`)} />
 							))}
 						</Group>
 					)}
-					<Group title="Template files on this server" footer="Container templates in your Home folder, like a Proxmox CT template (.tar.zst, .tar.xz, .tar.gz) or an Incus image. Importing one adds it to Your templates. Images made for Incus or LXD work best; a Proxmox template may need its network set up inside.">
-						{importing.map((i) => (
-							<Row key={i.template} icon="save" label={i.error ? `${i.template}: couldn’t import` : `Importing ${i.template}…`} sub={i.error ?? i.file} />
-						))}
-						{(tplFiles.data?.files ?? []).map((f) => (
-							<Row
-								key={f.path}
-								icon="zip"
-								label={f.name}
-								sub={`${bytes(f.size)} · ${f.path.replace(/^\/Home\//, '')}`}
-								trailing={
-									<button type="button" className="btn small" onClick={() => importFile(f.path)}>
-										Import
-									</button>
-								}
+					{!remote ? (
+						<>
+							<Group title="Template files on this server" footer="Container templates in your Home folder, like a Proxmox CT template (.tar.zst, .tar.xz, .tar.gz) or an Incus image. Importing one adds it to Your templates. Images made for Incus or LXD work best; a Proxmox template may need its network set up inside.">
+								{importing.map((i) => (
+									<Row key={i.template} icon="save" label={i.error ? `${i.template}: couldn’t import` : `Importing ${i.template}…`} sub={i.error ?? i.file} />
+								))}
+								{(tplFiles.data?.files ?? []).map((f) => (
+									<Row
+										key={f.path}
+										icon="zip"
+										label={f.name}
+										sub={`${bytes(f.size)} · ${f.path.replace(/^\/Home\//, '')}`}
+										trailing={
+											<button type="button" className="btn small" onClick={() => importFile(f.path)}>
+												Import
+											</button>
+										}
+									/>
+								))}
+								{!tplFiles.isLoading && !tplFiles.data?.files.length && !importing.length && <p className="quiet" style={{padding: '4px 12px'}}>None yet.</p>}
+							</Group>
+							<AddFile
+								what="a template"
+								accept=".gz,.xz,.zst,.bz2,.tgz,.txz"
+								linkProcedure="containers.downloadTemplate"
+								linkPlaceholder="https://…/debian-12-standard_amd64.tar.zst"
+								downloads={tplFiles.data?.downloads ?? []}
+								onAdded={() => qc.invalidateQueries({queryKey: ['containers.templateFiles']})}
 							/>
-						))}
-						{!tplFiles.isLoading && !tplFiles.data?.files.length && !importing.length && <p className="quiet" style={{padding: '4px 12px'}}>None yet.</p>}
-					</Group>
-					<AddFile
-						what="a template"
-						accept=".gz,.xz,.zst,.bz2,.tgz,.txz"
-						linkProcedure="containers.downloadTemplate"
-						linkPlaceholder="https://…/debian-12-standard_amd64.tar.zst"
-						downloads={tplFiles.data?.downloads ?? []}
-						onAdded={() => qc.invalidateQueries({queryKey: ['containers.templateFiles']})}
-					/>
+						</>
+					) : null}
 					<div className="glass group" style={{padding: '2px 0'}}>
 						<SwitchRow label="Show every system" sub="All of Incus’s library, not only the main ones." on={everything} onChange={setEverything} />
 					</div>
@@ -423,17 +517,22 @@ function CreateContainer({onDone, existing, backLabel = 'LXC containers'}: {onDo
 						))
 					)}
 				</>
-			) : (
+			) : !remoteBlocked && image ? (
 				<div className="glass group" style={{padding: '12px 14px'}}>
 					<Row icon="category" color={osColor(image.os)} label={image.label} sub="Change" onClick={() => setImage(null)} />
 					<TextField id="ct-name" label="Name" value={name} onChange={(v) => setName(v.toLowerCase())} hint={name && nameProblem} />
 					<TextField id="ct-cpu" label="CPUs" value={cpus} onChange={setCpus} numeric />
 					<TextField id="ct-mem" label="Memory (MB)" value={memory} onChange={setMemory} numeric />
 					<TextField id="ct-disk" label="Disk (GB)" value={disk} onChange={setDisk} numeric />
-					<SwitchRow label="Start with the server" sub="Starts by itself after the server restarts." on={autostart} onChange={setAutostart} />
+					<SwitchRow
+						label={remote ? 'Start with the computer' : 'Start with the server'}
+						sub={remote ? 'Starts by itself after that computer restarts.' : 'Starts by itself after the server restarts.'}
+						on={autostart}
+						onChange={setAutostart}
+					/>
 					<TextField id="ct-pw" label="Root password (optional)" type="password" value={password} onChange={setPassword} hint="For signing in on this container or over SSH. It isn’t stored by My Own Data Center." />
 					<TextField id="ct-key" label="SSH public key (optional)" value={sshKey} onChange={setSshKey} placeholder="ssh-ed25519 AAAA… you@laptop" area hint="Added for root. Install an SSH server inside to use it." />
-					{nixosImage ? (
+					{nixosImage && !remote ? (
 						<TextField
 							id="ct-nixos-config"
 							label="NixOS configuration"
@@ -444,11 +543,12 @@ function CreateContainer({onDone, existing, backLabel = 'LXC containers'}: {onDo
 							hint="Optional. Saved on this server and mounted into the container; the guest applies it on boot."
 						/>
 					) : null}
-					<button type="button" className="btn block" style={{marginTop: 8}} disabled={!!nameProblem || action.isPending} onClick={create}>
+					{remote && nixosImage ? <p className="quiet">NixOS containers on another computer aren’t supported yet.</p> : null}
+					<button type="button" className="btn block" style={{marginTop: 8}} disabled={!!nameProblem || action.isPending || (remote && nixosImage)} onClick={create}>
 						{action.isPending ? <span className="spinner" /> : <Icon name="plus" size={18} />} Create container
 					</button>
 				</div>
-			)}
+			) : null}
 		</div>
 	)
 }
