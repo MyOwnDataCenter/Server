@@ -36,6 +36,7 @@ import {
 	parseRemoteContainerList,
 	remoteContainerCall,
 	remoteHostStatus,
+	requireContainersGrant,
 } from './remote-containers.mjs'
 
 const NAME = /^[a-z]([a-z0-9-]{0,61}[a-z0-9])?$/
@@ -368,12 +369,29 @@ export function createContainers({run = defaultRun, reservedPorts = [], user = o
 		return rows.sort((a, b) => a.name.localeCompare(b.name))
 	}
 
-	async function containerHost(name) {
-		if ((await raw()).some((c) => c.name === name)) return 'server'
+	async function containerHost(n, preferredHostId) {
+		if (preferredHostId !== undefined && preferredHostId !== null && String(preferredHostId).trim() !== '') {
+			const hostId = normalizeHostId(preferredHostId)
+			if (hostId === 'server') {
+				if (!(await raw()).some((c) => c.name === n)) throw new RpcError('NOT_FOUND', 'No such container')
+				return 'server'
+			}
+			const row = (await list()).find((c) => c.name === n && c.hostId === hostId)
+			if (!row) throw new RpcError('NOT_FOUND', 'No such container on that computer')
+			return hostId
+		}
+		if ((await raw()).some((c) => c.name === n)) return 'server'
 		if (!connector?.call) return 'server'
-		const row = (await list()).find((c) => c.name === name)
+		const row = (await list()).find((c) => c.name === n)
 		if (!row) throw new RpcError('NOT_FOUND', 'No such container')
 		return row.hostId || 'server'
+	}
+
+	async function remoteAgent(hostId) {
+		const agent = (await listedAgents()).find((a) => a.id === hostId)
+		if (!agent) throw new RpcError('NOT_FOUND', 'That computer isn’t in your swarm')
+		requireContainersGrant(agent)
+		return agent
 	}
 
 	async function images({refresh = false, all: everything = false} = {}) {
@@ -459,8 +477,12 @@ export function createContainers({run = defaultRun, reservedPorts = [], user = o
 		const cfg = c?.config ?? {}
 		return bool(cfg['user.modc.nixos']) || isNixosOs(cfg['image.os'])
 	}
-	async function requireNixosContainer(n) {
-		const row = (await list()).find((c) => c.name === n)
+	async function requireNixosContainer(n, preferredHostId) {
+		const rows = await list()
+		const row =
+			preferredHostId !== undefined && preferredHostId !== null && String(preferredHostId).trim() !== ''
+				? rows.find((c) => c.name === n && (c.hostId || 'server') === normalizeHostId(preferredHostId))
+				: rows.find((c) => c.name === n)
 		if (!row) throw new RpcError('NOT_FOUND', 'No such container')
 		if (!row.nixos) throw new RpcError('BAD_REQUEST', 'That container isn’t a NixOS guest.')
 		return row
@@ -499,8 +521,10 @@ export function createContainers({run = defaultRun, reservedPorts = [], user = o
 		if (hostId !== 'server') {
 			if (cred.password || cred.key) throw new RpcError('PRECONDITION_FAILED', 'Set the root password and SSH key on this server. A container on another computer keeps the sign-in that image ships with.')
 			if (image.startsWith('template:')) throw new RpcError('BAD_REQUEST', 'Templates on another computer aren’t supported yet. Use a library image.')
-			if ((await list()).some((c) => c.name === n)) throw new RpcError('CONFLICT', `There’s already a container named ${n}`)
-			const remote = await remoteHostStatus({connector, agents: await listedAgents(), hostId})
+			const agents = await listedAgents()
+			await remoteAgent(hostId)
+			if ((await list()).some((c) => c.name === n && (c.hostId === hostId || c.hostId === 'server'))) throw new RpcError('CONFLICT', `There’s already a container named ${n}`)
+			const remote = await remoteHostStatus({connector, agents, hostId})
 			if (!remote.available) {
 				const who = remote.hostName || 'That computer'
 				throw new RpcError('PRECONDITION_FAILED', `${who} needs Incus set up first. ${remote.reason} Run ${remote.setupCommand ?? setupCommand()} on ${who}.`)
@@ -573,8 +597,9 @@ export function createContainers({run = defaultRun, reservedPorts = [], user = o
 	const remotePower = {start: 'lxc-start', stop: 'lxc-stop', restart: 'lxc-restart', forceStop: 'lxc-force-stop'}
 	const power = (verb) => async (input = {}) => {
 		const n = name(input.name)
-		const hostId = await containerHost(n)
+		const hostId = await containerHost(n, input.hostId)
 		if (hostId !== 'server') {
+			await remoteAgent(hostId)
 			const call = remotePower[verb]
 			if (!call) throw new RpcError('PRECONDITION_FAILED', 'That isn’t available on a remote container yet.')
 			try {
@@ -600,15 +625,16 @@ export function createContainers({run = defaultRun, reservedPorts = [], user = o
 
 	async function remove(input = {}) {
 		const n = name(input.name)
-		const hostId = await containerHost(n)
+		const hostId = await containerHost(n, input.hostId)
 		if (pending.get(n)?.error) {
 			pending.delete(n)
 			return {ok: true}
 		}
 		notBusy(n)
 		// Protection is enforced by Incus too; this gives the reason in plain words.
-		if ((await list()).find((c) => c.name === n)?.protected) throw new RpcError('PRECONDITION_FAILED', `${n} is protected. Turn off Protection first.`)
+		if ((await list()).find((c) => c.name === n && (c.hostId || 'server') === hostId)?.protected) throw new RpcError('PRECONDITION_FAILED', `${n} is protected. Turn off Protection first.`)
 		if (hostId !== 'server') {
+			await remoteAgent(hostId)
 			await remoteContainerCall(connector, hostId, 'lxc-delete', {name: n}, 120_000)
 			samples.delete(n)
 			return {ok: true}
@@ -1048,9 +1074,10 @@ export function createContainers({run = defaultRun, reservedPorts = [], user = o
 
 	async function nixosConfig(input = {}) {
 		const n = name(input.name)
-		await requireNixosContainer(n)
-		const hostId = await containerHost(n)
+		await requireNixosContainer(n, input.hostId)
+		const hostId = await containerHost(n, input.hostId)
 		if (hostId !== 'server') {
+			await remoteAgent(hostId)
 			const out = await remoteContainerCall(connector, hostId, 'lxc-read-config', {name: n}, 30_000)
 			return JSON.parse(String(out))
 		}
@@ -1058,11 +1085,12 @@ export function createContainers({run = defaultRun, reservedPorts = [], user = o
 	}
 	async function setNixosConfig(input = {}) {
 		const n = name(input.name)
-		await requireNixosContainer(n)
+		await requireNixosContainer(n, input.hostId)
 		const checked = validateNixosConfig(input.config ?? '')
 		if (!checked.ok) throw new RpcError('BAD_REQUEST', checked.error)
-		const hostId = await containerHost(n)
+		const hostId = await containerHost(n, input.hostId)
 		if (hostId !== 'server') {
+			await remoteAgent(hostId)
 			const cache = await readNixCache(nixosShare())
 			await remoteContainerCall(
 				connector,
@@ -1071,7 +1099,7 @@ export function createContainers({run = defaultRun, reservedPorts = [], user = o
 				{name: n, configuration: checked.config, cacheConf: nixCacheConfText(cache)},
 				60_000,
 			)
-			return nixosConfig({name: n})
+			return nixosConfig({name: n, hostId})
 		}
 		const root = nixosShare()
 		try {
@@ -1085,8 +1113,8 @@ export function createContainers({run = defaultRun, reservedPorts = [], user = o
 	}
 	async function applyNixosConfig(input = {}) {
 		const n = name(input.name)
-		if (input.config !== undefined && input.config !== null) await setNixosConfig({name: n, config: input.config})
-		else await requireNixosContainer(n)
+		if (input.config !== undefined && input.config !== null) await setNixosConfig({name: n, config: input.config, hostId: input.hostId})
+		else await requireNixosContainer(n, input.hostId)
 		return power('restart')(input)
 	}
 

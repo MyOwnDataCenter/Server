@@ -27,7 +27,7 @@ test('containers.hostStatus on a remote computer surfaces setup when Incus is mi
 	const mod = createContainers({
 		run: async () => JSON.stringify({environment: {server_version: '6.8', project: 'user-1000'}}),
 		connector: {
-			list: async () => [{id: hostId, name: 'Kitchen', online: true}],
+			list: async () => [{id: hostId, name: 'Kitchen', online: true, allowed: {containers: true}, on: {containers: true}}],
 			call: async (id, name, args, timeout) => {
 				calls.push({id, name, args, timeout})
 				if (name === 'lxc-status') return JSON.stringify({available: false, reason: 'Incus isn’t installed on this computer yet.', setupCommand: 'machines-add-lxc'})
@@ -51,7 +51,7 @@ test('create on a remote host refuses when Incus is unavailable', async () => {
 			return ''
 		},
 		connector: {
-			list: async () => [{id: hostId, name: 'Garage', online: true}],
+			list: async () => [{id: hostId, name: 'Garage', online: true, allowed: {containers: true}, on: {containers: true}}],
 			call: async (id, name) => {
 				if (name === 'lxc-status') return JSON.stringify({available: false, reason: 'No Incus', setupCommand: 'machines-add-lxc'})
 				if (name === 'lxc-list') return '[]'
@@ -86,7 +86,7 @@ test('remote create refuses a root password instead of dropping it', async () =>
 			return ''
 		},
 		connector: {
-			list: async () => [{id: hostId, name: 'Garage', online: true}],
+			list: async () => [{id: hostId, name: 'Garage', online: true, allowed: {containers: true}, on: {containers: true}}],
 			call: async (id, name, args) => {
 				calls.push(name)
 				if (name === 'lxc-status') return JSON.stringify({available: true, version: '6'})
@@ -135,7 +135,7 @@ test('list merges local and remote containers with hostId', async () => {
 			return JSON.stringify({environment: {}})
 		},
 		connector: {
-			list: async () => [{id: hostId, name: 'Loft', online: true}],
+			list: async () => [{id: hostId, name: 'Loft', online: true, allowed: {containers: true}, on: {containers: true}}],
 			call: async (id, name) => {
 				if (name === 'lxc-list') return JSON.stringify(remote)
 				return '[]'
@@ -178,7 +178,7 @@ test('remote NixOS create writes config on host then launches with share', async
 			return ''
 		},
 		connector: {
-			list: async () => [{id: hostId, name: 'Kitchen', online: true}],
+			list: async () => [{id: hostId, name: 'Kitchen', online: true, allowed: {containers: true}, on: {containers: true}}],
 			call: async (id, name, args) => {
 				calls.push({id, name, args})
 				if (name === 'lxc-status') return JSON.stringify({available: true, version: '6', project: 'default'})
@@ -217,5 +217,64 @@ test('remoteHostStatus requires an online agent', async () => {
 				hostId: 'abcdabcdabcd',
 			}),
 		(err) => err.code === 'PRECONDITION_FAILED',
+	)
+})
+test('remote create refuses when System containers was not granted', async () => {
+	const hostId = 'abcdabcdabcd'
+	const calls = []
+	const mod = createContainers({
+		run: async (args) => {
+			if (args[0] === 'list') return '[]'
+			if (args[0] === 'image') return JSON.stringify([DEB_IMG])
+			return ''
+		},
+		connector: {
+			list: async () => [{id: hostId, name: 'Den', online: true, allowed: {containers: false}, on: {containers: false}}],
+			call: async (id, name) => {
+				calls.push(name)
+				throw new Error('unexpected ' + name)
+			},
+		},
+	})
+	await assert.rejects(
+		() =>
+			mod.procedures['containers.create'].run({
+				hostId,
+				name: 'web',
+				image: 'debian/12',
+				diskGiB: 8,
+			}),
+		(err) => err.code === 'FORBIDDEN' && /System containers/.test(err.message),
+	)
+	assert.deepEqual(calls, [])
+})
+
+test('power with hostId targets that host when the same name exists twice', async () => {
+	const hostA = 'aaaaaaaaaaaa'
+	const hostB = 'bbbbbbbbbbbb'
+	const row = (status) => ({name: 'web', type: 'container', status, config: {}, devices: {}, state: {network: {}}})
+	const calls = []
+	const mod = createContainers({
+		run: async (args) => {
+			if (args[0] === 'list') return '[]'
+			return ''
+		},
+		connector: {
+			list: async () => [
+				{id: hostA, name: 'A', online: true, allowed: {containers: true}, on: {containers: true}},
+				{id: hostB, name: 'B', online: true, allowed: {containers: true}, on: {containers: true}},
+			],
+			call: async (id, name, args) => {
+				calls.push({id, name, args})
+				if (name === 'lxc-list') return JSON.stringify([row(id === hostA ? 'Stopped' : 'Running')])
+				if (name === 'lxc-start') return ''
+				throw new Error('unexpected ' + name)
+			},
+		},
+	})
+	await mod.procedures['containers.start'].run({name: 'web', hostId: hostB})
+	assert.deepEqual(
+		calls.filter((c) => c.name === 'lxc-start').map((c) => c.id),
+		[hostB],
 	)
 })

@@ -34,7 +34,8 @@ import {fanoutWake} from './wol.mjs'
 // services: inspect and restart user systemd units and Podman/Docker containers.
 // files: browse, upload, download, and copy files inside /Home and /Pools (and Clip Book home streaming).
 // vms: create and run virtual machines on that computer (connector/vm-helper.py).
-const ABILITIES = ['terminal', 'desktop', 'manage', 'storage', 'backup', 'services', 'files', 'vms']
+// containers: create and run system containers (Incus) on that computer (connector/lxc-helper.py).
+const ABILITIES = ['terminal', 'desktop', 'manage', 'storage', 'backup', 'services', 'files', 'vms', 'containers']
 const REMOTE_FILE_MAX = 20 * 1024 * 1024
 const PAIR_TTL = 15 * 60_000
 // A viewer that stops reading must not queue connector frames in memory without a bound.
@@ -67,7 +68,16 @@ function closeSocket(ws, code, reason) {
 }
 // Same sentence a refused new connection gets, so an open session ends with that reason too.
 function switchedOff(name, ability) {
-	const what = ability === 'terminal' ? 'The terminal' : ability === 'files' ? 'Files' : ability === 'vms' ? 'Virtual machines' : 'The desktop'
+	const what =
+		ability === 'terminal'
+			? 'The terminal'
+			: ability === 'files'
+				? 'Files'
+				: ability === 'vms'
+					? 'Virtual machines'
+					: ability === 'containers'
+						? 'System containers'
+						: 'The desktop'
 	return `${what} isn’t switched on for ${name}`
 }
 function closeLiveChannel(l, ch, reason) {

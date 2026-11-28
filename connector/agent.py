@@ -58,7 +58,7 @@ except ImportError:
     fcntl = pty = pwd = termios = None
 
 VERSION = "1"
-ABILITY_NAMES = ("terminal", "desktop", "manage", "storage", "backup", "services", "files", "vms")
+ABILITY_NAMES = ("terminal", "desktop", "manage", "storage", "backup", "services", "files", "vms", "containers")
 # A file channel sends this much, then waits until the server has that many chunks. The socket
 # read loop stays free to take acks, so a large file cannot stall the terminal or the desktop.
 FILE_CHUNK = 64 * 1024
@@ -3400,7 +3400,7 @@ def vm_call(name, args, allowed, spawn=None, stdin=None, progress=None):
     return (out_rest or "").strip()
 
 
-# System containers (Incus per-user on this computer). No separate ability flag.
+# System containers (ability "containers"). Incus per-user on this computer.
 LXC_ACTIONS = {
     "lxc-status": "status",
     "lxc-list": "list",
@@ -3440,7 +3440,9 @@ def _lxc_spawn(argv, stdin=None):
     return err, out
 
 
-def lxc_call(name, args, spawn=None, stdin=None):
+def lxc_call(name, args, allowed, spawn=None, stdin=None):
+    if not (allowed or {}).get("containers"):
+        raise RuntimeError("This computer doesn’t allow system containers")
     verb = LXC_ACTIONS.get(name)
     if not verb:
         raise RuntimeError("Unknown action")
@@ -4589,7 +4591,7 @@ class Connection:
                     progress=lambda p: self.send({"op": "progress", "id": msg.get("id"), "percent": p, "step": "download"}),
                 )
             elif name in LXC_ACTIONS or str(name).startswith("lxc-"):
-                data = lxc_call(name, msg.get("args") or {})
+                data = lxc_call(name, msg.get("args") or {}, allowed=self.allowed)
             elif name in STORAGE_ACTIONS or str(name).startswith("storage-"):
                 if not self.allowed.get("storage"):
                     raise RuntimeError("This computer doesn’t allow Storage")

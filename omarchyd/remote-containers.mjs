@@ -37,11 +37,30 @@ export async function remoteContainerCall(connector, hostId, name, args = {}, ti
 	}
 }
 
+export function agentMayContainers(agent) {
+	return !!(agent?.allowed?.containers && agent?.on?.containers)
+}
+
+/** Refuse remote container work when System containers wasn’t granted (or is switched off). */
+export function requireContainersGrant(agent) {
+	const hostName = agent?.name || 'that computer'
+	if (!agentMayContainers(agent)) throw new RpcError('FORBIDDEN', `Pair ${hostName} again with System containers switched on.`)
+}
+
 export async function remoteHostStatus({connector, agents, hostId, requireOnline = true}) {
 	const agent = (agents ?? []).find((a) => a.id === hostId)
 	if (!agent) throw new RpcError('NOT_FOUND', 'That computer isn’t in your swarm')
 	const hostName = agent.name || 'that computer'
 	if (requireOnline && !agent.online) throw new RpcError('PRECONDITION_FAILED', `${hostName} is offline right now`)
+	if (!agentMayContainers(agent)) {
+		return {
+			available: false,
+			containersAllowed: false,
+			reason: `Pair ${hostName} again with System containers switched on.`,
+			setupCommand: REMOTE_CONTAINER_SETUP,
+			hostName,
+		}
+	}
 	const raw = await remoteContainerCall(connector, hostId, 'lxc-status', {}, 30_000)
-	return {...readLxcStatus(raw), hostName}
+	return {...readLxcStatus(raw), containersAllowed: true, hostName}
 }

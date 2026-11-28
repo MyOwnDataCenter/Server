@@ -874,7 +874,8 @@ export function ContainerDetail({c, all, onBack, onOpen}: {c: Container; all: Co
 	const [agentTerm, setAgentTerm] = useState(false)
 	const pill = containerPill(c)
 	const busy = action.isPending || pill.kind === 'busy' || installing || c.job === 'installing connector'
-	const run = (path: string, done?: string, extra: Record<string, unknown> = {}) => action.mutate({path, input: {name: c.name, ...extra}, done})
+	const hostInput = c.hostId && c.hostId !== SERVER_FLEET_ID ? {hostId: c.hostId} : {}
+	const run = (path: string, done?: string, extra: Record<string, unknown> = {}) => action.mutate({path, input: {name: c.name, ...hostInput, ...extra}, done})
 	const taken = all.map((x) => x.name)
 	const canInstall = owner && c.status === 'running' && !agent && linux && swarm.isFetched
 	useEffect(() => {
@@ -915,7 +916,7 @@ export function ContainerDetail({c, all, onBack, onOpen}: {c: Container; all: Co
 
 	const stop = () =>
 		action.mutate(
-			{path: 'containers.stop', input: {name: c.name}, done: `${c.name} is shut down`},
+			{path: 'containers.stop', input: {name: c.name, ...hostInput}, done: `${c.name} is shut down`},
 			{
 				onError: async (e) => {
 					if (!/STOP_TIMED_OUT/.test(e.message)) return
@@ -955,7 +956,7 @@ export function ContainerDetail({c, all, onBack, onOpen}: {c: Container; all: Co
 			)}
 			{placeholder ? (
 				c.status === 'error' ? (
-					<button className="btn block" onClick={() => action.mutate({path: 'containers.delete', input: {name: c.name}}, {onSuccess: onBack})}>
+					<button className="btn block" onClick={() => action.mutate({path: 'containers.delete', input: {name: c.name, ...hostInput}}, {onSuccess: onBack})}>
 						<Icon name="close" size={18} /> Dismiss
 					</button>
 				) : (
@@ -1163,12 +1164,12 @@ export function ContainerDetail({c, all, onBack, onOpen}: {c: Container; all: Co
 													onApply={() =>
 														action.mutate({
 															path: 'containers.applyNixosConfig',
-															input: {name: c.name},
+															input: {name: c.name, ...hostInput},
 															done: 'Restarting so the container picks up the configuration',
 														})
 													}
-													readConfig={() => query<{config: string; present: boolean}>('containers.nixosConfig', {name: c.name})}
-													saveConfig={(config) => mutate('containers.setNixosConfig', {name: c.name, config})}
+													readConfig={() => query<{config: string; present: boolean}>('containers.nixosConfig', {name: c.name, ...hostInput})}
+													saveConfig={(config) => mutate('containers.setNixosConfig', {name: c.name, ...hostInput, config})}
 												/>
 											),
 										},
@@ -1222,7 +1223,7 @@ export function ContainerDetail({c, all, onBack, onOpen}: {c: Container; all: Co
 						disabled={action.isPending || c.protected || !!c.job}
 						onClick={async () => {
 							if (!(await confirm({title: `Delete ${c.name}?`, body: 'The container, its files and its snapshots are deleted. Backups stay. This can’t be undone.', confirm: 'Delete container', danger: true, icon: 'alert'}))) return
-							action.mutate({path: 'containers.delete', input: {name: c.name}, done: `${c.name} deleted`}, {onSuccess: onBack})
+							action.mutate({path: 'containers.delete', input: {name: c.name, ...hostInput}, done: `${c.name} deleted`}, {onSuccess: onBack})
 						}}
 					>
 						<Icon name="trash" size={18} /> {c.protected ? 'Protected from deleting' : 'Delete container'}

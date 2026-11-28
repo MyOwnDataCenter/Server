@@ -114,7 +114,7 @@ test('pairing a system container keeps the connector linked with containerOf', a
 			)
 			const {token, expiresAt} = await swarm.procedures['swarm.pair'].run({containerOf: 'web', terminal: true, files: true, backup: true, manage: true})
 			assert.equal(expiresAt, now + 6 * 60 * 60_000)
-			const joined = await swarm.enroll({token, info: {hostname: 'web', environment: 'lxc'}, abilities: {terminal: true, files: true, backup: true, manage: true, desktop: false, storage: false, vms: false}})
+			const joined = await swarm.enroll({token, info: {hostname: 'web', environment: 'lxc'}, abilities: {terminal: true, files: true, backup: true, manage: true, desktop: false, storage: false, vms: false, containers: false}})
 			assert.equal(joined.status, 200)
 			const [agent] = await swarm.procedures['swarm.list'].run()
 			assert.equal(agent.containerOf, 'web')
