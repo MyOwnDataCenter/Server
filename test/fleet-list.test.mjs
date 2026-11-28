@@ -79,6 +79,21 @@ test('fleetList includes containers hosted on this server', () => {
 	assert.equal(fleetAbility(c, 'terminal').granted, true)
 	assert.equal(fleetAbility(c, 'apps').granted, true)
 	assert.equal(fleetAbility(c, 'backups').granted, true)
+	const paused = fleetList({
+		server: {name: 'Den'},
+		computers: [],
+		guests: [],
+		containers: [containerFleetInput({id: 'db', name: 'db', state: 'frozen'})],
+	}).find((m) => m.kind === 'container')
+	assert.equal(paused?.online, false)
+	assert.match(paused?.meta ?? '', /paused/)
+	const starting = fleetList({
+		server: {name: 'Den'},
+		computers: [],
+		guests: [],
+		containers: [containerFleetInput({id: 'app', name: 'app', state: 'starting'})],
+	}).find((m) => m.kind === 'container')
+	assert.match(starting?.meta ?? '', /Starting/)
 })
 
 test('vms is granted only when the computer is online, allowed, on, and libvirt is there', () => {

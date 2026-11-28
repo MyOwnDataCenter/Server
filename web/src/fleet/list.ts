@@ -94,6 +94,14 @@ function guestAbilities(row: GuestFleetInput): FleetAbility[] {
 	]
 }
 
+function containerStatusWord(state: string): string {
+	if (state === 'running') return 'online'
+	if (state === 'frozen') return 'paused'
+	if (state === 'stopped' || !state) return 'offline'
+	if (state === 'error') return 'error'
+	return state.charAt(0).toUpperCase() + state.slice(1)
+}
+
 function containerAbilities(row: ContainerFleetInput): FleetAbility[] {
 	const name = row.name
 	const on = !!row.connector
@@ -178,7 +186,7 @@ export function fleetList(input: {
 			online,
 			entrypoint: false,
 			hostId: row.hostId || SERVER_FLEET_ID,
-			meta: `Container · ${online ? 'online' : 'offline'}`,
+			meta: `Container · ${containerStatusWord(row.state)}`,
 			abilities: containerAbilities(row),
 		}
 	})

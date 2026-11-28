@@ -415,7 +415,7 @@ function CreateContainer({onDone, existing, backLabel = 'LXC containers'}: {onDo
 					<TextField id="ct-mem" label="Memory (MB)" value={memory} onChange={setMemory} numeric />
 					<TextField id="ct-disk" label="Disk (GB)" value={disk} onChange={setDisk} numeric />
 					<SwitchRow label="Start with the server" sub="Starts by itself after the server restarts." on={autostart} onChange={setAutostart} />
-					<TextField id="ct-pw" label="Root password (optional)" type="password" value={password} onChange={setPassword} hint="For signing in from the container’s own console or over SSH. The terminal here doesn’t need it. It isn’t stored by My Own Data Center." />
+					<TextField id="ct-pw" label="Root password (optional)" type="password" value={password} onChange={setPassword} hint="For signing in on this container or over SSH. It isn’t stored by My Own Data Center." />
 					<TextField id="ct-key" label="SSH public key (optional)" value={sshKey} onChange={setSshKey} placeholder="ssh-ed25519 AAAA… you@laptop" area hint="Added for root. Install an SSH server inside to use it." />
 					<button type="button" className="btn block" style={{marginTop: 8}} disabled={!!nameProblem || action.isPending} onClick={create}>
 						{action.isPending ? <span className="spinner" /> : <Icon name="plus" size={18} />} Create container
@@ -436,7 +436,7 @@ function EmbeddedConsole({name, onFull}: {name: string; onFull: () => void}) {
 				ref={setEl}
 				className="ct-console"
 				style={{position: 'relative', height: 340, borderRadius: 16, overflow: 'hidden', transform: 'translateZ(0)', background: '#000'}}
-				aria-label={`${name}’s console`}
+				aria-label={`${name} Terminal`}
 			>
 				{el && on && (
 					<PortalRoot.Provider value={el}>
@@ -448,7 +448,7 @@ function EmbeddedConsole({name, onFull}: {name: string; onFull: () => void}) {
 				)}
 				{!on && (
 					<button type="button" className="btn small" style={{position: 'absolute', inset: 0, margin: 'auto', width: 'fit-content', height: 'fit-content'}} onClick={() => setOn(true)}>
-						<Icon name="window" size={15} /> Show the console
+						<Icon name="terminal" size={15} /> Show Terminal
 					</button>
 				)}
 			</div>
@@ -877,7 +877,7 @@ export function ContainerDetail({c, all, onBack, onOpen}: {c: Container; all: Co
 						<EmbeddedConsole name={c.name} onFull={() => setTerm('console')} />
 					) : (
 						<div className="glass" style={{padding: 16, minWidth: 0}}>
-							<span className="quiet">Start {c.name} to see its console.</span>
+							<span className="quiet">Start {c.name} to open Terminal.</span>
 						</div>
 					)}
 					{agentTerm && agent && (
@@ -1009,7 +1009,7 @@ export function ContainerDetail({c, all, onBack, onOpen}: {c: Container; all: Co
 								: []),
 							{id: 'options', label: 'Options', body: (<div className="ct-col" style={{display: 'grid', gridTemplateColumns: 'minmax(0, 1fr)', gap: 12, minWidth: 0}}>
 					<Boot key={`${c.bootOrder}-${c.bootDelay}`} c={c} busy={busy} run={run} />
-					<Group title="Signing in" footer="The console is the container’s own screen, like Proxmox’s: sign in there as root with the password set here.">
+					<Group title="Signing in" footer="Terminal on this container is its own login. Sign in there as root with the password set here.">
 						<div style={{display: 'flex', flexWrap: 'wrap', gap: 8, padding: '10px 12px', alignItems: 'end'}}>
 							<div style={{flex: '1 1 160px', minWidth: 0}}>
 								<TextField id="ct-pw2" label="Root password" type="password" value={pw} onChange={setPw} placeholder="8 characters or more" />

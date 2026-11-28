@@ -319,9 +319,12 @@ export function Machines({onOpenApp, onTerminal, windowId, prefs, setPrefs}: {on
 					}}
 				/>
 			)}
-			{selectedContainer && (
-				<ContainerSheet c={selectedContainer} all={containerRows} onClose={() => setContainerId(null)} onOpen={(name) => setContainerId(name)} />
-			)}
+			{selectedContainer &&
+				(wide ? (
+					<ContainerDetail c={selectedContainer} all={containerRows} onBack={() => setContainerId(null)} onOpen={(name) => setContainerId(name)} />
+				) : (
+					<ContainerSheet c={selectedContainer} all={containerRows} onClose={() => setContainerId(null)} onOpen={(name) => setContainerId(name)} />
+				))}
 			<LocalSwarm
 				bare={wide}
 				hideList
