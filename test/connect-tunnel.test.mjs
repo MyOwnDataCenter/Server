@@ -8,7 +8,7 @@ import {join} from 'node:path'
 import {test} from 'node:test'
 
 import {createConnect, CONNECT_API} from '../omarchyd/connect.mjs'
-import {UNIT, parseVersion, unitText, versionAtLeast} from '../omarchyd/connect-tunnel.mjs'
+import {PROBE_PATHS, UNIT, parseVersion, probeAnswer, unitText, versionAtLeast} from '../omarchyd/connect-tunnel.mjs'
 
 const SECRET = 'a'.repeat(64)
 const CRED = 'b'.repeat(64)
@@ -503,7 +503,7 @@ function protectedRoute(t, probe = () => new Response('', {status: 302, headers:
 	t.site.over['GET /api/public/cloud/tunnel/status'] = () => json(200, PROD_STATUS(t.site.health))
 	const tokenAnswer = () => json(200, {token_type: 'cloudflared_tunnel_token', tunnel_token: t.site.token, issued_at: new Date(t.site.clock()).toISOString(), tunnel_id: TUNNEL, tunnel_name: `modc-${CENTER}`, hostname: 'nodezero.myowndatacenter.com', data_center_id: CENTER, device_id: DEVICE, ingress: 'protected_route', remote_access: true})
 	t.site.over['POST /api/public/cloud/tunnel/token'] = tokenAnswer
-	for (const p of ['/', '/api/health', '/api/rpc/user.get']) t.site.over[`GET https://nodezero.myowndatacenter.com${p}`] = (c) => probe(p, c)
+	for (const p of PROBE_PATHS) t.site.over[`GET https://nodezero.myowndatacenter.com${p}`] = (c) => probe(p, c)
 }
 
 test('production’s protected route: runs once this server sees Cloudflare Access in front of every probed path', async () => {
@@ -654,4 +654,80 @@ test('contract v2 (SSO only): runs only when this server’s own sign-in gate an
 	} finally {
 		await t.cleanup()
 	}
+})
+
+// The website switches between Cloudflare Access and this server's gate (and a new address answers 404
+// until its route goes live). Every one of those keeps strangers out, so the connector keeps running
+// through them; before, a v2 server saw Access still in front, called it unprotected and shut down in the
+// middle of the website's own checks (the 2026-11-25 failed activation).
+function v2Status(t) {
+	t.site.over['GET /api/public/cloud/tunnel/status'] = () => {
+		const b = PROD_STATUS(t.site.health)
+		b.remote_access.security = {contract_version: 2, protection_mode: 'modc_sso'}
+		return json(200, b)
+	}
+}
+const accessLogin = () => new Response('', {status: 302, headers: {location: ACCESS_LOGIN}})
+const gated = () => new Response('{}', {status: 401, headers: {'x-modc-gate': 'sso_only'}})
+for (const [name, probe] of [
+	['Cloudflare Access still in front while the website prepares the gate', accessLogin],
+	['a new address: the route isn’t live yet (404 catch-all)', () => new Response('', {status: 404})],
+	['halfway through the switch: Access on one path, the gate on the others', (p) => (p === '/api/health' ? accessLogin() : gated())],
+	['the connector not reaching Cloudflare yet (530)', () => new Response('', {status: 530})],
+]) {
+	test(`contract v2 keeps running through a safe answer: ${name}`, async () => {
+		const t = await setup()
+		try {
+			protectedRoute(t, probe)
+			v2Status(t)
+			const s = (await t.call('connect.tunnel.enable')).tunnel
+			assert.equal(s.block, null)
+			assert.equal(t.mach.units[UNIT].active, 'active')
+			t.advance(5 * 60_000)
+			await t.tunnel.tick()
+			assert.equal((await t.connect.status()).tunnel.block, null)
+			assert.equal(t.mach.units[UNIT].active, 'active')
+		} finally {
+			await t.cleanup()
+		}
+	})
+}
+for (const [name, probe] of [
+	['the password sign-in answering (401 without the gate)', () => new Response('{}', {status: 401})],
+	['an open page', () => new Response('{}', {status: 200})],
+	['a redirect that isn’t Cloudflare’s sign-in', () => new Response('', {status: 302, headers: {location: 'https://evil.example/cdn-cgi/access/login/x'}})],
+]) {
+	test(`contract v1 or v2, anything exposed stops the connector and wipes the token: ${name}`, async () => {
+		for (const v2 of [false, true]) {
+			const t = await setup()
+			try {
+				protectedRoute(t)
+				if (v2) v2Status(t)
+				await t.call('connect.tunnel.enable')
+				assert.equal(t.mach.units[UNIT].active, 'active')
+				protectedRoute(t, (p) => (p === '/api/prefs' ? probe() : accessLogin()))
+				if (v2) v2Status(t)
+				t.advance(5 * 60_000)
+				await t.tunnel.tick()
+				const st = (await t.connect.status()).tunnel
+				assert.equal(st.block.code, 'unprotected')
+				assert.match(st.block.detail, /\/api\/prefs answered/)
+				assert.equal(t.mach.units[UNIT].active, 'inactive')
+				assert.equal(await stat(t.tokenFile).catch(() => null), null)
+			} finally {
+				await t.cleanup()
+			}
+		}
+	})
+}
+test('probeAnswer speaks the website’s words', () => {
+	const r = (status, headers = {}) => ({status, headers: new Headers(headers)})
+	assert.equal(probeAnswer(r(302, {location: ACCESS_LOGIN})), 'access')
+	assert.equal(probeAnswer(r(401, {'x-modc-gate': 'sso_only'})), 'gate')
+	assert.equal(probeAnswer(r(404)), 'blocked')
+	assert.equal(probeAnswer(r(530)), 'blocked')
+	assert.equal(probeAnswer(r(401)), 'exposed')
+	assert.equal(probeAnswer(r(421)), 'exposed')
+	assert.equal(probeAnswer(r(200)), 'exposed')
+	assert.equal(probeAnswer(r(404, {'x-modc-gate': 'sso_only'})), 'exposed')
 })

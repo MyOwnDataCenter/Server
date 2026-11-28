@@ -136,9 +136,27 @@ no-autoupdate: true
 `
 
 // Remote access through the tunnel ("protected_route") is only accepted when this server sees for
-// itself that Cloudflare Access guards its address: an unauthenticated request for each of these
-// paths must be sent to the Access sign-in, never reach this server. The label alone isn't trusted.
-export const PROBE_PATHS = ['/', '/api/health', '/api/rpc/user.get']
+// itself that nothing on it answers a stranger: an unauthenticated request for each of these paths
+// must meet a sign-in (Cloudflare Access's, or this server's own gate) or nothing at all. The label
+// alone isn't trusted. '/' isn't probed: behind this server's gate it is the public sign-in page.
+export const PROBE_PATHS = ['/api/health', '/api/prefs', '/api/rpc/user.get']
+// What a stranger's request met, in the same words as the website's checks (modc-v2.ts):
+//   access   Cloudflare Access's sign-in          gate     this server's own sign-in gate (401)
+//   blocked  nothing: the 404 catch-all of a route that isn't there yet, or the connector not reaching
+//            Cloudflare (502/503/504, 52x, 530)
+//   exposed  anything else: something answered without a sign-in
+// Access and the gate can both be in front for a while when the website switches between them, and a
+// new address answers 404 until its route goes live, so all three safe answers are accepted whatever
+// the website says is active; only an exposed answer stops the connector.
+const BLOCKED_STATUS = new Set([404, 502, 503, 504, 520, 521, 522, 523, 524, 525, 526, 527, 530])
+export function probeAnswer(res) {
+	const loc = res.headers?.get?.('location') ?? ''
+	const gate = res.headers?.get?.('x-modc-gate') ?? null
+	if ([301, 302, 303, 307, 308].includes(res.status) && isAccessLogin(loc)) return 'access'
+	if (res.status === 401 && gate === 'sso_only') return 'gate'
+	if (BLOCKED_STATUS.has(res.status) && gate === null) return 'blocked'
+	return 'exposed'
+}
 export const isAccessLogin = (location) => {
 	try {
 		const u = new URL(location)
@@ -424,24 +442,10 @@ export function createTunnel({
 		return false
 	}
 
-	// -> {ok: true} | {ok: false, code: 'unprotected', detail} | {ok: false, code: 'unverified', detail}
-	async function probeAccess(hostname) {
+	// -> {ok: true, seen} | {ok: false, code: 'unprotected', detail} | {ok: false, code: 'unverified', detail}
+	async function probeSafe(hostname) {
+		const seen = new Set()
 		for (const path of PROBE_PATHS) {
-			let res
-			try {
-				res = await fetchImpl(`https://${hostname}${path}`, {method: 'GET', redirect: 'manual', headers: {accept: 'text/html'}, signal: AbortSignal.timeout(15_000)})
-			} catch {
-				return {ok: false, code: 'unverified', detail: `couldn’t reach https://${hostname}${path}`}
-			}
-			const loc = res.headers?.get?.('location') ?? ''
-			res.body?.cancel?.().catch?.(() => {})
-			if (!([301, 302, 303, 307, 308].includes(res.status) && isAccessLogin(loc))) return {ok: false, code: 'unprotected', detail: `${path} answered HTTP ${res.status} without asking for Cloudflare Access`}
-		}
-		return {ok: true}
-	}
-	// SSO only: no Access in front, so this server's own gateway must answer, refusing an unsigned request.
-	async function probeSsoGate(hostname) {
-		for (const path of ['/api/prefs', '/api/rpc/user.get']) {
 			let res
 			try {
 				res = await fetchImpl(`https://${hostname}${path}`, {method: 'GET', redirect: 'manual', headers: {accept: 'application/json'}, signal: AbortSignal.timeout(15_000)})
@@ -449,9 +453,11 @@ export function createTunnel({
 				return {ok: false, code: 'unverified', detail: `couldn’t reach https://${hostname}${path}`}
 			}
 			res.body?.cancel?.().catch?.(() => {})
-			if (!(res.status === 401 && res.headers?.get?.('x-modc-gate') === 'sso_only')) return {ok: false, code: 'unprotected', detail: `${path} answered HTTP ${res.status} without this server’s sign-in gate`}
+			const answer = probeAnswer(res)
+			if (answer === 'exposed') return {ok: false, code: 'unprotected', detail: `${path} answered HTTP ${res.status} without asking anyone to sign in`}
+			seen.add(answer)
 		}
-		return {ok: true}
+		return {ok: true, seen: [...seen].sort()}
 	}
 	// Is what the website set up for this tunnel acceptable to run? Checked on every status read.
 	async function ingressPolicy(snap) {
@@ -460,8 +466,8 @@ export function createTunnel({
 		const ssoOnly = snap.protectionMode === 'modc_sso' && snap.contractVersion === 2
 		const contractOk = snap.protectionMode == null || (snap.protectionMode === 'cloudflare_access' && snap.contractVersion === 1) || ssoOnly
 		if (snap.ingress === 'protected_route' && snap.remoteAccess === true && snap.remoteState === 'enabled' && snap.hostname && contractOk) {
-			const p = ssoOnly ? await probeSsoGate(snap.hostname) : await probeAccess(snap.hostname)
-			return p.ok ? {ok: true, mode: 'protected_route', hostname: snap.hostname, at: now()} : p
+			const p = await probeSafe(snap.hostname)
+			return p.ok ? {ok: true, mode: 'protected_route', hostname: snap.hostname, at: now(), seen: p.seen} : p
 		}
 		return {ok: false, code: 'unsafe', detail: `ingress “${snap.ingress ?? 'none'}”, remote access ${snap.remoteAccess === true ? 'on' : 'off'}`}
 	}
