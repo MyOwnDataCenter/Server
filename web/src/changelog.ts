@@ -4,6 +4,18 @@ export type Release = {version: string; date: string; title: string; added?: str
 
 export const CHANGELOG: Release[] = [
 	{
+		version: '0.9.108',
+		date: '2026-11-28',
+		title: 'The Home icon opens Home, and a system container is a machine',
+		added: [
+			'A system container is a machine. Machines lists it with your computers and virtual machines. It is Online while running, Offline when shut off, and Paused when frozen. On a wide desktop its page sits beside the list. An app from the store stays an app.',
+			'Open the container for Files and Terminal. When its connector is online, Apps and Pin work there too. The owner can install that connector from the container page while the container is running.',
+		],
+		fixed: [
+			'On the desktop, the Home icon opens the Home page. A Home folder shortcut you add after that still opens the folder in Files.',
+		],
+	},
+	{
 		version: '0.9.107',
 		date: '2026-11-27',
 		title: 'An encrypted server can start by itself after a power cut',

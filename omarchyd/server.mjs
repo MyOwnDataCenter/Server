@@ -44,7 +44,7 @@ import {createOsInfo} from './os-info.mjs'
 import {WebSocketServer} from 'ws'
 import {viewerBackpressure} from './backpressure.mjs'
 
-export const OMARCHYD_VERSION = '0.9.107'
+export const OMARCHYD_VERSION = '0.9.108'
 // Written by install.sh when the owner turns on unattended boot: the disk then unlocks itself at boot.
 export const UNATTENDED_BOOT_CONF = '/etc/mkinitcpio.conf.d/zz-modc-unattended.conf'
 
