@@ -9,6 +9,7 @@ import {appUrl, useAction, useApps, useBootstrap, useMachines, useRegistry, useU
 import {isOwner} from '../isOwner'
 import {computerInstallInput, confirmInstallTarget, guestInstallInput, installKindLabel, installTargets, installsOf, machineCountLabel, SERVER_INSTALL_ID, type InstallTarget} from '../fleet/installTargets'
 import {type StoreBinding} from '../fleet/openStore'
+import {isContainerAgent} from '../swarm/guestLink'
 import {BeforeInstall} from '../beforeInstall'
 import {CategoryChips} from '../CategoryChips'
 import {useDesktop} from '../desktop/Desktop'
@@ -93,12 +94,13 @@ export function Store({onOpenInstalled, onBack, onTerminal, bound = null}: {onOp
 	}, [registry.data, storeKey])
 	const boot = useBootstrap()
 	const machines = useMachines()
-	const computers = useQuery({queryKey: ['swarm.list'], queryFn: () => query<{id: string; name: string; online: boolean; guestOf?: string}[]>('swarm.list')})
+	const computers = useQuery({queryKey: ['swarm.list'], queryFn: () => query<{id: string; name: string; online: boolean; guestOf?: string; containerOf?: string}[]>('swarm.list')})
 	const targets = useMemo(
 		() =>
 			installTargets({
 				serverName: boot.server?.device || 'This server',
-				computers: (computers.data ?? []).filter((a) => !a.guestOf).map(computerInstallInput),
+				// System containers are not App Store targets (no Podman on stock LXC images).
+				computers: (computers.data ?? []).filter((a) => !a.guestOf && !isContainerAgent(a)).map(computerInstallInput),
 				guests: (machines.data ?? []).map((m) => guestInstallInput({id: m.id, name: m.name, state: m.state, connector: (computers.data ?? []).some((a) => a.guestOf === m.id && a.online)})),
 			}),
 		[boot.server?.device, computers.data, machines.data],
@@ -601,12 +603,12 @@ function StoreSheet({
 }) {
 	const boot = useBootstrap()
 	const machines = useMachines()
-	const computers = useQuery({queryKey: ['swarm.list'], queryFn: () => query<{id: string; name: string; online: boolean; guestOf?: string; allowed?: {apps?: boolean}; on?: {apps?: boolean}}[]>('swarm.list')})
+	const computers = useQuery({queryKey: ['swarm.list'], queryFn: () => query<{id: string; name: string; online: boolean; guestOf?: string; containerOf?: string; allowed?: {apps?: boolean}; on?: {apps?: boolean}}[]>('swarm.list')})
 	const targets = useMemo(
 		() =>
 			installTargets({
 				serverName: boot.server?.device || 'This server',
-				computers: (computers.data ?? []).filter((a) => !a.guestOf).map(computerInstallInput),
+				computers: (computers.data ?? []).filter((a) => !a.guestOf && !isContainerAgent(a)).map(computerInstallInput),
 				guests: (machines.data ?? []).map((m) => guestInstallInput({id: m.id, name: m.name, state: m.state, connector: (computers.data ?? []).some((a) => a.guestOf === m.id && a.online)})),
 			}),
 		[boot.server?.device, computers.data, machines.data],

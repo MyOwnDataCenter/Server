@@ -1326,6 +1326,7 @@ export function createConnector({dataDir, tlsDir, connectorDir = fileURLToPath(n
 		await loaded
 		const agent = agentForInstall(String(target ?? ''))
 		if (!agent) throw new RpcError('NOT_FOUND', 'That computer isn’t in your swarm')
+		if (containerOf(agent)) throw new RpcError('PRECONDITION_FAILED', 'System containers don’t run the App Store. Install apps on this server, a joined computer, or a virtual machine.')
 		if (!live.has(agent.id)) throw new RpcError('PRECONDITION_FAILED', `${agent.name} is offline, so it can’t take an install.`)
 		const apps = Array.isArray(payload?.apps) ? payload.apps : []
 		if (!apps.length || apps.length > 8) throw new RpcError('BAD_REQUEST', 'Nothing to install')

@@ -75,7 +75,7 @@ Leave out what cannot be done. A virtual machine does not host another virtual m
 
 ### System containers
 
-A system container is a Machines row hosted on this server. Add says Container. Status is Online, Offline, or Paused. The page keeps Incus power, resources, ports, snapshots, export backups, templates, and options. Incus export backups are named as what they are; they are not connector folder backups. Offer Install connector when the image can run Linux with systemd or Alpine OpenRC. With a connector online, Terminal, Pin, Files, Apps, and folder backups follow the grants. Desktop is never offered. Storage (host disks) and nested virtual machines are never offered.
+A system container is a Machines row hosted on this server. Add says Container. Status is Online, Offline, or Paused. The page keeps Incus power, resources, ports, snapshots, export backups, templates, and options. Incus export backups are named as what they are; they are not connector folder backups. Offer Install connector when the image can run Linux with systemd or Alpine OpenRC. With a connector online, Terminal, Pin, Files, and folder backups follow the grants. Apps (the App Store) are not offered on system containers. Desktop is never offered. Storage (host disks) and nested virtual machines are never offered.
 
 ### Without a connector
 
@@ -92,7 +92,7 @@ An application is an application container on one machine.
 - Show it as an app: icon, name, state, and address when it has one.
 - Keep it out of the machine list. It has no drives, no connector, and no desktop of its own.
 - Open the application in the product when it allows that. When it refuses to be embedded, open it in a browser tab.
-- The store names the machine that will receive the install. Opened from a machine, the install targets that machine. Only this server, or a machine whose connector is online, is offered. A virtual machine or a system container can receive an application while its connector is online and the machine is running. The install is sent to that connector. An offline connector is not offered.
+- The store names the machine that will receive the install. Opened from a machine, the install targets that machine. Only this server, or a machine whose connector is online, is offered. A virtual machine can receive an application while its connector is online and the machine is running. The install is sent to that connector. System containers are not offered. An offline connector is not offered.
 - When the same application runs on more than one machine, show one application and a count.
 
 ## Where a control lives
