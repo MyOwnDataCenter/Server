@@ -499,6 +499,96 @@ if [ "$(loginctl show-user "$USER" -p Linger --value 2>/dev/null)" != "yes" ]; t
 	fi
 fi
 
+# --- Unattended boot -------------------------------------------------------------------------------
+# Omarchy encrypts the system disk, so after a restart or power cut the computer waits at the disk
+# password screen and nothing (this server included) can start. If the owner agrees, add a second
+# key to the disk as a file inside the boot image: Omarchy's `encrypt` hook uses /crypto_keyfile.bin
+# automatically, so the disk unlocks itself. The original disk password keeps working. Desktop
+# auto-login is turned off at the same time, so the screen asks for the Linux password instead.
+# Only new zz-modc-* files are written; nothing Omarchy owns is edited, so snapshot booting keeps working.
+MODC_KEYFILE=/crypto_keyfile.bin
+MODC_INITCPIO_CONF=/etc/mkinitcpio.conf.d/zz-modc-unattended.conf
+MODC_SDDM_CONF=/etc/sddm.conf.d/zz-modc-login.conf
+
+# Prints the LUKS partition under / (e.g. /dev/sdb2), or nothing when / isn't encrypted.
+modc_root_luks() {
+	local src
+	src=$(findmnt -no SOURCE / 2>/dev/null | sed 's/\[.*//') || return 0
+	case "$src" in /dev/*) ;; *) return 0 ;; esac
+	lsblk -s -rno PATH,FSTYPE "$src" 2>/dev/null | awk '$2 == "crypto_LUKS" { print $1; exit }' || true
+}
+
+# True when the disk already unlocks without anyone typing (TPM, FIDO key, Clevis, or our key file).
+modc_unlocks_itself() {
+	grep -qE 'tpm2-device|fido2-device' /proc/cmdline /etc/crypttab /etc/crypttab.initramfs 2>/dev/null && return 0
+	[ -e /usr/lib/initcpio/install/clevis ] && return 0
+	[ -f "$MODC_INITCPIO_CONF" ] && return 0
+	return 1
+}
+
+modc_rebuild_boot_image() {
+	if command -v limine-mkinitcpio >/dev/null 2>&1; then sudo limine-mkinitcpio; else sudo mkinitcpio -P; fi
+}
+
+modc_enable_unattended_boot() {
+	local luks="$1"
+	if sudo test -e "$MODC_KEYFILE"; then
+		say "Skipping: $MODC_KEYFILE already exists but isn't set up by My Own Data Center. Leaving it alone."
+		return 0
+	fi
+	say "Creating a disk key for unattended boot"
+	sudo sh -c "umask 077 && dd if=/dev/random of='$MODC_KEYFILE' bs=512 count=4 iflag=fullblock status=none" || {
+		say "Couldn't create the key file. Unattended boot was not turned on."
+		return 0
+	}
+	say "Type your disk password (the one you enter at boot) to add the new key"
+	if ! sudo cryptsetup luksAddKey "$luks" "$MODC_KEYFILE"; then
+		sudo rm -f "$MODC_KEYFILE"
+		say "The disk password wasn't accepted. Unattended boot was not turned on; nothing changed."
+		return 0
+	fi
+	echo "FILES+=($MODC_KEYFILE)" | sudo tee "$MODC_INITCPIO_CONF" >/dev/null
+	say "Rebuilding the boot image (this can take a minute)"
+	if ! modc_rebuild_boot_image; then
+		say "Rebuilding the boot image failed. Undoing the change."
+		sudo rm -f "$MODC_INITCPIO_CONF"
+		sudo cryptsetup luksRemoveKey "$luks" "$MODC_KEYFILE" || true
+		sudo rm -f "$MODC_KEYFILE"
+		if ! modc_rebuild_boot_image; then
+			say "WARNING: the boot image could not be rebuilt. Do not restart this computer. Run 'sudo limine-mkinitcpio' and fix the errors it shows first."
+		fi
+		return 0
+	fi
+	if [ -d /etc/sddm.conf.d ]; then
+		printf '[Autologin]\nUser=\nSession=\n' | sudo tee "$MODC_SDDM_CONF" >/dev/null
+	fi
+	say "Unattended boot is on: after a restart or power cut this server starts by itself."
+	say "The screen now asks for your Linux password. Your disk password still works if the key is ever missing."
+	say "One more step only you can do: in the BIOS, set 'Restore on AC power loss' to 'Power On'."
+}
+
+MODC_LUKS="$(modc_root_luks)"
+if [ -n "$MODC_LUKS" ] && ! modc_unlocks_itself; then
+	if [ "$FROM_APP" = 1 ]; then
+		: # No terminal during in-app updates; the owner turns this on by running the installer.
+	elif ! grep -q 'cryptdevice=' /proc/cmdline; then
+		say "Your disk is encrypted with a boot setup this installer doesn't handle yet, so it will keep asking for the disk password at boot."
+	else
+		printf '\n'
+		say "Your disk is encrypted, so after a restart or power cut this server waits until someone types the disk password at the computer."
+		printf '    Turn on unattended boot? The disk unlocks by itself and the server starts on its own.\n'
+		printf '    The screen will ask for your Linux password instead of logging in automatically.\n'
+		printf '    Trade-off: anyone who takes the computer or its drive could read the data.\n'
+		MODC_ANSWER=""
+		read -r -p "    Turn it on? [y/N] " MODC_ANSWER || MODC_ANSWER=""
+		case "$MODC_ANSWER" in
+			[yY] | [yY][eE][sS]) modc_enable_unattended_boot "$MODC_LUKS" ;;
+			*) say "Left as is. Run the installer again any time to turn this on." ;;
+		esac
+	fi
+fi
+# --- end unattended boot ---------------------------------------------------------------------------
+
 # Everything above succeeded (the script stops at the first error): note which installer ran, so the
 # app knows it's up to date.
 mkdir -p "$BASE/omarchyd"
