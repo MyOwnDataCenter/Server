@@ -7,7 +7,7 @@ import {test} from 'node:test'
 
 import {createConnector} from '../omarchyd/connector.mjs'
 
-const abilities = {terminal: false, desktop: false, manage: true, backup: false, storage: false, services: false, files: false, vms: false}
+const abilities = {terminal: false, desktop: false, manage: true, backup: false, storage: false, services: false, files: false, vms: false, containers: false}
 
 const agent = (extra) => ({
 	id: 'abc123def456',

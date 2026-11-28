@@ -26,7 +26,7 @@ Options:
   --server <url>        Server URL (https://...)
   --ca <fingerprint>    64-char hex SHA-256 fingerprint of the server CA
   --token <code>        One-time pairing token from Machines -> Local swarm
-  --allow <abilities>   Comma-separated abilities (terminal,desktop,manage,storage,backup,services,files)
+  --allow <abilities>   Comma-separated abilities (terminal,desktop,manage,storage,backup,services,files,vms,containers)
   --source <url>        Base URL to download connector files from
   --user-enroll-only    Skip packages, the storage helper and linger (already installed)
   --uninstall           Remove the connector from this computer
@@ -371,6 +371,14 @@ if has vms && [ "$USER_ENROLL_ONLY" != 1 ] && [ "$MAC" != 1 ]; then
 	python_ok "$tmp.vm-helper.py" || die "The downloaded virtual machine helper didn't check out."
 	install -m 700 "$tmp.vm-helper.py" "$DIR/vm-helper.py"
 	rm -f "$tmp.vm-helper.py"
+fi
+
+if has containers && [ "$USER_ENROLL_ONLY" != 1 ] && [ "$MAC" != 1 ] && [ "$OPENRC" != 1 ]; then
+	say "Installing the container helper"
+	fetch_connector "$(connector_url lxc-helper.py)" "$tmp.lxc-helper.py" || die "Couldn't download the container helper."
+	python_ok "$tmp.lxc-helper.py" || die "The downloaded container helper didn't check out."
+	install -m 700 "$tmp.lxc-helper.py" "$DIR/lxc-helper.py"
+	rm -f "$tmp.lxc-helper.py"
 fi
 
 # Linger before the pairing code is used. A noninteractive sudo failure must leave that code unused.

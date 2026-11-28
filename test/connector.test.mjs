@@ -147,6 +147,13 @@ describe('local swarm', {skip: !hasPython && 'python3 is needed'}, () => {
 		assert.equal(p.abilities.storage, true)
 	})
 
+	test('pairing can allow system containers', async () => {
+		const on = await pair({terminal: false, desktop: false, manage: false, containers: true})
+		assert.equal(on.abilities.containers, true)
+		const off = await pair({terminal: true})
+		assert.equal(off.abilities.containers, false)
+	})
+
 	test('pairing can allow virtual machines', async () => {
 		const on = await pair({terminal: false, desktop: false, manage: false, vms: true})
 		assert.equal(on.abilities.vms, true)
@@ -162,11 +169,11 @@ describe('local swarm', {skip: !hasPython && 'python3 is needed'}, () => {
 		assert.equal(name, os.hostname())
 		const cfg = JSON.parse(await readFile(join(agentHome, '.config/omarchy-connector/config.json'), 'utf8'))
 		assert.equal((await stat(join(agentHome, '.config/omarchy-connector/config.json'))).mode & 0o777, 0o600)
-		assert.deepEqual(cfg.abilities, {terminal: true, desktop: false, manage: true, storage: false, backup: false, services: false, files: false, vms: false})
+		assert.deepEqual(cfg.abilities, {terminal: true, desktop: false, manage: true, storage: false, backup: false, services: false, files: false, vms: false, containers: false})
 		// The same code again: refused.
 		await assert.rejects(runAgent(['enroll', server(), p.token, 'terminal']), /isn’t valid any more|already used|expired/)
 		const [a] = await q('swarm.list')
-		assert.deepEqual(a.allowed, {terminal: true, desktop: false, manage: true, storage: false, backup: false, services: false, files: false, vms: false})
+		assert.deepEqual(a.allowed, {terminal: true, desktop: false, manage: true, storage: false, backup: false, services: false, files: false, vms: false, containers: false})
 		assert.equal(a.online, false)
 	})
 

@@ -246,6 +246,147 @@ test('remote define keeps linkDown', async () => {
 	assert.equal(spec.linkDown, true)
 })
 
+test('remote NixOS create writes config on host and mounts via sentinel source', async () => {
+	const calls = []
+	const root = await mkdtemp(join(os.tmpdir(), 'swarm-nixos-'))
+	const arch = os.arch() === 'arm64' ? 'arm64' : 'amd64'
+	const catalog = {
+		version: 1,
+		images: [
+			{
+				id: 'modc-nixos-24.11',
+				familyId: 'nixos',
+				nixos: true,
+				name: 'NixOS',
+				version: '24.11',
+				arch,
+				kind: 'cloud',
+				url: 'https://example.test/nixos.qcow2',
+				sha256: 'ab'.repeat(32),
+				sizeMb: 1,
+				adminGroup: 'wheel',
+			},
+		],
+	}
+	const data = join(root, 'data')
+	await mkdir(data, {recursive: true})
+	const EXAMPLE = `{ config, pkgs, ... }:\n{\n  system.stateVersion = "24.11";\n}\n`
+	const machines = createMachines({
+		dataDir: data,
+		catalogUrl: 'https://example.test/catalog.json',
+		fetchImpl: async () => ({ok: true, json: async () => catalog}),
+		run: async (cmd, args) => {
+			if (cmd === 'openssl') return '$6$salt$hash\n'
+			if (cmd === 'qemu-img' && args?.[0] === '--version') return 'qemu-img version 9\n'
+			if (cmd === 'virsh' && args?.[0] === '--version') return '10.0.0\n'
+			if (cmd === 'virsh') throw new Error('local virsh')
+			return ''
+		},
+		kvmDevice: join(root, 'no-kvm'),
+		isOwner: (ctx) => ctx?.auth?.role === 'owner',
+		connector: {
+			pair: async () => {
+				throw new Error('no pair')
+			},
+			list: async () => [{id: 'abc123abc123', name: 'PC', online: true, allowed: {vms: true}, on: {vms: true}}],
+			progress: () => ({percent: 0.5, step: 'download'}),
+			call: async (id, name, args) => {
+				calls.push({id, name, args})
+				if (name === 'vm-status') return {libvirt: true, kvm: true, arch, threads: 4, memoryMb: 8192, freeGb: 40, videoModels: ['vga']}
+				if (name === 'vm-fetch') return '/images/modc-nixos'
+				if (name === 'vm-write-nixos-config') return JSON.stringify({ok: true, path: '/tmp/share'})
+				return 'ok'
+			},
+		},
+	})
+	await machines.ready
+	const {id} = await machines.procedures['machines.create'].run(
+		{
+			hostId: 'abc123abc123',
+			name: 'NixBox',
+			osId: 'modc-nixos-24.11',
+			cores: 1,
+			memoryGb: 1,
+			diskSizeGb: 8,
+			username: 'chris',
+			password: 'hunter2',
+			nixosConfig: EXAMPLE,
+		},
+		{auth: {role: 'owner'}},
+	)
+	await waitUntil(async () => (await machines.procedures['machines.list'].run()).find((m) => m.id === id)?.state !== 'installing')
+	const row = (await machines.procedures['machines.list'].run()).find((m) => m.id === id)
+	assert.notEqual(row.state, 'error')
+	assert.equal(row.nixos, true)
+	const write = calls.find((c) => c.name === 'vm-write-nixos-config')
+	assert.ok(write)
+	assert.equal(write.args.guestId, id)
+	assert.match(write.args.configuration, /stateVersion/)
+	const define = calls.find((c) => c.name === 'vm-define')
+	assert.equal(define.args.spec.filesystems?.[0]?.source, 'nixos-config')
+	assert.equal(define.args.spec.filesystems?.[0]?.target, 'modc-nixos-config')
+	assert.equal(define.args.spec.filesystems?.[0]?.readonly, true)
+	const localShare = join(data, 'nixos-configs', id, 'configuration.nix')
+	await assert.rejects(() => readFile(localShare), (e) => e.code === 'ENOENT')
+	await rm(root, {recursive: true, force: true})
+})
+
+test('remote NixOS setNixosConfig writes on the host', async () => {
+	const calls = []
+	const root = await mkdtemp(join(os.tmpdir(), 'swarm-nixos-set-'))
+	const data = join(root, 'data')
+	await mkdir(join(data, 'machines'), {recursive: true})
+	const nixBox = {
+		...box,
+		nixos: true,
+		osId: 'modc-nixos-24.11',
+		layout: {
+			firmware: 'bios',
+			machineType: 'q35',
+			nic: 'virtio',
+			video: 'vga',
+			disks: [{id: 'disk0', file: 'disk.qcow2', device: 'disk', bus: 'virtio', format: 'qcow2'}],
+		},
+		boot: ['disk0'],
+	}
+	await writeFile(join(data, 'machines', 'machines.json'), JSON.stringify({machines: [nixBox]}))
+	const machines = createMachines({
+		dataDir: data,
+		run: async () => {
+			throw new Error('local virsh')
+		},
+		kvmDevice: join(root, 'no-kvm'),
+		isOwner: (ctx) => ctx?.auth?.role === 'owner',
+		connector: {
+			pair: async () => {
+				throw new Error('no pair')
+			},
+			list: async () => [{id: 'abc123abc123', name: 'PC', online: true, allowed: {vms: true}, on: {vms: true}}],
+			progress: () => null,
+			call: async (id, name, args) => {
+				calls.push({id, name, args})
+				if (name === 'vm-state') return {'omarchy-abcd1234': 'running'}
+				if (name === 'vm-status') return {libvirt: true, kvm: true, arch: 'amd64', threads: 4, memoryMb: 8192, freeGb: 40, videoModels: ['vga']}
+				if (name === 'vm-write-nixos-config') return JSON.stringify({ok: true, path: '/tmp/share'})
+				if (name === 'vm-read-nixos-config') {
+					return JSON.stringify({config: '{ config, pkgs, ... }:\n{\n  system.stateVersion = "25.05";\n}\n', present: true})
+				}
+				return 'ok'
+			},
+		},
+	})
+	await machines.ready
+	const updated = `{ config, pkgs, ... }:\n{\n  system.stateVersion = "25.05";\n}\n`
+	const got = await machines.procedures['machines.setNixosConfig'].run({id: 'abcd1234', config: updated})
+	const write = calls.find((c) => c.name === 'vm-write-nixos-config')
+	assert.ok(write)
+	assert.equal(write.args.guestId, 'abcd1234')
+	assert.match(write.args.configuration, /25\.05/)
+	assert.equal(got.present, true)
+	assert.match(got.config, /25\.05/)
+	await rm(root, {recursive: true, force: true})
+})
+
 test('port forwards conflict only on the same host', async () => {
 	const calls = []
 	const root = await mkdtemp(join(os.tmpdir(), 'swarm-ports-'))

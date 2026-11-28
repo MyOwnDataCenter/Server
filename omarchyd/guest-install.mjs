@@ -166,7 +166,7 @@ function installParts({source, server, ca, token, allow}) {
 	if (!/^[a-f0-9]{64}$/.test(String(ca ?? ''))) throw new Error('The certificate fingerprint is not valid')
 	if (!/^[A-Za-z0-9_-]{1,200}$/.test(String(token ?? ''))) throw new Error('The pairing code is not valid')
 	const allowList = String(allow ?? '')
-	if (allowList && !/^(?:terminal|desktop|manage|files|storage|backup|services|vms)(?:,(?:terminal|desktop|manage|files|storage|backup|services|vms))*$/.test(allowList)) throw new Error('The permission list is not valid')
+	if (allowList && !/^(?:terminal|desktop|manage|files|storage|backup|services|vms|containers)(?:,(?:terminal|desktop|manage|files|storage|backup|services|vms|containers))*$/.test(allowList)) throw new Error('The permission list is not valid')
 	const src = remote ? given : `${origin}/api/connector`
 	if (!HTTPS_BASE.test(src) && src !== `${origin}/api/connector`) throw new Error('The download address has to be https')
 	const script = remote ? `${src}/main/connector/install.sh` : `${src}/install.sh`

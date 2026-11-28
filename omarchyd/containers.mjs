@@ -12,14 +12,36 @@
 // owner's own templates (a container saved as an image). Small app recipes are the App Store's job.
 
 import {spawn} from 'node:child_process'
+import {createWriteStream} from 'node:fs'
 import {mkdir, mkdtemp, readdir, rm, stat, writeFile as writeFs} from 'node:fs/promises'
+import {pipeline} from 'node:stream/promises'
 import os from 'node:os'
 import {basename, join} from 'node:path'
 
+import {readNixCache} from './nix-cache.mjs'
 import {checkLink, fileNameFor, listDownloads, startDownload} from './download.mjs'
 import {connectorKind} from './guest-install.mjs'
 import {installLxcConnector} from './lxc-install.mjs'
+import {
+	configDir,
+	ensureConfigDir,
+	isNixosOs,
+	MODC_NIXOS_ALIAS,
+	MODC_NIXOS_INCUS_URL,
+	NIXOS_GUEST_MOUNT,
+	readConfiguration,
+	validateNixosConfig,
+	writeCacheFragment,
+	writeConfiguration,
+} from './nixos-config.mjs'
 import {RpcError} from './rpc.mjs'
+import {
+	normalizeHostId,
+	parseRemoteContainerList,
+	remoteContainerCall,
+	remoteHostStatus,
+	requireContainersGrant,
+} from './remote-containers.mjs'
 
 const NAME = /^[a-z]([a-z0-9-]{0,61}[a-z0-9])?$/
 const SNAPSHOT = /^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$/
@@ -45,6 +67,7 @@ export const DISTROS = [
 	{os: 'opensuse', name: 'openSUSE'},
 	{os: 'devuan', name: 'Devuan'},
 	{os: 'gentoo', name: 'Gentoo'},
+	{os: 'nixos', name: 'NixOS'},
 ]
 
 const ARCH = {x64: 'x86_64', arm64: 'aarch64'}[process.arch] ?? process.arch
@@ -111,6 +134,12 @@ export function libraryFrom(images, arch = ARCH, {all = false} = {}) {
 const gib = (bytes) => Math.round((bytes / 1024 ** 3) * 10) / 10
 const bool = (v) => v === true || v === 'true'
 
+function nixCacheConfText({enabled, substituter}) {
+	const sub = String(substituter ?? '').trim()
+	if (!enabled || !sub) return ''
+	return `extra-substituters = ${sub}\n`
+}
+
 /** One container from `incus list --format json`, in the shape the web app shows. */
 export function containerFrom(c) {
 	const cfg = c?.config ?? {}
@@ -155,11 +184,44 @@ export function containerFrom(c) {
 			.map((t) => t.trim())
 			.filter(Boolean),
 		createdAt: c?.created_at ?? null,
+		...(bool(cfg['user.modc.nixos']) || isNixosOs(cfg['image.os']) ? {nixos: true} : {}),
 	}
 }
 
 function defaultRun(args, opts = {}) {
 	return execIncus('incus', args, opts)
+}
+
+async function downloadFile(url, dest, fetchImpl = fetch) {
+	const res = await fetchImpl(url, {redirect: 'follow'})
+	if (!res.ok) throw new Error(`Couldn’t download the MODC NixOS image (${res.status})`)
+	await pipeline(res.body, createWriteStream(dest))
+}
+
+/** Ensure the apply-on-boot MODC Incus image is present as modc/nixos. */
+export async function ensureModcNixosImage({run = defaultRun, fetchImpl = fetch, url = MODC_NIXOS_INCUS_URL} = {}) {
+	try {
+		const listed = JSON.parse(String(await run(['image', 'list', MODC_NIXOS_ALIAS, '--format', 'json'], {timeout: 30_000})))
+		if (Array.isArray(listed) && listed.length) return {ok: true, alias: MODC_NIXOS_ALIAS, imported: false}
+	} catch {
+		/* import below */
+	}
+	const work = await mkdtemp(join(os.tmpdir(), 'modc-nixos-image-'))
+	try {
+		const bundle = join(work, 'bundle.incus.tar.xz')
+		await downloadFile(url, bundle, fetchImpl)
+		await execIncus('tar', ['-xJf', bundle, '-C', work], {timeout: 120_000})
+		const names = await readdir(work)
+		const squash = names.find((n) => n.endsWith('.squashfs'))
+		const meta = names.find((n) => n.endsWith('.tar.xz') && n.includes('metadata')) || names.find((n) => n.endsWith('.tar.xz') && n !== 'bundle.incus.tar.xz')
+		if (!squash || !meta) throw new Error('The MODC NixOS image bundle didn’t contain a squashfs and metadata')
+		await run(['image', 'import', join(work, squash), join(work, meta), '--alias', MODC_NIXOS_ALIAS], {timeout: 10 * 60_000})
+		return {ok: true, alias: MODC_NIXOS_ALIAS, imported: true}
+	} catch (error) {
+		throw new RpcError('PRECONDITION_FAILED', `The MODC NixOS container image isn’t ready: ${error?.message ?? error}`)
+	} finally {
+		await rm(work, {recursive: true, force: true})
+	}
 }
 
 export function execIncus(bin, args, {timeout = 60_000, input, binary = false, onOutput} = {}) {
@@ -203,8 +265,10 @@ export function execIncus(bin, args, {timeout = 60_000, input, binary = false, o
  * @param {number[]} [o.reservedPorts] this server's own ports, never handed to a container
  * @param {string} [o.backupsDir] where container backups are kept
  * @param {{resolve: (virtual: string, o: {mustExist: boolean}) => Promise<{real: string}>}} [o.files] the server's Files, to copy files in and out
+ * @param {{pair?: Function, list?: Function, call?: Function, caCertificate?: Function}} [o.connector] local swarm for connector install and remote Incus
+ * @param {string} [o.dataDir] MODC data dir (NixOS config shares live under `{dataDir}/nixos-configs/`)
  */
-export function createContainers({run = defaultRun, reservedPorts = [], user = os.userInfo().username, backupsDir = null, files = null, now = Date.now, connector = null, connectorEnrollTimeoutMs = 10 * 60_000} = {}) {
+export function createContainers({run = defaultRun, reservedPorts = [], user = os.userInfo().username, backupsDir = null, files = null, dataDir = null, now = Date.now, connector = null, connectorEnrollTimeoutMs = 10 * 60_000, fetchImpl = fetch} = {}) {
 	// Containers that don't exist yet (being created, cloned or restored), and work on existing ones
 	// (backing up, saving as a template, first-time setup). A failure stays visible for 10 minutes.
 	const pending = new Map() // name -> {what, from?, error?, at}
@@ -247,6 +311,21 @@ export function createContainers({run = defaultRun, reservedPorts = [], user = o
 		jobs.delete(n)
 	}
 
+	async function listedAgents() {
+		if (!connector?.list) return []
+		try {
+			return (await connector.list()).filter((a) => a?.id && !a.guestOf && !a.containerOf)
+		} catch {
+			return []
+		}
+	}
+
+	async function hostStatus(input = {}) {
+		const hostId = normalizeHostId(input.hostId)
+		if (hostId === 'server') return status()
+		return remoteHostStatus({connector, agents: await listedAgents(), hostId})
+	}
+
 	async function status() {
 		let out
 		try {
@@ -281,7 +360,7 @@ export function createContainers({run = defaultRun, reservedPorts = [], user = o
 		}
 	}
 
-	async function list() {
+	async function localList() {
 		expire(pending)
 		expire(jobs)
 		const rows = (await raw()).map((c) => {
@@ -290,13 +369,65 @@ export function createContainers({run = defaultRun, reservedPorts = [], user = o
 			// Incus lists a new container (stopped) before `launch` has started it. Until launch
 			// finishes it's still being created: no Start button to race it.
 			const p = pending.get(row.name)
-			if (p && !p.error) return {...row, job: p.what, error: null, progress: p.progress ?? null, startedAt: p.startedAt ?? null}
-			return {...row, job: j && !j.error ? j.what : null, error: j?.error ?? null}
+			if (p && !p.error) return {...row, hostId: 'server', job: p.what, error: null, progress: p.progress ?? null, startedAt: p.startedAt ?? null}
+			return {...row, hostId: 'server', job: j && !j.error ? j.what : null, error: j?.error ?? null}
 		})
 		for (const [n, p] of pending)
 			if (!rows.some((r) => r.name === n))
-				rows.push({...containerFrom({name: n, status: p.error ? 'error' : p.what}), os: p.os ?? '', release: p.release ?? '', job: null, error: p.error ?? null, from: p.from ?? null, pending: true, progress: p.error ? null : (p.progress ?? null), startedAt: p.startedAt ?? null})
+				rows.push({
+					...containerFrom({name: n, status: p.error ? 'error' : p.what}),
+					hostId: 'server',
+					os: p.os ?? '',
+					release: p.release ?? '',
+					job: null,
+					error: p.error ?? null,
+					from: p.from ?? null,
+					pending: true,
+					progress: p.error ? null : (p.progress ?? null),
+					startedAt: p.startedAt ?? null,
+				})
+		return rows
+	}
+
+	async function list() {
+		const rows = await localList()
+		if (!connector?.call) return rows.sort((a, b) => a.name.localeCompare(b.name))
+		for (const agent of await listedAgents()) {
+			if (!agent.online) continue
+			try {
+				const remoteRaw = await remoteContainerCall(connector, agent.id, 'lxc-list', {}, 30_000)
+				for (const c of parseRemoteContainerList(remoteRaw))
+					rows.push({...containerFrom(c), hostId: agent.id, job: null, error: null})
+			} catch {
+				/* skip unreachable hosts */
+			}
+		}
 		return rows.sort((a, b) => a.name.localeCompare(b.name))
+	}
+
+	async function containerHost(n, preferredHostId) {
+		if (preferredHostId !== undefined && preferredHostId !== null && String(preferredHostId).trim() !== '') {
+			const hostId = normalizeHostId(preferredHostId)
+			if (hostId === 'server') {
+				if (!(await raw()).some((c) => c.name === n)) throw new RpcError('NOT_FOUND', 'No such container')
+				return 'server'
+			}
+			const row = (await list()).find((c) => c.name === n && c.hostId === hostId)
+			if (!row) throw new RpcError('NOT_FOUND', 'No such container on that computer')
+			return hostId
+		}
+		if ((await raw()).some((c) => c.name === n)) return 'server'
+		if (!connector?.call) return 'server'
+		const row = (await list()).find((c) => c.name === n)
+		if (!row) throw new RpcError('NOT_FOUND', 'No such container')
+		return row.hostId || 'server'
+	}
+
+	async function remoteAgent(hostId) {
+		const agent = (await listedAgents()).find((a) => a.id === hostId)
+		if (!agent) throw new RpcError('NOT_FOUND', 'That computer isn’t in your swarm')
+		requireContainersGrant(agent)
+		return agent
 	}
 
 	async function images({refresh = false, all: everything = false} = {}) {
@@ -374,35 +505,117 @@ export function createContainers({run = defaultRun, reservedPorts = [], user = o
 		if (key) await execIn('umask 077 && mkdir -p /root/.ssh && cat >> /root/.ssh/authorized_keys', `${key}\n`).catch((e) => Promise.reject(new Error(`Couldn’t add the SSH key: ${e.message}`)))
 	}
 
+	const nixosShare = () => {
+		if (!dataDir) throw new RpcError('PRECONDITION_FAILED', 'Server storage isn’t set up for NixOS configuration shares yet.')
+		return dataDir
+	}
+	const containerIsNixos = (c) => {
+		const cfg = c?.config ?? {}
+		return bool(cfg['user.modc.nixos']) || isNixosOs(cfg['image.os'])
+	}
+	async function requireNixosContainer(n, preferredHostId) {
+		const rows = await list()
+		const row =
+			preferredHostId !== undefined && preferredHostId !== null && String(preferredHostId).trim() !== ''
+				? rows.find((c) => c.name === n && (c.hostId || 'server') === normalizeHostId(preferredHostId))
+				: rows.find((c) => c.name === n)
+		if (!row) throw new RpcError('NOT_FOUND', 'No such container')
+		if (!row.nixos) throw new RpcError('BAD_REQUEST', 'That container isn’t a NixOS guest.')
+		return row
+	}
+
 	async function create(input = {}) {
 		const n = name(input.name)
+		const hostId = normalizeHostId(input.hostId)
 		const image = String(input.image ?? '')
 		let source
 		let meta = {}
+		let osId = ''
 		if (image.startsWith('template:')) {
 			const alias = image.slice(9)
-			if (!TEMPLATE.test(alias) || !(await templates()).some((t) => t.alias === alias)) throw new RpcError('BAD_REQUEST', 'That template isn’t on this server')
+			const tpl = (await templates()).find((t) => t.alias === alias)
+			if (!TEMPLATE.test(alias) || !tpl) throw new RpcError('BAD_REQUEST', 'That template isn’t on this server')
 			source = alias
-			meta = {from: alias.slice(5)}
+			osId = tpl.os
+			meta = {from: alias.slice(5), os: osId, release: tpl.release}
 		} else {
 			if (!ALIAS.test(image)) throw new RpcError('BAD_REQUEST', 'Pick a system from the library')
 			const lib = await images({all: true})
 			if (!lib.some((d) => d.releases.some((r) => r.alias === image))) throw new RpcError('BAD_REQUEST', 'That system isn’t in the library')
 			source = `images:${image}`
-			meta = {os: image.split('/')[0], release: image.split('/')[1]}
+			osId = image.split('/')[0]
+			meta = {os: osId, release: image.split('/')[1]}
 		}
+		const nixos = isNixosOs(osId)
+		if (input.nixosConfig && !nixos) throw new RpcError('BAD_REQUEST', 'NixOS configuration is only for NixOS images.')
 		const config = limits({cpus: input.cpus ?? 1, memoryMiB: input.memoryMiB ?? 1024, ...(input.cpuAllowance !== undefined ? {cpuAllowance: input.cpuAllowance} : {}), ...(input.swap !== undefined ? {swap: input.swap} : {})})
 		const diskGiB = intIn(input.diskGiB ?? 8, 1, 4096, 'Use 1 to 4096 GB of disk')
 		if (input.autostart) config.push('boot.autostart=true')
+		if (nixos) config.push('security.nesting=true', 'user.modc.nixos=true')
+		// Stock images:nixos has no apply-on-boot module; always launch the MODC image.
+		if (nixos) source = MODC_NIXOS_ALIAS
 		const cred = secrets(input)
 		if (pending.has(n) && !pending.get(n).error) throw new RpcError('CONFLICT', `${n} is already being created`)
+		if (hostId !== 'server') {
+			if (cred.password || cred.key) throw new RpcError('PRECONDITION_FAILED', 'Set the root password and SSH key on this server. A container on another computer keeps the sign-in that image ships with.')
+			if (image.startsWith('template:')) throw new RpcError('BAD_REQUEST', 'Templates on another computer aren’t supported yet. Use a library image.')
+			const agents = await listedAgents()
+			await remoteAgent(hostId)
+			if ((await list()).some((c) => c.name === n && (c.hostId === hostId || c.hostId === 'server'))) throw new RpcError('CONFLICT', `There’s already a container named ${n}`)
+			const remote = await remoteHostStatus({connector, agents, hostId})
+			if (!remote.available) {
+				const who = remote.hostName || 'That computer'
+				throw new RpcError('PRECONDITION_FAILED', `${who} needs Incus set up first. ${remote.reason} Run ${remote.setupCommand ?? setupCommand()} on ${who}.`)
+			}
+			if (nixos) {
+				await remoteContainerCall(connector, hostId, 'lxc-ensure-nixos-image', {url: MODC_NIXOS_INCUS_URL}, 30 * 60_000)
+				const writeBody = {name: n}
+				if (input.nixosConfig) {
+					const checked = validateNixosConfig(input.nixosConfig)
+					if (!checked.ok) throw new RpcError('BAD_REQUEST', checked.error)
+					writeBody.configuration = checked.config
+					const cache = await readNixCache(nixosShare())
+					writeBody.cacheConf = nixCacheConfText(cache)
+				}
+				await remoteContainerCall(connector, hostId, 'lxc-write-config', writeBody, 60_000)
+			}
+			await remoteContainerCall(
+				connector,
+				hostId,
+				'lxc-launch',
+				{name: n, source, configs: config, diskGiB, ...(nixos ? {nixosShare: true} : {})},
+				30 * 60_000,
+			)
+			return {name: n, hostId, ...(nixos ? {nixos: true} : {})}
+		}
+		if (nixos) {
+			const root = nixosShare()
+			await ensureConfigDir(root, n)
+			if (input.nixosConfig) {
+				const checked = validateNixosConfig(input.nixosConfig)
+				if (!checked.ok) throw new RpcError('BAD_REQUEST', checked.error)
+				try {
+					await writeConfiguration(root, n, checked.config)
+				} catch (error) {
+					throw new RpcError('BAD_REQUEST', String(error?.message ?? error))
+				}
+				const cache = await readNixCache(root)
+				await writeCacheFragment(root, n, cache)
+			}
+		}
 		if ((await raw()).some((c) => c.name === n)) throw new RpcError('CONFLICT', `There’s already a container named ${n}`)
+		const shareRoot = nixos ? nixosShare() : null
 		// Downloading a system the first time takes a while: the list shows it as being created.
 		background(
 			pending,
 			n,
 			'creating',
 			async () => {
+				if (nixos) {
+					const p = pending.get(n)
+					if (p && !p.error) p.progress = 'Preparing MODC NixOS image'
+					await ensureModcNixosImage({run: incus, fetchImpl})
+				}
 				// Incus prints its progress ("Retrieving image: rootfs: 45% (12.3MB/s)"); the list shows the latest.
 				const onOutput = (text) => {
 					const line = text.split(/[\r\n]+/).map((l) => l.trim()).filter(Boolean).pop()
@@ -410,15 +623,37 @@ export function createContainers({run = defaultRun, reservedPorts = [], user = o
 					if (line && p && !p.error) p.progress = line.replace(/^Retrieving image:\s*/i, 'Downloading ').slice(0, 120)
 				}
 				await incus(['launch', source, n, ...config.flatMap((c) => ['--config', c]), '--device', `root,size=${diskGiB}GiB`], {timeout: 20 * 60_000, onOutput})
+				if (nixos && shareRoot) {
+					await incus([
+						'config', 'device', 'add', n, 'modc-nixos-config', 'disk',
+						`source=${configDir(shareRoot, n)}`,
+						`path=${NIXOS_GUEST_MOUNT}`,
+						'readonly=true',
+					])
+				}
 				if (cred.password || cred.key) background(jobs, n, 'setting up', () => firstSetup(n, cred))
 			},
-			meta,
+			{...meta, ...(nixos ? {nixos: true} : {})},
 		)
 		return {name: n}
 	}
 
+	const remotePower = {start: 'lxc-start', stop: 'lxc-stop', restart: 'lxc-restart', forceStop: 'lxc-force-stop'}
 	const power = (verb) => async (input = {}) => {
 		const n = name(input.name)
+		const hostId = await containerHost(n, input.hostId)
+		if (hostId !== 'server') {
+			await remoteAgent(hostId)
+			const call = remotePower[verb]
+			if (!call) throw new RpcError('PRECONDITION_FAILED', 'That isn’t available on a remote container yet.')
+			try {
+				await remoteContainerCall(connector, hostId, call, {name: n}, verb === 'restart' ? 90_000 : 120_000)
+			} catch (error) {
+				if (verb === 'stop' && error instanceof RpcError) throw new RpcError('PRECONDITION_FAILED', `STOP_TIMED_OUT: ${n} didn’t shut down within a minute. Force stop turns it off straight away.`)
+				throw error
+			}
+			return {ok: true}
+		}
 		jobs.get(n)?.error && jobs.delete(n)
 		if (verb === 'start') await incus(['start', n])
 		else if (verb === 'restart') await incus(['restart', n, '--timeout', '60'], {timeout: 90_000})
@@ -434,13 +669,20 @@ export function createContainers({run = defaultRun, reservedPorts = [], user = o
 
 	async function remove(input = {}) {
 		const n = name(input.name)
+		const hostId = await containerHost(n, input.hostId)
 		if (pending.get(n)?.error) {
 			pending.delete(n)
 			return {ok: true}
 		}
 		notBusy(n)
 		// Protection is enforced by Incus too; this gives the reason in plain words.
-		if ((await list()).find((c) => c.name === n)?.protected) throw new RpcError('PRECONDITION_FAILED', `${n} is protected. Turn off Protection first.`)
+		if ((await list()).find((c) => c.name === n && (c.hostId || 'server') === hostId)?.protected) throw new RpcError('PRECONDITION_FAILED', `${n} is protected. Turn off Protection first.`)
+		if (hostId !== 'server') {
+			await remoteAgent(hostId)
+			await remoteContainerCall(connector, hostId, 'lxc-delete', {name: n}, 120_000)
+			samples.delete(n)
+			return {ok: true}
+		}
 		await incus(['delete', n, '--force'], {timeout: 120_000})
 		samples.delete(n)
 		return {ok: true}
@@ -874,12 +1116,59 @@ export function createContainers({run = defaultRun, reservedPorts = [], user = o
 		return {status: 'started'}
 	}
 
+	async function nixosConfig(input = {}) {
+		const n = name(input.name)
+		await requireNixosContainer(n, input.hostId)
+		const hostId = await containerHost(n, input.hostId)
+		if (hostId !== 'server') {
+			await remoteAgent(hostId)
+			const out = await remoteContainerCall(connector, hostId, 'lxc-read-config', {name: n}, 30_000)
+			return JSON.parse(String(out))
+		}
+		return readConfiguration(nixosShare(), n)
+	}
+	async function setNixosConfig(input = {}) {
+		const n = name(input.name)
+		await requireNixosContainer(n, input.hostId)
+		const checked = validateNixosConfig(input.config ?? '')
+		if (!checked.ok) throw new RpcError('BAD_REQUEST', checked.error)
+		const hostId = await containerHost(n, input.hostId)
+		if (hostId !== 'server') {
+			await remoteAgent(hostId)
+			const cache = await readNixCache(nixosShare())
+			await remoteContainerCall(
+				connector,
+				hostId,
+				'lxc-write-config',
+				{name: n, configuration: checked.config, cacheConf: nixCacheConfText(cache)},
+				60_000,
+			)
+			return nixosConfig({name: n, hostId})
+		}
+		const root = nixosShare()
+		try {
+			await writeConfiguration(root, n, checked.config)
+		} catch (error) {
+			throw new RpcError('BAD_REQUEST', String(error?.message ?? error))
+		}
+		const cache = await readNixCache(root)
+		await writeCacheFragment(root, n, cache)
+		return readConfiguration(root, n)
+	}
+	async function applyNixosConfig(input = {}) {
+		const n = name(input.name)
+		if (input.config !== undefined && input.config !== null) await setNixosConfig({name: n, config: input.config, hostId: input.hostId})
+		else await requireNixosContainer(n, input.hostId)
+		return power('restart')(input)
+	}
+
 	return {
 		shellFor,
 		readFile,
 		writeFile,
 		procedures: {
 			'containers.status': {kind: 'query', run: status},
+			'containers.hostStatus': {kind: 'query', run: hostStatus},
 			'containers.list': {kind: 'query', run: list},
 			'containers.images': {kind: 'query', run: (input) => images(input ?? {})},
 			'containers.templates': {kind: 'query', run: templates},
@@ -911,6 +1200,9 @@ export function createContainers({run = defaultRun, reservedPorts = [], user = o
 			'containers.templateFiles': {kind: 'query', run: templateFiles},
 			'containers.importTemplate': {kind: 'mutation', run: importTemplate},
 			'containers.downloadTemplate': {kind: 'mutation', run: downloadTemplate},
+			'containers.nixosConfig': {kind: 'query', run: nixosConfig},
+			'containers.setNixosConfig': {kind: 'mutation', run: setNixosConfig},
+			'containers.applyNixosConfig': {kind: 'mutation', run: applyNixosConfig},
 		},
 	}
 }
