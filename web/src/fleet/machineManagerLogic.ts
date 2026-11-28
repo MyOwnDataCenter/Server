@@ -1,6 +1,6 @@
 // Rules for the pre-release phone Machines list. The screen renders these. It does not invent readings.
 
-export type ManagerKind = 'server' | 'computer' | 'guest'
+export type ManagerKind = 'server' | 'computer' | 'guest' | 'container'
 export type ManagerFilter = 'all' | 'physical' | 'virtual' | 'unhealthy' | 'healthy' | 'offline' | 'online'
 /** The four places on the filter bar. Three of them flip to the other word in that pair. */
 export type FilterSlot = 'all' | 'kind' | 'health' | 'reach'
@@ -34,7 +34,7 @@ export function saveManagerDials(on: boolean): '1' | '0' {
 
 export function passesFilter(kind: ManagerKind, filter: ManagerFilter, facts?: {offline?: boolean; online?: boolean; health?: ManagerHealth}): boolean {
 	if (filter === 'all') return true
-	if (filter === 'virtual') return kind === 'guest'
+	if (filter === 'virtual') return kind === 'guest' || kind === 'container'
 	if (filter === 'physical') return kind === 'server' || kind === 'computer'
 	if (filter === 'offline') return facts?.offline === true
 	if (filter === 'online') return facts?.online === true
@@ -110,13 +110,14 @@ export function isOnline(kind: ManagerKind, online: boolean, state?: string): bo
 }
 
 export function reachLabel(kind: ManagerKind, online: boolean, state?: string): {kind: ReachKind; label: string} {
-	if (kind !== 'guest') return online ? {kind: 'running', label: 'Online'} : {kind: 'stopped', label: 'Offline'}
+	if (kind !== 'guest' && kind !== 'container') return online ? {kind: 'running', label: 'Online'} : {kind: 'stopped', label: 'Offline'}
 	switch (state) {
 		case 'running':
 			return {kind: 'running', label: 'Online'}
 		case 'stopped':
 			return {kind: 'stopped', label: 'Offline'}
 		case 'suspended':
+		case 'frozen':
 			return {kind: 'stopped', label: 'Paused'}
 		case 'hibernated':
 			return {kind: 'stopped', label: 'Hibernated'}

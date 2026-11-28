@@ -202,6 +202,15 @@ test('filters and search keep the fleet order', () => {
 	assert.equal(matchesName('Machine-001', 'zzz'), false)
 })
 
+test('Virtual filter includes containers and guests', () => {
+	assert.equal(passesFilter('container', 'virtual'), true)
+	assert.equal(passesFilter('container', 'physical'), false)
+	assert.equal(passesFilter('guest', 'virtual'), true)
+	assert.deepEqual(reachLabel('container', true, 'running'), {kind: 'running', label: 'Online'})
+	assert.deepEqual(reachLabel('container', false, 'stopped'), {kind: 'stopped', label: 'Offline'})
+	assert.deepEqual(reachLabel('container', false, 'frozen'), {kind: 'stopped', label: 'Paused'})
+})
+
 test('unhealthy and offline sit beside the type filters', () => {
 	const rows = [
 		{kind: 'server', name: 'Den', offline: false, health: 'healthy'},
