@@ -16,9 +16,20 @@ import {mkdir, mkdtemp, readdir, rm, stat, writeFile as writeFs} from 'node:fs/p
 import os from 'node:os'
 import {basename, join} from 'node:path'
 
+import {readNixCache} from './nix-cache.mjs'
 import {checkLink, fileNameFor, listDownloads, startDownload} from './download.mjs'
 import {connectorKind} from './guest-install.mjs'
 import {installLxcConnector} from './lxc-install.mjs'
+import {
+	configDir,
+	ensureConfigDir,
+	isNixosOs,
+	NIXOS_GUEST_MOUNT,
+	readConfiguration,
+	validateNixosConfig,
+	writeCacheFragment,
+	writeConfiguration,
+} from './nixos-config.mjs'
 import {RpcError} from './rpc.mjs'
 
 const NAME = /^[a-z]([a-z0-9-]{0,61}[a-z0-9])?$/
@@ -45,6 +56,7 @@ export const DISTROS = [
 	{os: 'opensuse', name: 'openSUSE'},
 	{os: 'devuan', name: 'Devuan'},
 	{os: 'gentoo', name: 'Gentoo'},
+	{os: 'nixos', name: 'NixOS'},
 ]
 
 const ARCH = {x64: 'x86_64', arm64: 'aarch64'}[process.arch] ?? process.arch
@@ -155,6 +167,7 @@ export function containerFrom(c) {
 			.map((t) => t.trim())
 			.filter(Boolean),
 		createdAt: c?.created_at ?? null,
+		...(bool(cfg['user.modc.nixos']) || isNixosOs(cfg['image.os']) ? {nixos: true} : {}),
 	}
 }
 
@@ -203,8 +216,9 @@ export function execIncus(bin, args, {timeout = 60_000, input, binary = false, o
  * @param {number[]} [o.reservedPorts] this server's own ports, never handed to a container
  * @param {string} [o.backupsDir] where container backups are kept
  * @param {{resolve: (virtual: string, o: {mustExist: boolean}) => Promise<{real: string}>}} [o.files] the server's Files, to copy files in and out
+ * @param {string} [o.dataDir] MODC data dir (NixOS config shares live under `{dataDir}/nixos-configs/`)
  */
-export function createContainers({run = defaultRun, reservedPorts = [], user = os.userInfo().username, backupsDir = null, files = null, now = Date.now, connector = null, connectorEnrollTimeoutMs = 10 * 60_000} = {}) {
+export function createContainers({run = defaultRun, reservedPorts = [], user = os.userInfo().username, backupsDir = null, files = null, dataDir = null, now = Date.now, connector = null, connectorEnrollTimeoutMs = 10 * 60_000} = {}) {
 	// Containers that don't exist yet (being created, cloned or restored), and work on existing ones
 	// (backing up, saving as a template, first-time setup). A failure stays visible for 10 minutes.
 	const pending = new Map() // name -> {what, from?, error?, at}
@@ -374,29 +388,67 @@ export function createContainers({run = defaultRun, reservedPorts = [], user = o
 		if (key) await execIn('umask 077 && mkdir -p /root/.ssh && cat >> /root/.ssh/authorized_keys', `${key}\n`).catch((e) => Promise.reject(new Error(`Couldn’t add the SSH key: ${e.message}`)))
 	}
 
+	const nixosShare = () => {
+		if (!dataDir) throw new RpcError('PRECONDITION_FAILED', 'Server storage isn’t set up for NixOS configuration shares yet.')
+		return dataDir
+	}
+	const containerIsNixos = (c) => {
+		const cfg = c?.config ?? {}
+		return bool(cfg['user.modc.nixos']) || isNixosOs(cfg['image.os'])
+	}
+	async function requireNixosContainer(n) {
+		const row = (await raw()).find((c) => c.name === n)
+		if (!row) throw new RpcError('NOT_FOUND', 'No such container')
+		if (!containerIsNixos(row)) throw new RpcError('BAD_REQUEST', 'That container isn’t a NixOS guest.')
+		return row
+	}
+
 	async function create(input = {}) {
 		const n = name(input.name)
 		const image = String(input.image ?? '')
 		let source
 		let meta = {}
+		let osId = ''
 		if (image.startsWith('template:')) {
 			const alias = image.slice(9)
-			if (!TEMPLATE.test(alias) || !(await templates()).some((t) => t.alias === alias)) throw new RpcError('BAD_REQUEST', 'That template isn’t on this server')
+			const tpl = (await templates()).find((t) => t.alias === alias)
+			if (!TEMPLATE.test(alias) || !tpl) throw new RpcError('BAD_REQUEST', 'That template isn’t on this server')
 			source = alias
-			meta = {from: alias.slice(5)}
+			osId = tpl.os
+			meta = {from: alias.slice(5), os: osId, release: tpl.release}
 		} else {
 			if (!ALIAS.test(image)) throw new RpcError('BAD_REQUEST', 'Pick a system from the library')
 			const lib = await images({all: true})
 			if (!lib.some((d) => d.releases.some((r) => r.alias === image))) throw new RpcError('BAD_REQUEST', 'That system isn’t in the library')
 			source = `images:${image}`
-			meta = {os: image.split('/')[0], release: image.split('/')[1]}
+			osId = image.split('/')[0]
+			meta = {os: osId, release: image.split('/')[1]}
 		}
+		const nixos = isNixosOs(osId)
+		if (input.nixosConfig && !nixos) throw new RpcError('BAD_REQUEST', 'NixOS configuration is only for NixOS images.')
 		const config = limits({cpus: input.cpus ?? 1, memoryMiB: input.memoryMiB ?? 1024, ...(input.cpuAllowance !== undefined ? {cpuAllowance: input.cpuAllowance} : {}), ...(input.swap !== undefined ? {swap: input.swap} : {})})
 		const diskGiB = intIn(input.diskGiB ?? 8, 1, 4096, 'Use 1 to 4096 GB of disk')
 		if (input.autostart) config.push('boot.autostart=true')
+		if (nixos) {
+			const root = nixosShare()
+			config.push('security.nesting=true', 'user.modc.nixos=true')
+			await ensureConfigDir(root, n)
+			if (input.nixosConfig) {
+				const checked = validateNixosConfig(input.nixosConfig)
+				if (!checked.ok) throw new RpcError('BAD_REQUEST', checked.error)
+				try {
+					await writeConfiguration(root, n, checked.config)
+				} catch (error) {
+					throw new RpcError('BAD_REQUEST', String(error?.message ?? error))
+				}
+				const cache = await readNixCache(root)
+				await writeCacheFragment(root, n, cache)
+			}
+		}
 		const cred = secrets(input)
 		if (pending.has(n) && !pending.get(n).error) throw new RpcError('CONFLICT', `${n} is already being created`)
 		if ((await raw()).some((c) => c.name === n)) throw new RpcError('CONFLICT', `There’s already a container named ${n}`)
+		const shareRoot = nixos ? nixosShare() : null
 		// Downloading a system the first time takes a while: the list shows it as being created.
 		background(
 			pending,
@@ -410,9 +462,17 @@ export function createContainers({run = defaultRun, reservedPorts = [], user = o
 					if (line && p && !p.error) p.progress = line.replace(/^Retrieving image:\s*/i, 'Downloading ').slice(0, 120)
 				}
 				await incus(['launch', source, n, ...config.flatMap((c) => ['--config', c]), '--device', `root,size=${diskGiB}GiB`], {timeout: 20 * 60_000, onOutput})
+				if (nixos && shareRoot) {
+					await incus([
+						'config', 'device', 'add', n, 'modc-nixos-config', 'disk',
+						`source=${configDir(shareRoot, n)}`,
+						`path=${NIXOS_GUEST_MOUNT}`,
+						'readonly=true',
+					])
+				}
 				if (cred.password || cred.key) background(jobs, n, 'setting up', () => firstSetup(n, cred))
 			},
-			meta,
+			{...meta, ...(nixos ? {nixos: true} : {})},
 		)
 		return {name: n}
 	}
@@ -874,6 +934,33 @@ export function createContainers({run = defaultRun, reservedPorts = [], user = o
 		return {status: 'started'}
 	}
 
+	async function nixosConfig(input = {}) {
+		const n = name(input.name)
+		await requireNixosContainer(n)
+		return readConfiguration(nixosShare(), n)
+	}
+	async function setNixosConfig(input = {}) {
+		const n = name(input.name)
+		await requireNixosContainer(n)
+		const checked = validateNixosConfig(input.config ?? '')
+		if (!checked.ok) throw new RpcError('BAD_REQUEST', checked.error)
+		const root = nixosShare()
+		try {
+			await writeConfiguration(root, n, checked.config)
+		} catch (error) {
+			throw new RpcError('BAD_REQUEST', String(error?.message ?? error))
+		}
+		const cache = await readNixCache(root)
+		await writeCacheFragment(root, n, cache)
+		return readConfiguration(root, n)
+	}
+	async function applyNixosConfig(input = {}) {
+		const n = name(input.name)
+		if (input.config !== undefined && input.config !== null) await setNixosConfig({name: n, config: input.config})
+		else await requireNixosContainer(n)
+		return power('restart')(input)
+	}
+
 	return {
 		shellFor,
 		readFile,
@@ -911,6 +998,9 @@ export function createContainers({run = defaultRun, reservedPorts = [], user = o
 			'containers.templateFiles': {kind: 'query', run: templateFiles},
 			'containers.importTemplate': {kind: 'mutation', run: importTemplate},
 			'containers.downloadTemplate': {kind: 'mutation', run: downloadTemplate},
+			'containers.nixosConfig': {kind: 'query', run: nixosConfig},
+			'containers.setNixosConfig': {kind: 'mutation', run: setNixosConfig},
+			'containers.applyNixosConfig': {kind: 'mutation', run: applyNixosConfig},
 		},
 	}
 }
