@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import {mkdtemp} from 'node:fs/promises'
+import {mkdtemp, readFile} from 'node:fs/promises'
 import os from 'node:os'
 import {join} from 'node:path'
 import {test} from 'node:test'
@@ -74,6 +74,47 @@ test('create on a remote host refuses when Incus is unavailable', async () => {
 			return true
 		},
 	)
+})
+
+test('remote create refuses a root password instead of dropping it', async () => {
+	const hostId = 'abcdabcdabcd'
+	const calls = []
+	const mod = createContainers({
+		run: async (args) => {
+			if (args[0] === 'list') return '[]'
+			if (args[0] === 'image') return JSON.stringify([DEB_IMG])
+			return ''
+		},
+		connector: {
+			list: async () => [{id: hostId, name: 'Garage', online: true}],
+			call: async (id, name, args) => {
+				calls.push(name)
+				if (name === 'lxc-status') return JSON.stringify({available: true, version: '6'})
+				if (name === 'lxc-list') return '[]'
+				if (name === 'lxc-launch') return JSON.stringify({name: args.name})
+				throw new Error('unexpected ' + name)
+			},
+		},
+	})
+	await assert.rejects(
+		() =>
+			mod.procedures['containers.create'].run({
+				hostId,
+				name: 'web',
+				image: 'debian/12',
+				diskGiB: 8,
+				rootPassword: 'correct-horse',
+			}),
+		(err) => err.code === 'PRECONDITION_FAILED' && /this server/.test(err.message),
+	)
+	assert.deepEqual(calls.filter((n) => n === 'lxc-launch'), [])
+})
+
+test('creating a container is allowed to outlast the short web timeout', async () => {
+	const src = await readFile(new URL('../server/app.mjs', import.meta.url), 'utf8')
+	const slow = src.match(/export const SLOW = new Set\(\[([\s\S]*?)\]\)/)
+	assert.ok(slow, 'SLOW set')
+	assert.match(slow[1], /'containers\.create'/)
 })
 
 test('list merges local and remote containers with hostId', async () => {

@@ -497,6 +497,7 @@ export function createContainers({run = defaultRun, reservedPorts = [], user = o
 		const cred = secrets(input)
 		if (pending.has(n) && !pending.get(n).error) throw new RpcError('CONFLICT', `${n} is already being created`)
 		if (hostId !== 'server') {
+			if (cred.password || cred.key) throw new RpcError('PRECONDITION_FAILED', 'Set the root password and SSH key on this server. A container on another computer keeps the sign-in that image ships with.')
 			if (image.startsWith('template:')) throw new RpcError('BAD_REQUEST', 'Templates on another computer aren’t supported yet. Use a library image.')
 			if ((await list()).some((c) => c.name === n)) throw new RpcError('CONFLICT', `There’s already a container named ${n}`)
 			const remote = await remoteHostStatus({connector, agents: await listedAgents(), hostId})

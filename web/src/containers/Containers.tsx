@@ -422,8 +422,12 @@ function CreateContainer({
 					memoryMiB: Number(memory),
 					diskGiB: Number(disk),
 					autostart,
-					rootPassword: password || undefined,
-					sshKey: sshKey.trim() || undefined,
+					...(remote
+						? {}
+						: {
+								rootPassword: password || undefined,
+								sshKey: sshKey.trim() || undefined,
+							}),
 					...(host && host.id !== SERVER_FLEET_ID ? {hostId: host.id} : {}),
 					...(nixosImage && nixosConfig.trim() ? {nixosConfig} : {}),
 				},
@@ -530,8 +534,16 @@ function CreateContainer({
 						on={autostart}
 						onChange={setAutostart}
 					/>
-					<TextField id="ct-pw" label="Root password (optional)" type="password" value={password} onChange={setPassword} hint="For signing in on this container or over SSH. It isn’t stored by My Own Data Center." />
-					<TextField id="ct-key" label="SSH public key (optional)" value={sshKey} onChange={setSshKey} placeholder="ssh-ed25519 AAAA… you@laptop" area hint="Added for root. Install an SSH server inside to use it." />
+					{remote ? (
+						<p className="hint" style={{margin: '4px 2px 8px', color: 'var(--muted)', fontSize: 13}}>
+							Sign-in stays with the image. A root password and an SSH key are set when the container runs on this server.
+						</p>
+					) : (
+						<>
+							<TextField id="ct-pw" label="Root password (optional)" type="password" value={password} onChange={setPassword} hint="For signing in on this container or over SSH. It isn’t stored by My Own Data Center." />
+							<TextField id="ct-key" label="SSH public key (optional)" value={sshKey} onChange={setSshKey} placeholder="ssh-ed25519 AAAA… you@laptop" area hint="Added for root. Install an SSH server inside to use it." />
+						</>
+					)}
 					{nixosImage ? (
 						<TextField
 							id="ct-nixos-config"
