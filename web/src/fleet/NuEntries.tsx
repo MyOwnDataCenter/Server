@@ -62,9 +62,10 @@ function onKey(item: NuItem, e: KeyboardEvent) {
 
 // List and icon view shared by the Files manager. A row without onOpen is a file, not a button.
 export function NuEntries({items, grid}: {items: NuItem[]; grid: boolean}) {
+	if (items.length === 0) return null
 	if (grid) {
 		return (
-			<div className="nu-grid">
+			<div className="nu-grid screen-list glass">
 				{items.map((item) => {
 					const glyph = (
 						<span className={`nu-glyph${item.onOpen ? '' : ' file'}`}>
@@ -102,8 +103,8 @@ export function NuEntries({items, grid}: {items: NuItem[]; grid: boolean}) {
 		)
 	}
 	return (
-		<div>
-			<div className="nu-head" aria-hidden="true">
+		<div className="screen-list glass">
+			<div className="nu-head">
 				<span />
 				<span>Name</span>
 				<span className="nu-size">Size</span>

@@ -4,13 +4,15 @@ import {useQuery} from '@tanstack/react-query'
 import {query, type UsbList} from './api'
 import {useAction, useUser} from './data'
 import {Icon} from './icons'
+import {isOwner} from './isOwner'
+import {errorText} from './queryNotice'
 import {haptic, useToast} from './ui'
 import {showUnplugged} from './usbPresent'
 
 export function DevicesPanel({guest}: {guest: {kind: 'machine' | 'app'; id: string; name: string}}) {
 	const action = useAction()
 	const toast = useToast()
-	const owner = useUser().data?.role !== 'member'
+	const owner = isOwner(useUser().data)
 	const list = useQuery({queryKey: ['usb.list'], queryFn: () => query<UsbList>('usb.list'), refetchInterval: 5000})
 	const installer = useQuery({queryKey: ['system.installerStatus'], queryFn: () => query<{needed: boolean}>('system.installerStatus'), staleTime: 60_000, retry: false})
 	const devices = list.data?.devices ?? []
@@ -33,7 +35,13 @@ export function DevicesPanel({guest}: {guest: {kind: 'machine' | 'app'; id: stri
 				<Icon name="usb" size={16} /> Devices
 			</h4>
 			{installer.data?.needed && <p className="muted pf-note">The server helper needs an update to hand this stick to apps.</p>}
-			{!devices.length && <p className="muted pf-note">Plug a serial adapter or Zigbee stick into this server.</p>}
+			{list.error && !devices.length && (
+				<div className="error" role="alert">
+					<Icon name="alert" size={18} />
+					{errorText(list.error)}
+				</div>
+			)}
+			{list.isSuccess && !devices.length && <p className="muted pf-note">Plug a serial adapter or Zigbee stick into this server.</p>}
 			{devices.length > 0 && (
 				<div className="glass group">
 					{devices.map((d) => {

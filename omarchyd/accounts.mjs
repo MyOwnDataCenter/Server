@@ -142,9 +142,17 @@ export async function openAccounts(dataDir, {create = true} = {}) {
 		saving = next.catch(() => {})
 		return next
 	}
-	const commit = async (snapshot) => {
-		await save(snapshot)
-		state = snapshot
+	// One change at a time, each built from the accounts as they are when its turn comes, so two
+	// changes made together both stick. `change` is a function of the current state (or a new state).
+	let committing = Promise.resolve()
+	const commit = (change) => {
+		const run = committing.then(async () => {
+			const snapshot = typeof change === 'function' ? change(state) : change
+			await save(snapshot)
+			state = snapshot
+		})
+		committing = run.catch(() => {})
+		return run
 	}
 	const now = () => Date.now()
 	const prune = () => {
@@ -256,20 +264,37 @@ export async function openAccounts(dataDir, {create = true} = {}) {
 			const clean = String(name ?? '').trim()
 			if (!/^[\p{L}\p{N} ._-]{1,40}$/u.test(clean)) throw new Error('Use 1-40 letters, numbers, spaces, dots, dashes or underscores for the name')
 			if (typeof password !== 'string' || password.length < 8) throw new Error('Use a password of at least 8 characters')
-			await commit({...state, users: [...state.users, {userId: 'owner', name: clean, role: 'owner', language: 'en', ...(await hashPassword(password)), createdAt: now()}]})
+			const hashed = await hashPassword(password)
+			await commit((s) => {
+				if (s.users.length) throw new Error('An owner account already exists')
+				return {...s, users: [...s.users, {userId: 'owner', name: clean, role: 'owner', language: 'en', ...hashed, createdAt: now()}]}
+			})
 		},
 		async setPassword(userId, {oldPassword, newPassword}) {
 			const user = await verify({userId, password: oldPassword}, {twoFactor: false})
 			if (typeof newPassword !== 'string' || newPassword.length < 8) throw new RpcError('BAD_REQUEST', 'Use a password of at least 8 characters')
 			const hashed = await hashPassword(newPassword)
 			// A new password signs out every other session, but only once the file is saved.
-			await commit({
-				...state,
-				users: state.users.map((u) => (u.userId === user.userId ? {...u, ...hashed} : u)),
+			await commit((s) => ({
+				...s,
+				users: s.users.map((u) => (u.userId === user.userId ? {...u, ...hashed} : u)),
 				devices: {},
 				browsers: {},
-			})
+			}))
 			access.clear()
+		},
+		// A forgotten password, set from a terminal on the server (`omarchyd reset-password`), so no old
+		// password is asked. Every session is signed out. Two-factor stays as it is.
+		async resetPassword({name, newPassword} = {}) {
+			adoptOwnerFromDisk()
+			const wanted = name === undefined ? null : String(name).trim().toLowerCase()
+			const user = wanted === null ? state.users.find((u) => u.role === 'owner') : state.users.find((u) => u.name.toLowerCase() === wanted)
+			if (!user) throw new Error(wanted === null ? 'There is no owner account yet. Create one with create-owner.' : `There is no account named “${name}”.`)
+			if (typeof newPassword !== 'string' || newPassword.length < 8) throw new Error('Use a password of at least 8 characters')
+			const hashed = await hashPassword(newPassword)
+			await commit((s) => ({...s, users: s.users.map((u) => (u.userId === user.userId ? {...u, ...hashed} : u)), devices: {}, browsers: {}}))
+			access.clear()
+			return {name: user.name, twoFactor: !!user.totp}
 		},
 		// Asked again before sensitive actions (signing in the desktop).
 		confirmPassword: async (userId, password) => (await verify({userId, password}, {twoFactor: false}), true),
@@ -305,17 +330,17 @@ export async function openAccounts(dataDir, {create = true} = {}) {
 			const secret = secretFromUri(totpUri)
 			if (!u || !secret) throw new RpcError('BAD_REQUEST', 'Scan the code again')
 			if (!totpOk(secret, totpToken)) throw new RpcError('BAD_REQUEST', 'That code isn’t right. Enter the one your app shows now.')
-			await commit({...state, users: state.users.map((user) => (user.userId === u.userId ? {...user, totp: secret.toString('base64')} : user))})
+			await commit((s) => ({...s, users: s.users.map((user) => (user.userId === u.userId ? {...user, totp: secret.toString('base64')} : user))}))
 		},
 		async disable2fa(userId, {totpToken} = {}) {
 			const u = userById(userId)
 			if (!u?.totp) return
 			if (!totpOk(Buffer.from(u.totp, 'base64'), totpToken)) throw new RpcError('BAD_REQUEST', 'That code isn’t right. Enter the one your app shows now.')
-			await commit({...state, users: state.users.map((user) => {
+			await commit((s) => ({...s, users: s.users.map((user) => {
 				if (user.userId !== u.userId) return user
 				const {totp: _totp, ...rest} = user
 				return rest
-			})})
+			})}))
 		},
 		// Factory reset: every account and sign-in goes; the next visit starts first-time setup.
 		async reset() {
@@ -334,11 +359,17 @@ export async function openAccounts(dataDir, {create = true} = {}) {
 		async updateUser(userId, patch) {
 			const u = userById(userId)
 			if (!u) throw new RpcError('NOT_FOUND', 'No such account')
-			const nextUser = {...u}
-			if (typeof patch?.name === 'string' && patch.name.trim()) nextUser.name = patch.name.trim().slice(0, 40)
-			if (typeof patch?.language === 'string') nextUser.language = patch.language.slice(0, 10)
-			if (typeof patch?.wallpaper === 'string') nextUser.wallpaper = {id: patch.wallpaper.slice(0, 40)}
-			await commit({...state, users: state.users.map((user) => (user.userId === u.userId ? nextUser : user))})
+			await commit((s) => ({
+				...s,
+				users: s.users.map((user) => {
+					if (user.userId !== u.userId) return user
+					const nextUser = {...user}
+					if (typeof patch?.name === 'string' && patch.name.trim()) nextUser.name = [...patch.name.trim()].slice(0, 40).join('')
+					if (typeof patch?.language === 'string') nextUser.language = patch.language.slice(0, 10)
+					if (typeof patch?.wallpaper === 'string') nextUser.wallpaper = {id: patch.wallpaper.slice(0, 40)}
+					return nextUser
+				}),
+			}))
 		},
 
 		// Native login: a short access token plus a long-lived device token to refresh it.

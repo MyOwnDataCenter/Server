@@ -55,9 +55,12 @@ function readyGuest(row: GuestInstallInput): InstallTarget {
 	return {id: row.id, kind: 'guest', name: row.name, ability: 'ready', reason: ''}
 }
 
+/** Ready install destinations only. Offline connectors and VMs without an online connector are omitted. */
 export function installTargets(input: {serverName: string; computers: readonly ComputerInstallInput[]; guests: readonly GuestInstallInput[]}): InstallTarget[] {
 	const server: InstallTarget = {id: SERVER_INSTALL_ID, kind: 'server', name: input.serverName || 'This server', ability: 'ready', reason: ''}
+	// Offline connectors never appear — installs need a live connector.
 	const computers = input.computers.filter((row) => row.online).sort(byName).map(readyComputer)
+	// A guest needs its own connector online and the VM running; a host alone is not enough.
 	const guests = input.guests.filter((row) => row.connector && row.state === 'running').sort(byName).map(readyGuest)
 	return [server, ...computers, ...guests]
 }

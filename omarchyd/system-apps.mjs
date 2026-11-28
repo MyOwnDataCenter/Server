@@ -15,6 +15,7 @@ import {readFile} from 'node:fs/promises'
 import http from 'node:http'
 
 import {RpcError} from './rpc.mjs'
+import {stoppedMessage} from './exec-error.mjs'
 
 export const TAILSCALE_SOCKET = '/run/tailscale/tailscaled.sock'
 const HELPER_FILE = '/usr/local/libexec/omarchy-server/helper.mjs'
@@ -23,7 +24,7 @@ const HELPER_FILE = '/usr/local/libexec/omarchy-server/helper.mjs'
 export const TAILSCALE_SETUP_COMMAND = 'sudo pacman -S --needed tailscale && sudo systemctl enable --now tailscaled && sudo tailscale set --operator="$(id -un)"'
 
 const execRun = (cmd, args) =>
-	new Promise((resolve, reject) => execFile(cmd, args, {timeout: 30_000, maxBuffer: 4 * 1024 * 1024}, (error, stdout, stderr) => (error ? reject(new Error(String(stderr || error.message).trim())) : resolve(String(stdout)))))
+	new Promise((resolve, reject) => execFile(cmd, args, {timeout: 30_000, maxBuffer: 4 * 1024 * 1024}, (error, stdout, stderr) => (error ? reject(new Error(stoppedMessage(cmd, error, 30_000) ?? String(stderr || error.message).trim())) : resolve(String(stdout)))))
 
 export const SYSTEM_PERMISSIONS = {
 	'system-software': {

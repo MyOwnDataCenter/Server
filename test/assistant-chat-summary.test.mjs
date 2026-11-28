@@ -100,7 +100,7 @@ test('a long chat is summarized once; the turn sends the summary and only the re
 		assert.equal(sent.at(-1).content, 'next')
 		assert.ok(!sent.some((m) => /^q0 /.test(m.content ?? '')), 'the oldest messages are not sent again')
 		assert.ok(!ask.messages[1].content.includes('next'), 'the newest messages are not summarized')
-		assert.deepEqual(events.map((e) => e.event), ['text', 'done'])
+		assert.deepEqual(events.map((e) => e.event), ['speaker', 'text', 'done'])
 		const saved = JSON.parse(await readFile(join(dataDir, 'assistant', 'conversations', `${row.id}.json`), 'utf8'))
 		assert.equal(saved.summary.text, 'They asked about q0 to q14.')
 		assert.equal(saved.messages[saved.summary.upTo].role, 'user')
@@ -140,7 +140,7 @@ test('when the summary cannot be written the turn still runs, as before', async 
 		const row = await seeded(dataDir, pairs(25))
 		const events = []
 		await asst.runTurn({userId: 'owner', role: 'owner', message: 'next', conversationId: row.id, emit: (e) => events.push(e)})
-		assert.deepEqual(events.map((e) => e.event), ['text', 'done'])
+		assert.deepEqual(events.map((e) => e.event), ['speaker', 'text', 'done'])
 		const saved = JSON.parse(await readFile(join(dataDir, 'assistant', 'conversations', `${row.id}.json`), 'utf8'))
 		assert.equal(saved.summary, undefined)
 		// The next turn doesn't ask again straight away.

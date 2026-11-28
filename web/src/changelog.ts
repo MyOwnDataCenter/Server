@@ -4,6 +4,384 @@ export type Release = {version: string; date: string; title: string; added?: str
 
 export const CHANGELOG: Release[] = [
 	{
+		version: '0.9.108',
+		date: '2026-11-28',
+		title: 'The Home icon opens Home, and a system container is a machine',
+		added: [
+			'A system container is a machine. Machines lists it with your computers and virtual machines. It is Online while running, Offline when shut off, and Paused when frozen. On a wide desktop its page sits beside the list. An app from the store stays an app.',
+			'Open the container for Files and Terminal. When its connector is online, Apps and Pin work there too. The owner can install that connector from the container page while the container is running.',
+		],
+		fixed: [
+			'On the desktop, the Home icon opens the Home page. A Home folder shortcut you add after that still opens the folder in Files.',
+		],
+	},
+	{
+		version: '0.9.107',
+		date: '2026-11-27',
+		title: 'An encrypted server can start by itself after a power cut',
+		added: [
+			'The installer asks whether to turn on unattended boot when the system disk is encrypted. Why: until now, after a restart or power cut the computer waited at the disk password screen, so this server stayed off until someone typed it at the keyboard.',
+			'With it on, the disk unlocks itself and the server starts on its own. The screen asks for your Linux password instead of signing in automatically. Your disk password still works.',
+			'Trade-off: anyone who takes the computer or its drive could read the data. It is off unless you say yes, and it is never turned on by an in-app update.',
+			'Restart from the app is no longer blocked by the disk password warning once unattended boot is on.',
+		],
+	},
+	{
+		version: '0.9.106',
+		date: '2026-11-27',
+		title: 'Toasts follow you, and chat tries your providers in order',
+		added: [
+			'Copied, a VM starting, an install, and other feedback for you show in one list. When the floating assistant is on screen, that list sits in its speech bubble. When the assistant is hidden, the same list sits at the top of the page. The bell stays for news for the whole server, such as a software update.',
+			'Settings → Assistant lists the providers you added, from the top. Chat tries them in that order and names the one that answered. A new provider is added at the bottom. Open a provider to move it up or down.',
+			'The owner can offer one provider to other accounts. Those accounts can refuse it. A provider someone else added stays off your list, apart from that offer. When someone else uses the one you offered, chat names the service, not the private name you gave it.',
+			'Hermes answers only when its row is first. It is not a backup for the providers under it.',
+		],
+	},
+	{
+		version: '0.9.105',
+		date: '2026-11-27',
+		title: 'The store names the machine before you install',
+		added: [
+			'Before Get, the store shows Install on. It offers this server, a computer that is online, or a virtual machine that is running with its connector online. An offline machine is left out. Why: an app should go only where it can actually be installed.',
+			'Sharing sign-in with an app asks first, and it starts off. Why: accounts on this server, including two-factor, should not be shared unless you say so.',
+			'Discarding edits in a file asks first.',
+			'System keeps this device apart from server power. Clip book, Terminals, Settings, and sign out sit with this device. Restart and shut down sit with server power. The page shows one version of My Own Data Center.',
+			'Terminals is no longer a phone tab. Open it from System. A container’s login is labeled Container login.',
+			'When no apps are installed, Apps offers Find apps.',
+		],
+		fixed: [
+			'The Settings gear returns to the main Settings page. On the desktop, Appearance stays open.',
+			'Owner controls stay hidden until the signed-in account is the owner.',
+		],
+	},
+	{
+		version: '0.9.104',
+		date: '2026-11-27',
+		title: 'Lists that match, and clips you can clear together',
+		added: [
+			'Terminals uses the same list as Machines. On the phone the list is one card. More sits on the title line. Why: a shell you can open should look like the other lists.',
+			'Machines, Terminals, and Clip book share one filter row: a name field, then the chips.',
+			'When several clips are checked, Clear, Delete, and Send stay at the top of the list while it scrolls. Delete asks first. The files you copied stay where they are.',
+		],
+	},
+	{
+		version: '0.9.103',
+		date: '2026-11-27',
+		title: 'Terminals, a clip book, and a way back in',
+		added: [
+			'Terminals lists every shell the owner can open: this server, and a joined computer or a virtual machine whose connector granted a terminal, including one that is offline. Open a row and that terminal sits in the list. Why: the shells you can use should be in one place.',
+			'Clip book keeps what you copied. It is a section on the machine page and a row on System. Copy puts the clip on this device. A send keeps going after the browser closes, and a toast tells you when it finishes or when it needs you. Why: a copy should still be there when you come back, and closing the page should not drop a send.',
+			'Sun, Moon, and Off are in the top bar again. Which readings a machine shows is saved on the account, and another account keeps its own choice.',
+			'The assistant can read a machine’s notes, and it can say what system this server is running and whether Omarchy updates are waiting. Asking does not install anything.',
+		],
+		fixed: [
+			'A forgotten sign-in password can be set again from this server’s own terminal with omarchy-server reset-password. Every account is signed out of every device and browser. Two-factor stays on. Why: the person at the machine should be able to get back in without the old password.',
+			'Virtio disks on a virtual machine share an I/O thread, so disk work is less likely to stall the machine. It applies the next time the machine is fully started.',
+			'A damaged list of apps on a joined computer is left as it is, and the problem is written once, instead of the list being replaced.',
+		],
+	},
+	{
+		version: '0.9.102',
+		date: '2026-11-27',
+		title: 'An LXC container’s console is the container’s',
+		fixed: [
+			'An LXC container’s console opened the server’s own shell. Why: the web server passes only the settings it knows on to the terminal, and it didn’t know the container’s name, so the request arrived as an ordinary terminal. It now passes the container and its console along (and refuses a name that isn’t one), and a test checks it.',
+		],
+	},
+	{
+		version: '0.9.101',
+		date: '2026-11-27',
+		title: 'LXC containers work like virtual machines',
+		added: [
+			'An LXC container opens like a virtual machine: in Machines, open its row for a summary and power, then Manage opens its page with its console in it, like Proxmox, and its sections (Summary, Network, Snapshots, Backup, Files, Options) under it. Why: an LXC container is a guest like a VM, so it should look and work the same.',
+		],
+		fixed: [
+			'Sun, Moon, and Off are gone from the top bar again; Appearance in Settings is where you choose them. Horizon, Your photo, and Omarchy go back to their earlier sizes.',
+			'The Root shell button is gone from LXC containers: the console is the way in, as in Proxmox.',
+			'A container made from a template file gets its own name as its host name.',
+		],
+	},
+	{
+		version: '0.9.100',
+		date: '2026-11-27',
+		title: 'LXC containers, with their console in the page',
+		added: [
+			'An LXC container’s console sits in its page, the way a virtual machine’s screen does, with Full screen and Root shell under it. Why: an LXC container is a guest like a VM, so its screen belongs with it rather than over everything.',
+		],
+		fixed: ['Containers are called LXC containers everywhere: on the server’s page, in Machines → Add, and in their own pages.'],
+	},
+	{
+		version: '0.9.99',
+		date: '2026-11-27',
+		title: 'Sun, Moon, and Off in the top bar',
+		added: [
+			'Sun, Moon, and Off sit in the desktop top bar and next to Settings on the phone. Sun and Moon use the palettes marked in Appearance. Off returns to Horizon, Your photo, and Omarchy.',
+		],
+		fixed: [
+			'Horizon, Your photo, and Omarchy are the same size.',
+		],
+	},
+	{
+		version: '0.9.98',
+		date: '2026-11-26',
+		title: 'Container console, and your own ISOs and templates',
+		added: [
+			'Containers have a Console: the container’s own screen with its login prompt, like Proxmox’s console. Root shell still opens straight into it. Set root’s password from the container’s page to sign in at the console. Why: a container is a small system of its own, and its console is where it shows itself.',
+			'Add an ISO for virtual machines from a link or from this device, right in New virtual machine. It’s saved in Downloads and shows under Your own ISO when it’s complete.',
+			'Add container templates: download one from a link, upload one, or import any template file already on the server (a Proxmox CT template or an Incus image). Imported templates appear under Your templates. New container can also show Incus’s whole library, not only the main systems.',
+		],
+	},
+	{
+		version: '0.9.97',
+		date: '2026-11-26',
+		title: 'A container’s terminal opens',
+		fixed: [
+			'A container’s Terminal opened behind its page, so you saw an empty panel. Why: container pages are sheets, which sit above the layer terminals open on. It now opens above the sheet.',
+			'A new container no longer offers Start while it’s still being created. Why: Incus lists it (stopped) a moment before it starts it, and pressing Start then failed. It shows as creating until it’s running.',
+		],
+	},
+	{
+		version: '0.9.96',
+		date: '2026-11-26',
+		title: 'New containers finish being created',
+		fixed: [
+			'A new container stayed at “creating” for good. Why: Incus reads a container’s settings from its input whenever it isn’t typing at a screen, and My Own Data Center left that input open and empty, so Incus waited for it forever before even downloading. Incus now gets a closed input unless there’s something to send. While a container is being made you see Incus’s own progress (downloading, unpacking) and how long it’s been.',
+			'Container pages fit a phone screen. Fields beside a button, the power buttons and long lines no longer push the page past the right edge.',
+		],
+	},
+	{
+		version: '0.9.95',
+		date: '2026-11-26',
+		title: 'The container library fills in',
+		fixed: [
+			'New container showed no systems to pick. Why: the image server names an image’s architecture two ways (x86_64, and amd64 in its details), and My Own Data Center only looked for x86_64 in the details, so every image was skipped. It now reads both. If the library ever does come back empty, it says so and what to check.',
+		],
+	},
+	{
+		version: '0.9.94',
+		date: '2026-11-26',
+		title: 'Updates see lettered versions',
+		fixed: [
+			'0.9.93B was never offered as an update to 0.9.93A. Why: updates compared only the numbers in a version, so 0.9.93A and 0.9.93B looked the same. Letters now count (0.9.93 < 0.9.93A < 0.9.93B < 0.9.94). This release carries 0.9.93B’s container fix: containers no longer stop at “unknown flag: --format” after setting up, and clearing a container’s CPU cap works.',
+		],
+	},
+	{
+		version: '0.9.93B',
+		date: '2026-11-26',
+		title: 'Containers past the setup card',
+		fixed: [
+			'Containers stopped at “unknown flag: --format” after setting up. Why: My Own Data Center asked Incus for its details in a form Incus doesn’t offer. It now asks the way Incus does. Every other Incus command it uses was checked against the real Incus client.',
+			'Clearing a container’s CPU cap no longer says “Use a CPU share of 5 to 100%”.',
+		],
+	},
+	{
+		version: '0.9.93A',
+		date: '2026-11-26',
+		title: 'Add a container from Machines',
+		added: [
+			'Machines → Add (+) offers Container beside Machine and Virtual Machine. It shows the setup if containers aren’t set up yet, then the library.',
+		],
+		fixed: [
+			'machines-add-lxc no longer hangs after installing Incus. It starts Incus without waiting on systemd, then gives it two minutes; if Incus doesn’t come up, it prints why (its status and recent log) and stops, instead of sitting there. Every step now says what it’s doing.',
+			'The container setup card checks again every few seconds, so it moves on by itself once machines-add-lxc finishes.',
+			'Containers said “Incus isn’t installed” right after setting it up. Why: to work without a restart, My Own Data Center went through a command (sg) that Arch doesn’t have. machines-add-lxc now gives your account its own permission on Incus’s per-user door, which is exactly what Incus’s group grants, so it works straight away. Run machines-add-lxc again on a server that set up containers before.',
+		],
+	},
+	{
+		version: '0.9.92',
+		date: '2026-11-26',
+		title: 'Containers set up with one command',
+		fixed: [
+			'Setting up containers is one command: machines-add-lxc. It installs Incus, starts it now and at every boot, makes storage, adds your account to Incus’s per-user group, and opens Omarchy’s firewall for the containers’ own network. It’s safe to run again. Why: the long command it replaces stopped partway on Arch, which has no incus-startup service, and left containers half set up.',
+			'No restart after setting up containers. Until the server picks up your new group at the next sign-in, it reaches Incus through that group directly.',
+		],
+	},
+	{
+		version: '0.9.91',
+		date: '2026-11-26',
+		title: 'Containers catch up with Proxmox',
+		added: [
+			'Containers can start with the server, in the order you choose and with a delay between them. Why: a server with no screen should bring its containers back after a power cut without anyone signing in. New containers start with the server unless you switch it off. (Run the setup command again on a server that set up containers before, so Incus’s startup service is on.)',
+			'Change a container’s CPUs, CPU cap, CPU priority, memory and swap while it runs, and grow its disk.',
+			'A new container can get a root password and an SSH key. They’re handed straight to the container and not kept by My Own Data Center.',
+			'Back up a container to a single file on this server and restore it under a new name; clone it; or save it as a template, which then appears under Your templates when you make a new one.',
+			'Protect a container from deleting, and give it notes and tags. The Machines search finds the tags.',
+			'Live CPU and network graphs, and a file browser: download, upload, or copy a file into the server’s Downloads.',
+			'Containers appear in the Machines list too, each opening in its own sheet. The library adds CentOS Stream, Devuan and Gentoo.',
+		],
+	},
+	{
+		version: '0.9.90',
+		date: '2026-11-26',
+		title: 'Containers, Linen and Sky, and a restart that says when it will wait',
+		added: [
+			'This server’s Machines page can run a container: a Linux system that shares the server’s kernel. Choose Debian, Ubuntu, Alpine, Arch Linux, Fedora, Rocky Linux, AlmaLinux, or openSUSE. Start it, shut it down, open its terminal, open a port, or take a snapshot. It stays on this server’s page.',
+			'Appearance adds Linen and Sky. Sun and Moon use the light or dark palette you marked. Off returns to Horizon, Your photo, or Omarchy.',
+			'The Machines list says how many are shown when a filter or a search is hiding some, beside how many are online. Dismissing the filter note keeps it dismissed on this account, on every device.',
+		],
+		fixed: [
+			'Restart warns first when this computer’s disk is encrypted (Omarchy’s default) and doesn’t unlock by itself. Why: an encrypted disk asks for its password before anything on it runs, so after a restart the computer waits at that screen, and this server and remote access can’t start until someone types it at the computer. “Starts after a restart” only covers what happens once the disk is open. Settings now says so too, with how to have the disk unlock by itself.',
+		],
+	},
+	{
+		version: '0.9.89',
+		date: '2026-11-26',
+		title: 'Safer restarts, and a terminal that behaves like the one on your computer',
+		added: [
+			'Terminal on a computer: Ctrl+V (and Ctrl+Shift+V) pastes, Ctrl+Shift+C copies, and Ctrl+C copies when text is selected (otherwise it stops the running program, as always). Right-click pastes straight away over https://; over http:// browsers don’t let a page read the clipboard, so the browser’s own menu opens with Paste.',
+			'Change permissions on a computer that already has the connector runs the update for you: when its connector is online and allows the terminal, Update now opens a terminal there and runs the command, so there’s nothing to copy and paste. Why: it’s the same command you’d paste, run in a shell you already have as that user, so it reaches no further than you could by typing. Without the terminal ability, or with the computer offline, you still get the command to run yourself.',
+		],
+		fixed: [
+			'Restart and Shut down first make sure this server will start again by itself, with nobody signed in at it. If it can’t switch that on, it tells you before going ahead, instead of leaving a server with no screen down until someone signs in at it.',
+			'Opening a terminal again no longer types stray characters into it (like 1;2c0;276;0c2026;0$y). They were the terminal’s own answers to questions in the screen it was showing again.',
+			'Remote desktop on a phone fits the picture again when the remote screen changes size, instead of keeping the old fit.',
+			'A virtual machine’s screen no longer connects and disconnects over and over right after you sign in to it. Signing in sends the whole new picture at once, and on Wi-Fi or a phone that burst was more than the server let wait for the browser, so it cut the viewer off; reconnecting asked for the whole picture again, and the loop went on. Now the server slows the screen down until the browser catches up, and only lets go of a viewer that has read nothing for 30 seconds.',
+			'The terminal no longer seems to freeze: Ctrl+S doesn’t pause it any more, and a stuck resize can’t hold back what you type.',
+		],
+	},
+	{
+		version: '0.9.88',
+		date: '2026-11-26',
+		title: 'Use Hermes Agent as your assistant',
+		added: [
+			'Settings › Assistant: choose who answers in chat, the built-in assistant or Hermes Agent. If you already run Hermes on this server, Connect Hermes imports it: Hermes keeps its own model, memory and skills, and nothing needs setting up twice.',
+			'Hermes can look after this server from anywhere it runs (here, Telegram, Discord or its own CLI): apps, files, machines, storage and backups. Choose Full control, or Read only to let it look without changing anything.',
+			'Connecting changes Hermes’ own files the way Hermes documents them, keeps a copy of each first, and turns its API server on for this machine only. Disconnect Hermes undoes it.',
+			'Hermes can run somewhere else too: on another computer or in the cloud. Connect it by its address and key, and Settings shows the two lines to add on that machine so it can use this server (with a token you can replace any time).',
+			'The setup wizard now asks which assistant you want.',
+		],
+	},
+	{
+		version: '0.9.87',
+		date: '2026-11-25',
+		title: 'Steadier remote desktop, and servers that start after a restart',
+		fixed: [
+			'Viewing a desktop no longer drops and reconnects over and over when nothing on it is moving (an empty desktop, an idle window). The desktop only redraws when something changes, and a still screen was mistaken for a lost one; now the last picture is kept and resent.',
+			'An app opened from desktop mode (Google Chrome, say) now shows up in its window even when it opens on the computer’s own screen, for example because it was already running. It’s brought over instead of the launch giving up after 15 seconds.',
+			'Remote desktop no longer leaves part of the picture black after the remote screen changes size, or when you come back to the app: the whole screen is asked for again, instead of waiting for something on it to change.',
+			'The sign-in and setup screens show the My Own Data Center logo instead of the old umbrella, and phones and browsers fetch the new icons instead of keeping a cached umbrella.',
+			'A server with no screen now comes back by itself after a restart or a power cut. It used to stay off until someone signed in on it when the installer couldn’t switch on start at boot. It now switches that on by itself where it can, Settings › Software update shows whether it’s on (with a Turn on button), and the services keep retrying at boot instead of giving up.',
+		],
+	},
+	{
+		version: '0.9.86',
+		date: '2026-11-25',
+		title: 'QR code file transfers, and a steadier phone remote desktop',
+		added: [
+			'Files (desktop layout): right-click a file and choose Share via QR code. A phone that scans it gets a small download page in your app’s colours and background, without signing in. Handy for passing a file to someone in the house.',
+			'Right-click a folder, or empty space inside one, to upload from a phone: scan the code and pick photos or files to send straight into that folder.',
+			'Each code lasts 10 minutes and covers only that one file or folder. Stop sharing ends it at once, and so does signing out. Uploads never replace a file that’s already there.',
+		],
+		fixed: [
+			'Remote desktop on a phone: the keyboard you open with the keyboard button now stays up while you tap and drag on the screen, until you put it away with that button. Every tap used to close it.',
+			'Apps you open from this server’s desktop view now open on the screen you’re looking at. After using desktop mode, they could open on its hidden display instead, so they seemed to disappear.',
+		],
+	},
+	{
+		version: '0.9.85',
+		date: '2026-11-25',
+		title: 'Paste in the terminal, and a tidier Appearance page',
+		added: [
+			'Terminal: right-click pastes on a computer, even over http://, where the browser blocks reading the clipboard directly; the paste box opens instead. Right-click with text selected still copies.',
+			'Terminal: press and hold on a phone shows a Paste button, because a long press in the terminal did nothing useful before.',
+		],
+		fixed: [
+			'Removed the twelve older photo backgrounds (Yosemite Valley through Tower). They were outdated and crowded the picker; Omarchy backgrounds, the server wallpaper, your own photo and solid colours remain. If one of them was your desktop background, it switches to the Omarchy background.',
+			'Dock and desktop icon settings now appear only in the desktop layout. On a phone they controlled things you can’t see there, which was confusing.',
+			'A Mac that joins uses a Python that can verify this server’s certificate.',
+			'When a list cannot be loaded, including backups, plugins, and a new machine, the page says so instead of looking empty.',
+			'Keyboard focus, screen readers, and the phone’s page title follow the screen you are on.',
+			'Daylight and the Omarchy theme keep secondary text and accent text readable.',
+			'The App Store window follows the computer you just picked.',
+		],
+	},
+	{
+		version: '0.9.84',
+		date: '2026-11-25',
+		title: 'Wake a computer from any machine that is on',
+		added: [
+			'Wake up uses every network card that computer has shown. The packet goes out from this server and from every computer that is on.',
+		],
+	},
+	{
+		version: '0.9.83',
+		date: '2026-11-25',
+		title: 'Apps can sign in with My Own Data Center',
+		added: [
+			'An app can sign in with My Own Data Center. The app has to prove it started that sign-in, and a matching email does not take over an existing account.',
+		],
+	},
+	{
+		version: '0.9.82',
+		date: '2026-11-25',
+		title: 'Encrypted Drive backups, and sturdier guest enroll',
+		added: [
+			'Backups can keep an encrypted copy in a Google Drive folder that this server creates. The connection can see only that folder.',
+		],
+		fixed: [
+			'An Alpine guest installs curl and runuser, and the connector starts only after enroll succeeds. Fedora sets the guest-agent permission with the real setsebool path.',
+		],
+	},
+	{
+		version: '0.9.81',
+		date: '2026-11-24',
+		title: 'More Linux guests, and readings from the machine',
+		added: [
+			'Swap shows on a machine that has it, in the same drawings as the other readings. Home keeps its aggregate gauges.',
+			'The catalog adds CachyOS, Linux Mint, openSUSE Leap, Rocky Linux, Debian 12, and Ubuntu 22.04. Omarchy is 4.5.0. CachyOS and Linux Mint boot their own installers.',
+			'A joined computer shows when a restart is needed, how many security updates are waiting, failed services, and listening ports.',
+		],
+		fixed: [
+			'Create waits until a Debian, Fedora, or Omarchy guest can enroll. A failed connector install stays an error.',
+		],
+	},
+	{
+		version: '0.9.80',
+		date: '2026-11-24',
+		title: 'Alpine guests, and Machines on every screen',
+		added: [
+			'An Alpine guest can install the connector. It runs as an OpenRC service. Windows, macOS, and Home Assistant still do not.',
+			'A guest on passt reaches this server through an address it can use.',
+			'Machines uses the same list on the phone and on the desktop. A joined computer can create a virtual machine from its own page.',
+		],
+		fixed: [
+			'Restarting this server stops only its own process, so virtual machines keep running. The installer asks to run once so that takes effect.',
+		],
+	},
+	{
+		version: '0.9.79',
+		date: '2026-11-24',
+		title: 'One drawing for a machine’s readings',
+		added: [
+			'A tap on a machine’s readings cycles one line, three lines, and gauges. That choice is saved with the account and is the same on every machine. Home keeps its aggregate gauges.',
+		],
+	},
+	{
+		version: '0.9.78',
+		date: '2026-11-24',
+		title: 'Linux guests, Square panes, and a steadier stream',
+		added: [
+			'A Linux guest can install the connector, on this server or on a joined computer. It runs on Linux with systemd. Windows, macOS, and Home Assistant do not run it.',
+			'Square panes resize when you drag the gap between them.',
+		],
+		fixed: [
+			'The guest installer checks this server’s certificate.',
+			'A machine’s usage rate is taken when the reading starts, so a slow reading does not shrink the percentage.',
+			'On a slow connection, the desktop stream gives audio a little more room, and the stats line shows the jitter. A local network keeps the short cushion.',
+		],
+	},
+	{
+		version: '0.9.77',
+		date: '2026-11-24',
+		title: 'Hyprland 0.57, and stream profiles',
+		fixed: [
+			'Opening an app on this server’s screen, and moving it between workspaces, works on Hyprland 0.57.',
+		],
+		added: [
+			'The screen can try each hardware codec and remember the one that plays smoothly on this device. Only the owner can do that.',
+		],
+	},
+	{
 		version: '0.9.76',
 		date: '2026-11-24',
 		title: 'This server’s screen, and readings from an older server',
@@ -40,7 +418,7 @@ export const CHANGELOG: Release[] = [
 			'A Windows ISO you install by hand gets a SATA disk and an e1000e network card, so Setup can see them. An IDE drive is refused on a q35 machine before it is saved.',
 			'Cloning a machine keeps the source’s history until the copy finishes. A rollback shows the disk size the image actually has, and a live backup’s progress follows the units virsh prints.',
 			'The Machine Summary page loads that machine’s chart only. The running count is this server’s machines.',
-			'Using My Own Data Center keeps the sign-in behind Files and consoles alive. A renewal the server refuses is tried again.',
+			'Using My Own Data Center keeps the sign-in behind Files, Terminal, and Desktop alive. A renewal the server refuses is tried again.',
 			'A new chat stays the same chat when the first reply fails. A reply that never finishes is cut off, and you can stop it.',
 			'Files and Settings still open when the browser blocks storage. A new password asks for 8 characters, and a refused update says why.',
 			'An open clock or system menu closes when you click outside it. Accent text stays readable on light and dark themes.',
@@ -115,7 +493,7 @@ export const CHANGELOG: Release[] = [
 		date: '2026-11-22',
 		title: 'Virtual machine controls are back',
 		fixed: [
-			'Each virtual machine in Machines has its controls on its row again: Start or Resume when it’s off, and Console, Shut down, Reboot and Pause when it’s running. Opening a machine that isn’t running goes straight to Power.',
+			'Each virtual machine in Machines has its controls on its row again: Start or Resume when it’s off, and Desktop, Shut down, Reboot and Pause when it’s running. Opening a machine that isn’t running goes straight to Power.',
 			'In Files, the machine you’re browsing from is called Host server.',
 		],
 	},
@@ -148,7 +526,7 @@ export const CHANGELOG: Release[] = [
 		fixed: [
 			'Signing out returns to the signed-out page, and only after sign-out succeeds.',
 			'Opening Terminal again focuses the shell you already have.',
-			'Pasting into the terminal inserts at the cursor. Option keys type the character. On a phone, Back closes a full-screen terminal or console.',
+			'Pasting into the terminal inserts at the cursor. Option keys type the character. On a phone, Back closes a full-screen Terminal or Desktop.',
 			'The phone layout scrolls across the width of the screen. A confirmation sits above the terminal. Files search waits until two characters are typed.',
 			'A request with no body is answered, instead of failing as an internal error. When this computer has no address, that address is left out. A pool on another computer is described as ~/Pools on that computer.',
 		],
@@ -753,8 +1131,8 @@ export const CHANGELOG: Release[] = [
 		title: 'The Super key reaches your desktop',
 		added: [
 			'Your Windows / ⌘ / Super key now always reaches the Omarchy desktop and your machines as Super, from any browser that receives it.',
-			'Computers that keep Super for themselves (an Omarchy or Windows desktop): in the console’s Keys menu, choose Right Alt or Right Ctrl to work as Super instead. Your choice is remembered on that browser.',
-			'A Super button in the console toolbar holds Super down until you click it again, so Super + Enter, Super + Space and the rest work from any keyboard.',
+			'Computers that keep Super for themselves (an Omarchy or Windows desktop): in Desktop’s Keys menu, choose Right Alt or Right Ctrl to work as Super instead. Your choice is remembered on that browser.',
+			'A Super button in the Desktop toolbar holds Super down until you click it again, so Super + Enter, Super + Space and the rest work from any keyboard.',
 			'Keys menu shortcuts for the Omarchy desktop: app launcher, Omarchy menu, terminal, close window and all shortcuts.',
 			'On a phone or tablet, the super key works like ctrl and alt: tap it, then the next key. Double tap it for Super on its own.',
 		],
@@ -811,7 +1189,7 @@ export const CHANGELOG: Release[] = [
 		date: '2026-11-13',
 		title: 'Machines, the Proxmox way',
 		added: [
-			'On the desktop, Machines looks like Proxmox: a server and machine tree, a toolbar (Start, Shutdown, Reboot, Stop, Pause, Hibernate, Console, Clone, Remove), settings panels and a task log.',
+			'On the desktop, Machines looks like Proxmox: a server and machine tree, a toolbar (Start, Shutdown, Reboot, Stop, Pause, Hibernate, Desktop, Clone, Remove), settings panels and a task log.',
 			'Summary with live CPU, memory, network and disk graphs, plus notes for each machine.',
 			'Hardware: memory in MiB, sockets and cores, CPU type, BIOS (SeaBIOS or UEFI), display, chipset, network model, MAC address and disconnect; add, grow, tune and remove disks; add CD/DVD drives and insert or eject ISOs from your Home folder.',
 			'Options: rename, start at boot with order and delay, boot order (disks, CD/DVD, network), boot menu, protection against deletion, QEMU Guest Agent, tablet pointer, ACPI and KVM.',
@@ -905,7 +1283,7 @@ export const CHANGELOG: Release[] = [
 		date: '2026-11-13',
 		title: 'Sign in the desktop from anywhere',
 		added: [
-			'When the Omarchy desktop is at its sign-in screen, its console in Machines now offers “Sign in to the desktop”. Confirm your Omarchy Server password and the desktop signs you in once, the same way Omarchy’s own first boot does. It also clears a lockout after too many wrong passwords.',
+			'When the Omarchy desktop is at its sign-in screen, Desktop in Machines now offers “Sign in to the desktop”. Confirm your Omarchy Server password and the desktop signs you in once, the same way Omarchy’s own first boot does. It also clears a lockout after too many wrong passwords.',
 			'Open waits for an app that’s still starting (Home Assistant often takes a minute), then goes to it, instead of landing on a page that doesn’t load.',
 		],
 	},
@@ -1058,7 +1436,7 @@ export const CHANGELOG: Release[] = [
 			'Desktops: Ubuntu Desktop, Debian Desktop and Fedora Desktop install with one tap and start into their desktop.',
 			'More systems: Ubuntu 26.04, Fedora Server and Alpine Linux.',
 			'Omarchy as a machine: it downloads the official ISO and installs itself with your username and password.',
-			'Your own ISO: any .iso in Files shows up under New machine. Windows 10 and 11 install by themselves with your account; other ISOs boot their installer in the console.',
+			'Your own ISO: any .iso in Files shows up under New machine. Windows 10 and 11 install by themselves with your account; other ISOs boot their installer on the Desktop.',
 		],
 	},
 	{
@@ -1095,11 +1473,21 @@ export const CHANGELOG: Release[] = [
 	},
 ]
 
-const parse = (v: string) => v.split('.').map((n) => parseInt(n, 10) || 0)
+// A number with an optional letter after it: 0.9.93 < 0.9.93A < 0.9.93B < 0.9.94.
+const parse = (v: string) =>
+	v.split('.').map((part) => {
+		const m = /^(\d*)([A-Za-z]*)/.exec(part) ?? []
+		return [parseInt(m[1] ?? '', 10) || 0, (m[2] ?? '').toUpperCase()] as const
+	})
 export function newer(a: string, b: string) {
 	const x = parse(a)
 	const y = parse(b)
-	for (let i = 0; i < Math.max(x.length, y.length); i++) if ((x[i] ?? 0) !== (y[i] ?? 0)) return (x[i] ?? 0) > (y[i] ?? 0)
+	for (let i = 0; i < Math.max(x.length, y.length); i++) {
+		const [na, la] = x[i] ?? [0, '']
+		const [nb, lb] = y[i] ?? [0, '']
+		if (na !== nb) return na > nb
+		if (la !== lb) return la.length !== lb.length ? la.length > lb.length : la > lb
+	}
 	return false
 }
 // Releases a device hasn't seen yet. With no record (first run of this feature), just the newest one.

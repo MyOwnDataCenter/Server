@@ -3,10 +3,11 @@ import {useEffect, useMemo, useState, type CSSProperties, type FormEvent} from '
 import {useQuery, useQueryClient} from '@tanstack/react-query'
 
 import {mutate, query, type Listing} from './api'
+import {plural} from './plural'
 import {Icon, type IconName} from './icons'
 import {safeSession} from './safeStorage'
 import {Field, Group, Row, Segmented, Switch, haptic, useConfirm, useToast} from './ui'
-import {defaultSelectedVms, formatBytes, formatTotalSize, isKeyChangedError, itemStatusForView, jobSummary, retryActionState, type UnraidItem as Item, type UnraidJob as Job} from './unraidView'
+import {defaultSelectedVms, formatBytes, formatTotalSize, isKeyChangedError, itemStatusForView, jobSummary, retryActionState, typedSshPort, type UnraidItem as Item, type UnraidJob as Job} from './unraidView'
 
 type ShareConfig = {comment: string; export: string; security: string; useCache: string; splitLevel: string}
 type Share = {name: string; size: number | null; kind: 'share' | 'appdata' | 'system' | 'domains' | 'isos'; config?: ShareConfig}
@@ -120,7 +121,13 @@ export function UnraidPage({onBack}: {onBack: () => void}) {
 					error={error}
 					onCancel={async () => {
 						const ok = await confirm({title: 'Stop the move?', body: 'What’s being copied right now finishes; the rest is skipped. You can start again later, and copies pick up where they left off.', confirm: 'Stop', danger: true, icon: 'stop'})
-						if (ok) await mutate('unraid.cancel').then(refresh)
+						if (!ok) return
+						try {
+							await mutate('unraid.cancel')
+							refresh()
+						} catch (e) {
+							toast((e as Error).message, true)
+						}
 					}}
 					onAgain={look}
 					onResync={async () => {
@@ -150,7 +157,7 @@ export function UnraidPage({onBack}: {onBack: () => void}) {
 						<b>{scanning ? `Looking at ${s.connected.host}…` : `Connected to ${s.connected.host}`}</b>
 					</div>
 					<p className="muted bk-next">{scanning ? 'Measuring shares, containers, VMs, and user scripts. Big shares take a minute or two.' : `Unraid ${s.connected.version}`}</p>
-					{error && <p className="bk-err">{error}</p>}
+					{error && <p className="bk-err" role="alert">{error}</p>}
 					{!scanning && (
 						<button className="btn primary" onClick={look}>
 							Look again
@@ -196,7 +203,7 @@ function ConnectCard({onConnected}: {onConnected: () => void}) {
 		setBusy(true)
 		setError(null)
 		try {
-			const parsedPort = Number(port) || 22
+			const parsedPort = typedSshPort(port)
 			await mutate('unraid.connect', {
 				host,
 				...(parsedPort !== 22 ? {port: parsedPort} : {}),
@@ -217,7 +224,7 @@ function ConnectCard({onConnected}: {onConnected: () => void}) {
 	const forget = async () => {
 		setForgetting(true)
 		try {
-			await mutate('unraid.forgetHost', {host, ...(Number(port) && Number(port) !== 22 ? {port: Number(port)} : {})})
+			await mutate('unraid.forgetHost', {host, ...(typedSshPort(port) !== 22 ? {port: typedSshPort(port)} : {})})
 			setError(null)
 			toast('Forgot this server’s key. Connect again.')
 		} catch (err) {
@@ -280,7 +287,7 @@ function ConnectCard({onConnected}: {onConnected: () => void}) {
 					</p>
 				)}
 				{error && (
-					<div className="error">
+					<div className="error" role="alert">
 						<Icon name="alert" size={18} />
 						{error}
 					</div>
@@ -357,7 +364,7 @@ function Choose({scan, host, fingerprint, version, onStart, onDisconnect}: {scan
 			active = false
 			clearTimeout(t)
 		}
-	}, [shareList, containerList, vmList, destination, portOverrides, shutdownRunningVms, count])
+	}, [shareList, containerList, vmList, destination, portOverrides, preserveSettings, shutdownRunningVms, count])
 
 	const totalLabel = useMemo(
 		() =>
@@ -399,7 +406,7 @@ function Choose({scan, host, fingerprint, version, onStart, onDisconnect}: {scan
 					const choosable = x.kind === 'share' || x.kind === 'isos'
 					const cfgMeta = [x.config?.comment, x.config?.security && x.config.security !== 'public' ? `Unraid: ${x.config.security}` : ''].filter(Boolean).join(' · ')
 					return (
-						<button key={x.name} type="button" className="row" style={{minHeight: 56}} disabled={!choosable} onClick={() => choosable && flip(shares, setShares, x.name)}>
+						<button key={x.name} type="button" className="row" style={{minHeight: 56}} disabled={!choosable} role={choosable ? 'checkbox' : undefined} aria-checked={choosable ? shares.has(x.name) : undefined} onClick={() => choosable && flip(shares, setShares, x.name)}>
 							<span className="row-ico" style={{'--c': shares.has(x.name) ? 'var(--accent)' : '#8e8e93'} as CSSProperties}>
 								{choosable ? <Check on={shares.has(x.name)} /> : <Icon name="folder" size={18} />}
 							</span>
@@ -420,7 +427,7 @@ function Choose({scan, host, fingerprint, version, onStart, onDisconnect}: {scan
 						const volCount = c.namedVolumes?.length ?? 0
 						return (
 							<div key={c.id}>
-								<button type="button" className="row" style={{minHeight: 60}} disabled={c.installed} onClick={() => flip(containers, setContainers, c.id)}>
+								<button type="button" className="row" style={{minHeight: 60}} disabled={c.installed} role="checkbox" aria-checked={containers.has(c.id)} onClick={() => flip(containers, setContainers, c.id)}>
 									<span className="row-ico" style={{'--c': containers.has(c.id) ? 'var(--accent)' : '#8e8e93'} as CSSProperties}>
 										<Check on={containers.has(c.id)} />
 									</span>
@@ -464,7 +471,7 @@ function Choose({scan, host, fingerprint, version, onStart, onDisconnect}: {scan
 						const off = v.state === 'shut off'
 						return (
 							<div key={v.name}>
-								<button type="button" className="row" style={{minHeight: 60}} disabled={!!v.installed || !!v.problems.length} onClick={() => flip(vms, setVms, v.name)}>
+								<button type="button" className="row" style={{minHeight: 60}} disabled={!!v.installed || !!v.problems.length} role="checkbox" aria-checked={vms.has(v.name)} onClick={() => flip(vms, setVms, v.name)}>
 									<span className="row-ico" style={{'--c': vms.has(v.name) ? 'var(--accent)' : '#8e8e93'} as CSSProperties}>
 										<Check on={vms.has(v.name)} />
 									</span>
@@ -473,7 +480,7 @@ function Choose({scan, host, fingerprint, version, onStart, onDisconnect}: {scan
 										<span>
 											{v.installed ? 'Already here' : (v.problems[0] ??
 													[
-														`${v.cores} cores`,
+														plural(v.cores, 'core'),
 														`${Math.round(v.memoryMb / 1024)} GB`,
 														formatBytes(v.size),
 														v.nvram ? 'UEFI NVRAM' : '',
@@ -666,8 +673,8 @@ function JobView({job, connected, scanning, error, onCancel, onAgain, onResync, 
 					)}
 					<b>{summary.heading}</b>
 				</div>
-				{job.stopped && <p className="bk-err">{job.stopped}</p>}
-				{error && <p className="bk-err">{error}</p>}
+				{job.stopped && <p className="bk-err" role="alert">{job.stopped}</p>}
+				{error && <p className="bk-err" role="alert">{error}</p>}
 				{summary.running ? (
 					<button className="btn" onClick={onCancel} disabled={job.cancelled}>
 						{job.cancelled ? 'Stopping…' : 'Stop'}

@@ -529,6 +529,7 @@ test('parseUsbLive matches vendor and product only inside one hostdev', () => {
 
 describe('app USB compose', () => {
 	let root, data, d, auth, calls
+	const helperCalls = []
 	const git = (args, cwd) => execFileSync('git', gitArgv(args), {cwd, stdio: 'pipe'}).toString()
 	before(async () => {
 		root = await mkdtemp(join(os.tmpdir(), 'usb-app-'))
@@ -584,6 +585,7 @@ describe('app USB compose', () => {
 			usbOptions: {sysfs: join(root, 'sys/bus/usb/devices'), serialById: join(root, 'dev/serial/by-id')},
 			machineOptions: {run: async () => '', kvmDevice: join(root, 'kvm')},
 			appOptions: {run, allowFileStores: true, gatewayHost: '127.0.0.1', defaultStores: [{url: `file://${store}`}], systemApps: null},
+			storageOptions: {run: async (cmd, args) => (cmd === 'sudo' ? (helperCalls.push(args.slice(1).join(' ')), 'ok') : '')},
 			updaterOptions: {autoCheck: false},
 		})
 		const login = await (await fetch(`${d.url}/trpc/user.loginNative`, {method: 'POST', headers: {'content-type': 'application/json'}, body: JSON.stringify({userId: 'owner', password: 'correct horse', client: {id: 't'}})})).json()
@@ -635,6 +637,51 @@ describe('app USB compose', () => {
 		const listed = await call('usb.list', undefined, 'query')
 		assert.equal(listed.devices.find((d) => d.id === stick.id).needsRestart, !plugged)
 		assert.equal(calls.some((c) => c.args?.includes('up') || c.args?.includes('restart')), false)
+	})
+
+	test('uninstalling an app takes the udev rule of its stick out', async () => {
+		// demo-app is still installed, with the stick attached, from the test above.
+		const listed = await call('usb.list', undefined, 'query')
+		assert.equal(listed.devices.find((d) => d.id === stick.id).bound.id, 'demo-app')
+		helperCalls.length = 0
+		await call('apps.uninstall', {appId: 'demo-app'})
+		assert.ok(helperCalls.some((c) => c.endsWith('usb-forget a8e5c3c0')), `the helper was asked: ${helperCalls.join(' | ')}`)
+	})
+})
+
+describe('removing a guest that has a stick attached', () => {
+	const rec = {id: 'stick-1', serial: 'AB12'}
+	test('the rule goes unless another guest still holds a stick with that serial', async () => {
+		const asked = []
+		const held = []
+		const usb = createUsb({enumerate: async () => [], guests: {bindings: async () => held}, helper: async (verb, args) => asked.push([verb, ...args])})
+		held.push({kind: 'app', id: 'other', name: 'Other', devices: [{id: 'stick-2', serial: 'AB12'}]})
+		await usb.release([rec])
+		assert.deepEqual(asked, [])
+		held.length = 0
+		await usb.release([rec, {id: 'stick-3'}, {id: 'stick-4', serial: 'bad serial!'}])
+		assert.deepEqual(asked, [['usb-forget', 'AB12']])
+	})
+
+	test('deleting a machine tells the server which sticks it had', async () => {
+		const root = await mkdtemp(join(os.tmpdir(), 'usb-vm-rm-'))
+		const dataDir = join(root, 'data')
+		const kvm = join(root, 'kvm')
+		await writeFile(kvm, '')
+		await mkdir(join(dataDir, 'machines', 'vms', 'abcd1234'), {recursive: true})
+		await writeFile(
+			join(dataDir, 'machines', 'machines.json'),
+			JSON.stringify({machines: [{id: 'abcd1234', name: 'Box', osId: 'testos-amd64', cores: 1, memoryGb: 1, memoryMb: 1024, diskSizeGb: 10, portForwards: [], state: 'stopped', createdAt: 1, usbDevices: [rec]}]}),
+		)
+		const released = []
+		try {
+			const machines = createMachines({dataDir, run: async () => '', kvmDevice: kvm, catalogUrl: 'https://example.invalid/catalog.json', fetchImpl: async () => ({ok: false}), usbReleased: async (devices) => released.push(devices)})
+			await machines.ready
+			await machines.procedures['machines.uninstall'].run({id: 'abcd1234'}, {})
+			assert.deepEqual(released, [[rec]])
+		} finally {
+			await rm(root, {recursive: true, force: true})
+		}
 	})
 })
 
@@ -825,5 +872,14 @@ test('usb-overlay-restart-recreate', async () => {
 		assert.deepEqual(saved.apps.find((a) => a.id === 'demo').usbApplied, ['present-stick'])
 	} finally {
 		await ctx.close()
+	}
+})
+
+test('a stick whose serial has a space or a + is passed through by that serial and then reported as attached', () => {
+	for (const serial of ['0001 0002', 'A+B-7']) {
+		const stick = {id: `stick-${serial}`, vendorId: '10c4', productId: 'ea60', serial}
+		const xml = hostdevXml(stick)
+		assert.ok(xml.includes(`<serial>${serial}</serial>`), xml)
+		assert.deepEqual(parseUsbLive(`<domain><devices>${xml}</devices></domain>`, [stick]), [stick.id])
 	}
 })

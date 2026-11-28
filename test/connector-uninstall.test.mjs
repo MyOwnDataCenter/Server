@@ -99,6 +99,40 @@ test('uninstall removes the connector cache and keeps Restored', async () => {
 	assert.equal(await readFile(join(restored, 'photo'), 'utf8'), 'mine')
 })
 
+test('OpenRC uninstall stops the system service and removes the init script', async () => {
+	const home = join(root, 'openrc')
+	await mkdir(home)
+	const dir = join(root, `openrc-bin-${Math.random().toString(16).slice(2)}`)
+	await mkdir(dir)
+	await writeFile(join(dir, 'sudo'), `#!/bin/sh
+echo "sudo $*" >>"$FAKE_LOG"
+exit 0
+`)
+	await writeFile(join(dir, 'rc-service'), `#!/bin/sh
+echo "rc-service $*" >>"$FAKE_LOG"
+exit 0
+`)
+	await writeFile(join(dir, 'rc-update'), `#!/bin/sh
+echo "rc-update $*" >>"$FAKE_LOG"
+exit 0
+`)
+	await chmod(join(dir, 'sudo'), 0o755)
+	await chmod(join(dir, 'rc-service'), 0o755)
+	await chmod(join(dir, 'rc-update'), 0o755)
+	for (const name of ['uname', 'id', 'rm', 'bash']) {
+		await writeFile(join(dir, name), `#!/bin/sh\nexec /usr/bin/${name} "$@"\n`)
+		await chmod(join(dir, name), 0o755)
+	}
+	const r = run(home, dir, {PATH: dir})
+	assert.equal(r.status, 0, r.out)
+	const log = await readFile(r.log, 'utf8')
+	assert.match(log, /rc-service omarchy-connector stop/)
+	assert.match(log, /rc-update del omarchy-connector/)
+	assert.match(log, /sudo rm -f[^\n]*\/etc\/init\.d\/omarchy-connector/)
+	assert.doesNotMatch(log, /systemctl/)
+	assert.match(r.out, /Done\./)
+})
+
 test('uninstall removes the cache at XDG_CACHE_HOME', async () => {
 	const home = join(root, 'xdg-cache')
 	const xdg = join(root, 'xdg-home')
@@ -111,4 +145,26 @@ test('uninstall removes the cache at XDG_CACHE_HOME', async () => {
 	assert.equal(r.status, 0, r.out)
 	await assert.rejects(readFile(join(cache, 'restic', 'index')))
 	assert.equal(await readFile(join(home, '.cache/omarchy-connector/restic', 'index'), 'utf8'), 'other')
+})
+
+test('uninstall keeps virtual machine disks and installed apps, and says where they are', async () => {
+	const home = join(root, 'keeps-vms')
+	const data = join(home, '.local/share/omarchy-connector')
+	await mkdir(join(data, 'vms/abcd1234'), {recursive: true})
+	await mkdir(join(data, 'vm-images'), {recursive: true})
+	await mkdir(join(data, 'apps/notes'), {recursive: true})
+	await writeFile(join(data, 'agent.py'), 'x')
+	await writeFile(join(data, 'vm-helper.py'), 'x')
+	await writeFile(join(data, 'vms/abcd1234/disk.qcow2'), 'disk')
+	await writeFile(join(data, 'vm-images/debian-12'), 'image')
+	await writeFile(join(data, 'apps/notes/compose.yml'), 'services: {}')
+	const r = run(home, await bin())
+	assert.equal(r.status, 0, r.out)
+	await assert.rejects(readFile(join(data, 'agent.py')))
+	await assert.rejects(readFile(join(data, 'vm-helper.py')))
+	assert.equal(await readFile(join(data, 'vms/abcd1234/disk.qcow2'), 'utf8'), 'disk')
+	assert.equal(await readFile(join(data, 'vm-images/debian-12'), 'utf8'), 'image')
+	assert.equal(await readFile(join(data, 'apps/notes/compose.yml'), 'utf8'), 'services: {}')
+	assert.match(r.out, /virtual machines/i)
+	assert.match(r.out, /omarchy-connector/)
 })

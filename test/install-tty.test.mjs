@@ -134,3 +134,14 @@ test('no terminal but an owner already exists: services are still created', {ski
 		await rm(dir, {recursive: true, force: true})
 	}
 })
+
+test('omarchyd kills only its own process so libvirt guests survive a restart', {skip}, async () => {
+	const {dir, out, units} = await runHeadless(0)
+	try {
+		assert.equal(out.status, 0, out.stderr + out.stdout)
+		const omarchyd = await readFile(join(units, 'omarchyd.service'), 'utf8')
+		assert.match(omarchyd, /^KillMode=process$/m, omarchyd)
+	} finally {
+		await rm(dir, {recursive: true, force: true})
+	}
+})

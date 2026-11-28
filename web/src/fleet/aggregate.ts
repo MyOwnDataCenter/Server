@@ -1,4 +1,4 @@
-// Home rings count online computers only. A guest's CPU is already inside its host.
+// Home rings count online computers only. A guest's or system container's CPU is already inside its host.
 // CPU is weighted by cores. GPU is the average of computers that have one.
 // Temperature is the hottest computer, never an average.
 // Battery is one ring: each laptop is an arc from 12 o'clock, longest drawn first.

@@ -28,7 +28,7 @@ export function appendLiveText(items: AssistantItem[] | null, turn: LiveTurnStat
 		const part = turn.part + 1
 		const nextId = `${turn.baseId}-${part}`
 		const next: AssistantItem[] = items.map((b) => (b.kind === 'text' && b.id === turn.liveId ? {...b, streaming: false} : b))
-		next.push({id: nextId, kind: 'text', role: 'assistant', content: text, streaming: true})
+		next.push({id: nextId, kind: 'text', role: 'assistant', content: text, streaming: true, ...(cur.via ? {via: cur.via} : {})})
 		return {items: next, turn: {...turn, liveId: nextId, afterTool: false, part}}
 	}
 	return {
@@ -51,11 +51,23 @@ export function insertLiveAction(items: AssistantItem[] | null, liveId: string, 
 	return [...items, card]
 }
 
+// The line above a live reply: a switch notice, or the name of the provider that answered.
+// A notice already on the bubble stays when the speaker name arrives after it.
+export function noteLiveVia(items: AssistantItem[] | null, liveId: string, via: string, opts?: {keep?: boolean}): AssistantItem[] | null {
+	const line = via.trim()
+	if (!items || !line) return items
+	return items.map((b) => {
+		if (b.kind !== 'text' || b.id !== liveId) return b
+		if (opts?.keep && b.via) return b
+		return {...b, via: line}
+	})
+}
+
 export function finishLiveItems(items: AssistantItem[] | null, liveId: string, dropEmpty: boolean): AssistantItem[] | null {
 	if (!items) return items
 	return items.flatMap((b) => {
 		if (b.kind !== 'text' || b.id !== liveId) return [b]
-		if (!b.content && dropEmpty) return []
+		if (!b.content && dropEmpty && !b.via) return []
 		return [{...b, streaming: false}]
 	})
 }

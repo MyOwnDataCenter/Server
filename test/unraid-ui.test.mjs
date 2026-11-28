@@ -120,7 +120,7 @@ test('JobView shows retry scan progress and errors when Try the rest again runs'
 	assert.match(src, /error=\{error\}/)
 	assert.match(src, /retryActionState\(scanning\)/)
 	const jobViewSrc = src.slice(src.indexOf('function JobView'))
-	assert.match(jobViewSrc, /error && <p className="bk-err">\{error\}<\/p>/)
+	assert.match(jobViewSrc, /error && <p className="bk-err" role="alert">\{error\}<\/p>/)
 })
 
 test('installed VMs are deselected by default and disabled in Choose', async () => {

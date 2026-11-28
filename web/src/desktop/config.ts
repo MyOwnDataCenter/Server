@@ -2,27 +2,11 @@
 // icons on the desktop. Saved on the server for your account, so every browser shows the same desktop.
 import {useCallback, useEffect, useState} from 'react'
 
-export const WALLPAPERS = [
-	{id: 'valley', name: "Yosemite Valley", by: "Aniket Doele", hsl: '197 45% 55%'},
-	{id: 'halfdome', name: "Half Dome at Night", by: "Pexels", hsl: '205 45% 55%'},
-	{id: 'dolomites', name: "Dolomites", by: "Unsplash", hsl: '23 45% 55%'},
-	{id: 'meadow', name: "Alpine Meadow", by: "Peter Thomas", hsl: '198 68% 55%'},
-	{id: 'canyon', name: "Slot Canyon", by: "Ashim D'Silva", hsl: '19 71% 55%'},
-	{id: 'surf', name: "Surf", by: "Nattu Adnan", hsl: '197 85% 55%'},
-	{id: 'pier', name: "Pier at Dusk", by: "Unsplash", hsl: '10 62% 55%'},
-	{id: 'fern', name: "Fern", by: "Unsplash", hsl: '139 45% 55%'},
-	{id: 'dunes', name: "Dunes", by: "David Emrich", hsl: '32 45% 55%'},
-	{id: 'orbit', name: "Orbit", by: "SpaceX", hsl: '200 85% 55%'},
-	{id: 'dahlia', name: "Dahlia", by: "Tj Holowaychuk", hsl: '337 72% 55%'},
-	{id: 'tower', name: "Tower", by: "Viktor Forgacs", hsl: '189 45% 55%'},
-] as const
-export type BuiltinWallpaper = (typeof WALLPAPERS)[number]['id']
 // 'server' = your My Own Data Center wallpaper (what the phone shows); 'photo' = the photo you uploaded;
 // 'omarchy' = an Omarchy desktop background (which one: prefs.omarchyBackground, or the desktop's own).
 // 'color:#rrggbb' = a plain colour instead of a picture.
-export type WallpaperId = BuiltinWallpaper | 'server' | 'photo' | 'omarchy' | `color:#${string}`
+export type WallpaperId = 'server' | 'photo' | 'omarchy' | `color:#${string}`
 export const solidOf = (w: string) => (/^color:#[0-9a-f]{6}$/i.test(w) ? w.slice(6).toLowerCase() : null)
-export const wallpaperSrc = (id: string, thumb = false) => `/wallpapers/${id}${thumb ? '-thumb' : ''}.webp`
 
 export type DeskStyle = 'yaru' | 'glass' | 'graphite' | 'daylight'
 export const STYLES: {id: DeskStyle; name: string; note: string}[] = [
@@ -49,8 +33,10 @@ export type DeskConfig = {
 	shell: DeskShell
 	// Omarchy Super shortcuts, key capture, and the snippet. Square tiles without this.
 	omarchySuperKeys: boolean
-	dock: {position: DockPos; iconSize: number; hover: DockHover; magnify: number; bounce: boolean; floating: boolean; autohide: boolean; showRunning: boolean; items: string[]}
+	dock: {position: DockPos; iconSize: number; hover: DockHover; magnify: number; bounce: boolean; floating: boolean; autohide: boolean; showRunning: boolean; items: string[]; homeAdded?: boolean}
 	icons: DeskIcon[]
+	/** Once true, a Home folder shortcut on the desktop stays a folder. The first load turns the old Home folder icon into the Home page. */
+	homePageIcon?: boolean
 	showIcons: boolean
 	// 'auto': a window when the app allows being shown inside one, otherwise a browser tab
 	appsOpenIn: 'auto' | 'tab'
@@ -60,25 +46,37 @@ export type DeskConfig = {
 const PREVIOUS_SYSTEM_DOCK = ['files', 'apps', 'store', 'terminal', 'machines', 'system', 'settings'] as const
 export const SYSTEM_DOCK = ['home', ...PREVIOUS_SYSTEM_DOCK] as const
 
-export const PRESETS: {id: string; name: string; wallpaper: BuiltinWallpaper; style: DeskStyle; accent: DeskAccent}[] = [
-	{id: 'ubuntu', name: 'Ubuntu', wallpaper: 'canyon', style: 'yaru', accent: 'peach'},
-	{id: 'yosemite', name: 'Yosemite', wallpaper: 'valley', style: 'glass', accent: 'wallpaper'},
-	{id: 'midnight', name: 'Midnight', wallpaper: 'halfdome', style: 'graphite', accent: 'blue'},
-	{id: 'coast', name: 'Coast', wallpaper: 'surf', style: 'glass', accent: 'teal'},
-	{id: 'dusk', name: 'Dusk', wallpaper: 'pier', style: 'glass', accent: 'mauve'},
-	{id: 'forest', name: 'Forest', wallpaper: 'fern', style: 'graphite', accent: 'green'},
-	{id: 'dolomites', name: 'Dolomites', wallpaper: 'dolomites', style: 'yaru', accent: 'wallpaper'},
-	{id: 'alpine', name: 'Alpine', wallpaper: 'meadow', style: 'daylight', accent: 'blue'},
-	{id: 'dunes', name: 'Dunes', wallpaper: 'dunes', style: 'daylight', accent: 'peach'},
-	{id: 'orbit', name: 'Orbit', wallpaper: 'orbit', style: 'graphite', accent: 'blue'},
-	{id: 'bloom', name: 'Bloom', wallpaper: 'dahlia', style: 'glass', accent: 'pink'},
-	{id: 'skyline', name: 'Skyline', wallpaper: 'tower', style: 'daylight', accent: 'teal'},
-]
+/** Terminals can be pinned on the desktop dock/rail. On the phone it opens from System, not the dock. */
+export function withTerminals(keys: readonly string[], show: boolean): string[] {
+	if (!show || keys.includes('terminals')) return [...keys]
+	const next = [...keys]
+	const at = next.indexOf('machines')
+	next.splice(at < 0 ? next.length : at + 1, 0, 'terminals')
+	return next
+}
 
 const KEY = 'omarchy-server:desktop-config'
+
+function isDeskIcon(i: unknown): i is DeskIcon {
+	return !!i && typeof i === 'object' && typeof (i as DeskIcon).key === 'string' && Number.isInteger((i as DeskIcon).col) && Number.isInteger((i as DeskIcon).row)
+}
+
+/** The old desktop Home icon was the home folder, so a double-click opened Files. It becomes the Home page once. */
+function desktopIcons(raw: unknown, homePageIcon: boolean): DeskIcon[] {
+	const icons = Array.isArray(raw) ? raw.filter(isDeskIcon) : DEFAULT_CONFIG.icons.map((i) => ({...i}))
+	if (homePageIcon) return icons
+	let seenHome = icons.some((i) => i.key === 'home')
+	return icons.flatMap((i) => {
+		if (i.key !== 'folder:/Home') return [i]
+		if (seenHome) return []
+		seenHome = true
+		return [{...i, key: 'home'}]
+	})
+}
+
 export const DEFAULT_CONFIG: DeskConfig = {
 	v: 1,
-	preset: 'yosemite',
+	preset: null,
 	wallpaper: 'omarchy',
 	style: 'glass',
 	accent: 'wallpaper',
@@ -86,9 +84,10 @@ export const DEFAULT_CONFIG: DeskConfig = {
 	omarchySuperKeys: false,
 	dock: {position: 'left', iconSize: 46, hover: 'lift', magnify: 1.6, bounce: true, floating: false, autohide: false, showRunning: true, items: [...SYSTEM_DOCK]},
 	icons: [
-		{key: 'folder:/Home', col: 0, row: 0},
+		{key: 'home', col: 0, row: 0},
 		{key: 'folder:/Trash', col: 0, row: 1},
 	],
+	homePageIcon: true,
 	showIcons: true,
 	appsOpenIn: 'auto',
 }
@@ -97,7 +96,7 @@ function clean(raw: unknown): DeskConfig {
 	const c = (raw && typeof raw === 'object' ? raw : {}) as Partial<DeskConfig>
 	const d = DEFAULT_CONFIG
 	const dock = {...d.dock, ...(c.dock ?? {})} as DeskConfig['dock'] & {size?: string}
-	const okWall = (w: unknown): w is WallpaperId => w === 'server' || w === 'photo' || w === 'omarchy' || WALLPAPERS.some((x) => x.id === w) || (typeof w === 'string' && !!solidOf(w))
+	const okWall = (w: unknown): w is WallpaperId => w === 'server' || w === 'photo' || w === 'omarchy' || (typeof w === 'string' && !!solidOf(w))
 	// Pins from the first desktop release move into the dock.
 	let legacyPins: string[] = []
 	try {
@@ -106,7 +105,9 @@ function clean(raw: unknown): DeskConfig {
 		/* none */
 	}
 	const items = Array.isArray(dock.items) ? dock.items.filter((k) => typeof k === 'string') : d.dock.items
-	const previousDefault = items.length === PREVIOUS_SYSTEM_DOCK.length && PREVIOUS_SYSTEM_DOCK.every((key, index) => items[index] === key)
+	// Only a dock saved before Home existed gets it, and only once: clean() runs on every change, so without
+	// the homeAdded mark a dock the owner trimmed back to these seven would get Home again each time.
+	const previousDefault = c.dock?.homeAdded !== true && items.length === PREVIOUS_SYSTEM_DOCK.length && PREVIOUS_SYSTEM_DOCK.every((key, index) => items[index] === key)
 	const dockItems = previousDefault ? ['home', ...items] : items
 	return {
 		v: 1,
@@ -127,8 +128,10 @@ function clean(raw: unknown): DeskConfig {
 			autohide: !!dock.autohide,
 			showRunning: dock.showRunning !== false,
 			items: [...new Set([...dockItems, ...(c.dock ? [] : legacyPins)])],
+			homeAdded: true,
 		},
-		icons: Array.isArray(c.icons) ? c.icons.filter((i) => i && typeof i.key === 'string' && Number.isInteger(i.col) && Number.isInteger(i.row)) : d.icons,
+		icons: desktopIcons(c.icons, c.homePageIcon === true),
+		homePageIcon: true,
 		showIcons: c.showIcons !== false,
 		appsOpenIn: c.appsOpenIn === 'tab' ? 'tab' : 'auto',
 	}

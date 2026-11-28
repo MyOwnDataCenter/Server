@@ -21,6 +21,13 @@ const remote = (version, extra = {}) => async (url) => {
 test('versions compare numerically', () => {
 	assert.equal(compareVersions('0.10.0', '0.9.9'), 1)
 	assert.equal(compareVersions('0.6.1', '0.6.1'), 0)
+	// Letters after the number count: 0.9.93 < 0.9.93A < 0.9.93B < 0.9.94.
+	assert.equal(compareVersions('0.9.93B', '0.9.93A'), 1)
+	assert.equal(compareVersions('0.9.93A', '0.9.93B'), -1)
+	assert.equal(compareVersions('0.9.93A', '0.9.93'), 1)
+	assert.equal(compareVersions('0.9.94', '0.9.93B'), 1)
+	assert.equal(compareVersions('0.9.93a', '0.9.93A'), 0)
+	assert.equal(compareVersions('0.9.93Z', '0.9.93AA'), -1)
 	assert.equal(compareVersions('0.6.0', '0.6.1'), -1)
 })
 

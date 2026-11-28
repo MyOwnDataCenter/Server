@@ -8,6 +8,7 @@ import {join} from 'node:path'
 import {test} from 'node:test'
 
 import {createApps} from '../omarchyd/apps.mjs'
+import {freePorts} from './free-port.mjs'
 
 test('placeApp asks for the port Compose binds, not an unused ${PORT:-default}', async () => {
 	const root = await mkdtemp(join(os.tmpdir(), 'omarchyd-low-'))
@@ -43,7 +44,7 @@ test('placeApp asks for the port Compose binds, not an unused ${PORT:-default}',
 		}
 		throw new Error(`${cmd} not simulated`)
 	}
-	const base = 36000 + Math.floor(Math.random() * 2000)
+	const [base] = await freePorts(5)
 	// Short syntax, long syntax, and an exports.sh port all have to use the merged env.
 	// One installed app's exports are visible to the next, so the app that exports PORT goes last.
 	const listings = [

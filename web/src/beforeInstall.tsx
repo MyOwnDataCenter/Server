@@ -2,7 +2,7 @@ import {useEffect, useState, type CSSProperties} from 'react'
 
 import {useInstallReview} from './data'
 import {Icon} from './icons'
-import {AppIcon, Field, bytes, haptic, useToast} from './ui'
+import {AppIcon, Field, Switch, bytes, haptic, useConfirm, useToast} from './ui'
 import {folderKey, folderPathOk, reviewInstallInput, type ReviewInstallInput} from './installReview'
 
 // The store's "Before you install" body. The store sheet and the assistant both use this,
@@ -10,6 +10,7 @@ import {folderKey, folderPathOk, reviewInstallInput, type ReviewInstallInput} fr
 export function BeforeInstall({
 	appId,
 	appName,
+	machineName,
 	installSize,
 	pending,
 	cancelLabel,
@@ -19,6 +20,8 @@ export function BeforeInstall({
 }: {
 	appId: string
 	appName: string
+	/** The machine this install will land on. The assistant omits it and says "your server". */
+	machineName?: string
 	installSize?: number
 	pending?: boolean
 	cancelLabel: string
@@ -28,16 +31,33 @@ export function BeforeInstall({
 }) {
 	const review = useInstallReview(appId)
 	const toast = useToast()
+	const confirm = useConfirm()
 	const [allowed, setAllowed] = useState(false)
 	const [placed, setPlaced] = useState<Record<string, string | null>>({})
+	const [enableOidc, setEnableOidc] = useState(false)
+	const setOidcWithConfirm = async (on: boolean) => {
+		if (on) {
+			const ok = await confirm({
+				title: `Let ${appName} use your accounts?`,
+				body: 'People will sign into this app with accounts on this server, including two-factor. Only turn this on for an app you trust with those sign-ins.',
+				confirm: 'Share sign-in',
+				danger: true,
+				icon: 'key',
+			})
+			if (!ok) return
+		}
+		setEnableOidc(on)
+	}
 	useEffect(() => setAllowed(false), [appId])
 	useEffect(() => setPlaced({}), [appId])
+	// Never auto-enable OIDC from defaultOn — sharing accounts needs the same confirm as flipping the switch.
+	useEffect(() => setEnableOidc(false), [appId])
 	const data = review.data
 	const access = data?.permissions ?? []
 	const setup = data?.setup ?? []
 	const folders = data?.folders ?? []
 	const home = data?.home ?? ''
-	const choice = data ? reviewInstallInput(data, allowed, placed) : null
+	const choice = data ? reviewInstallInput(data, allowed, placed, enableOidc) : null
 	const copy = (text: string) =>
 		navigator.clipboard?.writeText(text).then(
 			() => toast('Copied'),
@@ -52,7 +72,7 @@ export function BeforeInstall({
 		<div className="screen">
 			<h3 style={{margin: '0 0 6px', fontSize: 18, fontWeight: 680}}>Before you install</h3>
 			<p className="prose" style={{margin: '0 0 16px'}}>
-				{appName} will be installed on your server{installSize ? ` (${bytes(installSize)} download)` : ''}.
+				{appName} will be installed on {machineName || 'your server'}{installSize ? ` (${bytes(installSize)} download)` : ''}.
 			</p>
 			{review.isLoading && (
 				<div className="glass card" style={{display: 'flex', gap: 12, alignItems: 'center', marginBottom: 16, borderRadius: 18}}>
@@ -60,7 +80,7 @@ export function BeforeInstall({
 				</div>
 			)}
 			{review.error && (
-				<div className="error">
+				<div className="error" role="alert">
 					<Icon name="alert" size={18} />
 					{(review.error as Error).message}
 				</div>
@@ -209,7 +229,31 @@ export function BeforeInstall({
 					</p>
 				</div>
 			))}
-			{data && !data.requiredFolders.length && !data.gpuAccess && !access.length && !setup.length && !folders.length && (
+			{data?.oidc?.supported && (
+				<div className="glass card" style={{marginBottom: 16, borderRadius: 18}}>
+					<div style={{display: 'flex', gap: 12, alignItems: 'center'}}>
+						<span className="row-ico" style={{'--c': 'var(--accent)'} as CSSProperties}>
+							<Icon name="key" size={18} />
+						</span>
+						<span style={{flex: 1, minWidth: 0}}>
+							<b style={{fontSize: 15, display: 'block'}}>Sign in with My Own Data Center</b>
+							<small className="muted">
+								{data.oidc.mode === 'auto'
+									? 'Automatically configures OIDC SSO using your My Own Data Center accounts + 2FA.'
+									: 'Pre-registers an OIDC client so you can paste credentials after install.'}
+								{data.oidc.defaultOn && !enableOidc ? ' This app recommends sharing sign-in; turn it on only if you trust it.' : ''}
+							</small>
+						</span>
+						<Switch on={enableOidc} label="Sign in with My Own Data Center" onChange={(on) => void setOidcWithConfirm(on)} />
+					</div>
+					{enableOidc && data.oidc.note && (
+						<p className="prose" style={{margin: '10px 0 0', fontSize: 13.5}}>
+							{data.oidc.note}
+						</p>
+					)}
+				</div>
+			)}
+			{data && !data.requiredFolders.length && !data.gpuAccess && !access.length && !setup.length && !folders.length && !data.oidc?.supported && (
 				<div className="glass card" style={{display: 'flex', gap: 12, alignItems: 'center', marginBottom: 16, borderRadius: 18}}>
 					<span className="row-ico" style={{'--c': 'var(--green)'} as CSSProperties}>
 						<Icon name="shield" size={18} />
@@ -220,7 +264,7 @@ export function BeforeInstall({
 			<div className="stack">
 				<button className="btn primary block" onClick={install} disabled={!data || !!pending || choice == null}>
 					<Icon name="download" size={20} />
-					{data?.alsoInstalls?.length ? `Install all ${data.alsoInstalls.length + 1}` : `Install ${appName}`}
+					{data?.alsoInstalls?.length ? `Install all ${data.alsoInstalls.length + 1}${machineName ? ` on ${machineName}` : ''}` : `Install ${appName}${machineName ? ` on ${machineName}` : ''}`}
 				</button>
 				<button className="btn block ghost" onClick={onCancel}>
 					{cancelLabel}

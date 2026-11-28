@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import {test} from 'node:test'
 
 import {nearBottom} from '../web/src/logFollow.ts'
-import {categoryOf, effectiveCategory, joinedFields, nextStartingToast, rankedCategories, searchNeedle, validCommunityStoreUrl, appVersionLine} from '../web/src/storeBrowse.ts'
+import {categoryOf, effectiveCategory, joinedFields, nextStartingToast, rankedCategories, searchNeedle, storeDisplayName, storeRiskHints, validCommunityStoreUrl, appVersionLine} from '../web/src/storeBrowse.ts'
 import {showUnplugged} from '../web/src/usbPresent.ts'
 
 test('store and apps search trim the query and skip missing fields', () => {
@@ -31,6 +31,22 @@ test('apps without a category land in Other, and a vanished category falls back 
 	assert.equal(effectiveCategory('files', ['files', 'other']), 'files')
 	assert.equal(effectiveCategory('::omarchy-plugins', ['files'], ['::omarchy-plugins']), '::omarchy-plugins')
 	assert.equal(effectiveCategory('all', ['files']), 'all')
+})
+
+test('store source names collapse MODC aliases to one label', () => {
+	assert.equal(storeDisplayName('MODC'), 'My Own Data Center')
+	assert.equal(storeDisplayName('Modc'), 'My Own Data Center')
+	assert.equal(storeDisplayName('My Own Data Center'), 'My Own Data Center')
+	assert.equal(storeDisplayName('Community Labs'), 'Community Labs')
+	assert.equal(storeDisplayName(''), 'App store')
+})
+
+test('store risk hints surface OIDC and elevated access before install', () => {
+	assert.deepEqual(storeRiskHints({}), [])
+	assert.deepEqual(storeRiskHints({oidc: {supported: true}}), ['Sign-in shared'])
+	assert.deepEqual(storeRiskHints({caution: 'Needs GPU elsewhere'}), ['Needs extra access'])
+	assert.deepEqual(storeRiskHints({permissions: ['host-network']}), ['Needs extra access'])
+	assert.deepEqual(storeRiskHints({oidc: {supported: true}, permissions: ['privileged']}), ['Sign-in shared', 'Needs extra access'])
 })
 
 test('a community store link matches the server, including a port and a ~user path', () => {

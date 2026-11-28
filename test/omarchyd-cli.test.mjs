@@ -32,6 +32,7 @@ test('#611: --help, -h, and help print usage and exit 0', () => {
 		['serve', '--help'],
 		['create-owner', '-h'],
 		['has-owner', '--help'],
+		['reset-password', '--help'],
 	]
 	for (const args of cases) {
 		const r = runSync(args)
@@ -286,4 +287,37 @@ test('#810: an explicit --name that is not allowed is refused before any passwor
 	assert.match(r.stderr, /--name/)
 	assert.doesNotMatch(`${r.stdout}${r.stderr}`, /Password for/)
 	assert.equal(existsSync(join(data, 'accounts.json')), false)
+})
+
+test('#919: reset-password asks for the new password in the terminal and signs in with it', async () => {
+	const data = await mkdtemp(join(root, 'reset-'))
+	const accounts = await openAccounts(data)
+	await accounts.createOwner({name: 'Ada', password: 'forgotten-one'})
+	// A port nothing listens on, so the check for a running omarchyd passes.
+	const r = ptyRun([CLI, 'reset-password', '--data', data, '--port', '1'], {...process.env, HOME: root, XDG_DATA_HOME: join(root, 'xdg-data')})
+	const text = `${r.stdout}${r.stderr}`
+	assert.match(text, /Password for Ada:/)
+	assert.match(text, /The password for “Ada” is set, and every session is signed out/)
+	assert.match(r.stderr, /__EXIT__0/)
+	const fresh = await openAccounts(data, {create: false})
+	assert.equal((await fresh.verifyCredentials({username: 'Ada', password: 'correct horse'})).userId, 'owner')
+})
+
+test('#919: reset-password refuses while omarchyd is running, before asking anything', async () => {
+	const data = await mkdtemp(join(root, 'reset-running-'))
+	const accounts = await openAccounts(data)
+	await accounts.createOwner({name: 'Ada', password: 'forgotten-one'})
+	const before = await readFile(join(data, 'accounts.json'), 'utf8')
+	const {createServer} = await import('node:net')
+	const busy = createServer().listen(0, '127.0.0.1')
+	await new Promise((resolve) => busy.once('listening', resolve))
+	try {
+		const r = runSync(['reset-password', '--data', data, '--port', String(busy.address().port)])
+		assert.equal(r.status, 1)
+		assert.match(r.stderr, /omarchyd is running/)
+		assert.doesNotMatch(`${r.stdout}${r.stderr}`, /Password for/)
+		assert.equal(await readFile(join(data, 'accounts.json'), 'utf8'), before)
+	} finally {
+		busy.close()
+	}
 })

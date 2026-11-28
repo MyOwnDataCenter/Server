@@ -10,6 +10,7 @@ import {test} from 'node:test'
 import YAML from 'yaml'
 
 import {createApps, parseMcp, prepareCompose} from '../omarchyd/apps.mjs'
+import {freePort} from './free-port.mjs'
 import {createAssistant} from '../omarchyd/assistant.mjs'
 import {callMcpTool, listMcpTools} from '../omarchyd/assistant/mcp.mjs'
 import {openAiTools} from '../omarchyd/assistant/tools.mjs'
@@ -76,7 +77,7 @@ test('install keeps mcp on the app, publishes it on loopback, and mcpTargets ski
 	const home = join(root, 'home')
 	const store = join(root, 'store')
 	const sock = join(root, 'podman.sock')
-	const gateway = 34000 + Math.floor(Math.random() * 2000)
+	const gateway = await freePort()
 	const up = new Set()
 	const opened = []
 	const prevDocker = process.env.DOCKER_HOST
@@ -178,7 +179,7 @@ test('a system app does not take an installed app’s mcp loopback port', async 
 	const home = join(root, 'home')
 	const store = join(root, 'store')
 	const sock = join(root, 'podman.sock')
-	const gateway = 36000 + Math.floor(Math.random() * 2000)
+	const gateway = await freePort()
 	const up = new Set()
 	const prevDocker = process.env.DOCKER_HOST
 	process.env.DOCKER_HOST = `unix://${sock}`
@@ -408,10 +409,10 @@ test('readOnly MCP tools auto-run; others become pending', async () => {
 		assert.equal(mcp.seen.some((m) => m.method === 'tools/call' && m.params?.name === 'rename'), false)
 		const toolMsg = seen[1].body.messages.find((m) => m.role === 'tool' && m.tool_call_id === 'call_status')
 		assert.match(toolMsg.content, /ok-status/)
-		assert.deepEqual(events.map((e) => e.event), ['tool', 'action', 'done'])
-		assert.equal(events[0].data.name, 'app__demo__status')
-		assert.equal(events[0].data.state, 'done')
-		const action = events[1].data
+		assert.deepEqual(events.map((e) => e.event), ['speaker', 'tool', 'action', 'done'])
+		assert.equal(events[1].data.name, 'app__demo__status')
+		assert.equal(events[1].data.state, 'done')
+		const action = events[2].data
 		assert.equal(action.kind, 'mcp')
 		assert.equal(action.status, 'pending')
 		assert.equal(action.toolName, 'app__demo__rename')

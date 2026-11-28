@@ -36,20 +36,24 @@ export function createBackendClient({baseUrl, timeoutMs = 20_000, fetchImpl = fe
 			url += `?input=${encodeURIComponent(JSON.stringify(input))}`
 		}
 
-		let response
-		try {
-			response = await fetchImpl(url, {...init, signal: AbortSignal.timeout(timeout)})
-		} catch (error) {
+		// Not answering, or dropping the connection part way through its answer (a restart), are the same to the caller.
+		const unreachable = (error) => {
 			const reason = error?.name === 'TimeoutError' ? 'timed out' : (error?.cause?.code ?? error?.message ?? 'failed')
-			throw new BackendError(UNREACHABLE_MESSAGE, {
+			return new BackendError(UNREACHABLE_MESSAGE, {
 				code: 'UNREACHABLE',
 				status: 502,
 				path,
 				detail: `Can't reach My Own Data Center at ${base} (${reason})`,
 			})
 		}
-
-		const text = await response.text()
+		let response
+		let text
+		try {
+			response = await fetchImpl(url, {...init, signal: AbortSignal.timeout(timeout)})
+			text = await response.text()
+		} catch (error) {
+			throw unreachable(error)
+		}
 		let body
 		try {
 			body = text ? JSON.parse(text) : {}

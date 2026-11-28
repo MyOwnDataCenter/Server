@@ -2457,14 +2457,14 @@ int main(int argc, char **argv) {
 			FrameSlot *as = &fslots[active_slot];
 			uint64_t waited = now_us - as->copy_sent_us;
 			if (as->copy_ign && waited > 2500000ULL) {
+				/* A full copy (keyframe, reconfig) that hasn't arrived means the screen hasn't been redrawn:
+				 * Hyprland renders only when something changes, so on a still desktop or an idle window this
+				 * is not a failure. Counting it as one ended the stream after 12 keyframe requests on a still
+				 * screen ("Target window or monitor closed") and the viewer reconnected over and over. Only
+				 * the compositor's own failed event counts; this copy is simply asked for again. */
 				int s = active_slot;
 				slot_destroy(&wl, as);
 				active_slot = -1;
-				fail_streak++;
-				if (fail_streak >= 12) {
-					send_json_msg(3, "{\"error\":\"Target window or monitor closed\"}");
-					break;
-				}
 				usleep(80000);
 				slot_arm(&wl, mgr_id, window_mode, mgr_ver, handle_u32, output_id, &fslots[s], &caps[s]);
 				next_slot = (s + 1) % n_slots;

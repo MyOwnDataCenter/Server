@@ -11,3 +11,9 @@ export function cpuStatusText(running: boolean, last: {cpu: number} | null | und
 	if (!running || last == null) return '–'
 	return `${last.cpu}% of ${cores} CPU${cores > 1 ? 's' : ''}`
 }
+
+// Same rule for memory: a stopped machine holds no memory, so its last sample is not "used" now.
+export function memoryStatusText(running: boolean, last: {memMb: number} | null | undefined, totalMb: number, format: (mb: number) => string): string {
+	if (!running || last == null) return format(totalMb)
+	return `${format(last.memMb)} of ${format(totalMb)}`
+}

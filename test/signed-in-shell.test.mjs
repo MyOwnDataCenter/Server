@@ -16,7 +16,8 @@ test('a second terminal focuses the one already open; files still opens another 
 
 test('New window and Ctrl+Alt+T use that decision, and files New window still opens', async () => {
 	const desktop = await read('../web/src/desktop/Desktop.tsx')
-	assert.match(desktop, /extraWindowAction\('terminal', winsRef\.current\.some\(\(w\) => w\.kind === 'terminal'\)\)/)
+	assert.match(desktop, /extraWindowAction\('terminal', sameShellWindows\(winsRef\.current, term\)\.length > 0\)/)
+	assert.match(desktop, /extraWindowAction\('terminal', sameShellWindows\(winsRef\.current, null\)\.length > 0\)/)
 	assert.match(desktop, /newWindow: action === 'open'/)
 	assert.match(desktop, /const terminalChord = e\.ctrlKey && e\.altKey && e\.key\.toLowerCase\(\) === 't'/)
 	assert.match(desktop, /if \(terminalChord\) \{[\s\S]*?api\.openTerminal\(\)/)

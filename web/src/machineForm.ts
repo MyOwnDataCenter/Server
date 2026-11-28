@@ -3,8 +3,10 @@
 const LINUX_USER = /^[a-z_][a-z0-9_-]{0,31}$/
 const WINDOWS_USER = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,19}$/
 
-export function diskRange(os: {familyId: string; platform?: string}, profileMin: number): {min: number; max: number} {
-	const floor = os.platform === 'windows' || os.familyId.startsWith('windows') ? 64 : os.familyId === 'omarchy' ? 20 : 4
+export function diskRange(os: {id?: string; familyId: string; platform?: string; manualSetup?: boolean}, profileMin: number): {min: number; max: number} {
+	const windows = os.platform === 'windows' || os.familyId.startsWith('windows')
+	const catalogInstaller = os.manualSetup === true && !String(os.id ?? '').startsWith('local:')
+	const floor = windows ? 64 : os.familyId === 'omarchy' || catalogInstaller ? 20 : 4
 	return {min: Math.max(profileMin, floor), max: 4096}
 }
 

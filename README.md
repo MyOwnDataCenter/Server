@@ -4,7 +4,7 @@ Turn an [Omarchy](https://omarchy.org) machine into a home server you run from a
 apps from a catalog of about 580, keep your files and drives in one place, run virtual machines, and
 reach your real Omarchy desktop — from a phone, a tablet or another computer.
 
-![My Own Data Center's desktop in a browser, with App Store, Machines and Terminal windows open](docs/screenshots/desktop-overview.jpg)
+![My Own Data Center's desktop in a browser, with Machines, Terminal and Files windows open](docs/screenshots/desktop-overview.jpg)
 
 <p align="center">
   <img src="docs/screenshots/phone-home.png" width="24%" alt="Home on a phone">
@@ -89,6 +89,15 @@ where you left off; add `--purge` to delete those too.
   Server sign-in.
 - **Behind your sign-in:** every app's port admits only browsers signed in to My Own Data Center.
 - Start, stop, restart, update, logs, and a shell inside any app.
+- **Opening apps from outside your network** (through a tunnel or a reverse proxy on https://) needs
+  each app to have its own address, which you choose with an *app addresses* pattern such as
+  `{app}-touch.example.com` (`{app}` becomes the app's name). Point those names at your server, then
+  tell the web app the pattern: run `systemctl --user edit omarchy-server-web.service`, add
+  `[Service]` and `Environment=TOUCH_APP_HOSTS={app}-touch.example.com`, save, and run
+  `omarchy-server restart`. Set it to `off` to clear it. Until it is set, opening an app that way says
+  "Opening apps remotely needs app addresses". On your own network it isn't needed.
+
+![The App Store in the desktop layout: apps by category from every store you've added](docs/screenshots/desktop-store.jpg)
 
 ### Files
 
@@ -99,12 +108,20 @@ where you left off; add `--purge` to delete those too.
 - Photo sync from your phone, and SMB network shares for any folder. Shares are opened on your home
   LAN only (the usual 10., 172.16. and 192.168. addresses); Tailscale is a second network and does
   not get port 445.
+- **Quick transfers with a QR code** (desktop layout): right-click a file to share it, or a folder to
+  upload into it from a phone. The phone opens a small page without signing in; the code lasts 10
+  minutes and covers only that file or folder.
+
+![Files in the desktop layout: places, your storage, and folders shared on your network](docs/screenshots/desktop-files.jpg)
+
+<p align="center"><img src="docs/screenshots/qr-upload.png" width="45%" alt="Upload to a folder from a phone: a QR code that lasts 10 minutes"></p>
 
 ### Machines (virtual machines)
 
-- **One tap:** Ubuntu, Debian, Fedora, Arch and Alpine (server or desktop), Omarchy, Windows 10/11 from
-  your own ISO, or any ISO in Files. Images are checked against their publisher's checksums, and
-  cloud-init sets up your account.
+- **One tap:** Ubuntu, Debian, and Fedora, as server or desktop, plus Rocky, openSUSE Leap, Arch, Alpine, and Omarchy.
+  CachyOS and Linux Mint boot their own installers. Windows 10/11 comes from your own ISO, or any ISO
+  in Files. Images are checked against their publisher's checksums, and cloud-init sets up your account
+  on the cloud images.
 - **The same controls on the phone and the desktop:** CPU (sockets, cores, type),
   memory, disks, network, boot order, firmware, snapshots, backups (live), clone, restore, pause,
   hibernate, start with the server, task history, live usage graphs and a monitor.
@@ -112,7 +129,7 @@ where you left off; add `--purge` to delete those too.
   port forwarding to services inside a machine.
 - Machines run as you under libvirt's per-user session, not as root.
 
-![Machines in the desktop layout: the server's status, its virtual machines and backups](docs/screenshots/desktop-machines.jpg)
+![Machines in the desktop layout: the server's summary, status and its virtual machines](docs/screenshots/desktop-machines.jpg)
 
 ### Your Omarchy desktop, remotely
 

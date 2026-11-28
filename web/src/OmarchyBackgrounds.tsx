@@ -1,6 +1,7 @@
 import {useState} from 'react'
 
 import {Icon} from './icons'
+import {RADIO_SELECTOR, rovingKeyDown} from './roving'
 import {haptic, omarchyBackgroundUrl, useOmarchyThemes} from './ui'
 
 // The Omarchy desktop's backgrounds, theme by theme, to pick from. `selected`: an id, null for
@@ -33,8 +34,8 @@ export function OmarchyBackgrounds({selected, onChoose, bare = false}: {selected
 					</select>
 				</div>
 			)}
-			<div className="omb-grid" role="radiogroup" aria-label="Background">
-				<button role="radio" aria-checked={selected === null} className={`omb-tile${selected === null ? ' on' : ''}`} onClick={() => choose(null)} title="Follows the Omarchy desktop">
+			<div className="omb-grid" role="radiogroup" aria-label="Background" onKeyDown={(e) => rovingKeyDown(e, RADIO_SELECTOR)}>
+				<button role="radio" aria-checked={selected === null} tabIndex={selected === null || !group.items.some((x) => x.id === selected) ? 0 : -1} className={`omb-tile${selected === null ? ' on' : ''}`} onClick={() => choose(null)} title="Follows the Omarchy desktop">
 					<img src={omarchyBackgroundUrl(null, themes.data.current)} alt="" loading="lazy" decoding="async" />
 					<span className="omb-label">
 						<Icon name="sparkle" size={13} /> Same as desktop
@@ -43,7 +44,7 @@ export function OmarchyBackgrounds({selected, onChoose, bare = false}: {selected
 				{group.items.map((it) => {
 					const on = selected === it.id
 					return (
-						<button key={it.id} role="radio" aria-checked={on} className={`omb-tile${on ? ' on' : ''}`} onClick={() => choose(it.id)} title={it.name}>
+						<button key={it.id} role="radio" aria-checked={on} tabIndex={on ? 0 : -1} className={`omb-tile${on ? ' on' : ''}`} onClick={() => choose(it.id)} title={it.name}>
 							<img src={omarchyBackgroundUrl(it.id)} alt={it.name} loading="lazy" decoding="async" />
 						</button>
 					)

@@ -8,11 +8,13 @@ import {Terminal as XTerm} from '@xterm/xterm'
 import '@xterm/xterm/css/xterm.css'
 
 import {clipText} from './clips'
+import {isClipTarget, markClipTarget, unmarkClipTarget} from './clipPasteTarget'
 import {BootstrapContext} from './data'
 import {Icon} from './icons'
 import {overlayBackUsesHistory, popstateClosesOverlay} from './overlayHistory'
+import {terminalCloseOutcome, terminalStatusLabel} from './terminalClose'
 import {forwardTerminalInput, ignoreOpeningFocus} from './terminalInput'
-import {pasteInto, terminalPasteDecision} from './terminalPaste'
+import {isTerminalReply, pasteInto, terminalPasteDecision} from './terminalPaste'
 import {SEQ, applyTerminalModifiers} from './terminalKeys'
 import {AppIcon, haptic, useConfirm, usePortalRoot, useScreenLock, useToast} from './ui'
 
@@ -51,23 +53,32 @@ function cssVar(name: string, fallback: string) {
 export function TerminalScreen({
 	app,
 	agent,
+	container,
+	overSheet = false,
 	onClose,
 	embedded,
+	inline,
 	input,
 	machine,
 }: {
 	app?: {id: string; name?: string; icon?: string}
 	// A computer in the local swarm (through its connector), instead of this server.
 	agent?: {id: string; name: string}
+	// One of this server's containers (Incus): its console (login prompt) or a root shell in it.
+	container?: {name: string; mode?: 'console' | 'shell'}
+	// Opened from a sheet (a container's page): sit above the sheet instead of behind it.
+	overSheet?: boolean
 	onClose: () => void
 	embedded?: boolean
+	/** Draw inside the open row. No full-screen portal, history entry, or screen lock. */
+	inline?: boolean
 	input?: string
 	/** The computer this shell is on. Defaults to this server, or the swarm computer when `agent` is set. */
 	machine?: string
 }) {
 	const boot = useContext(BootstrapContext)
 	const serverName = boot?.server?.device || 'This server'
-	const machineName = machine ?? agent?.name ?? serverName
+	const machineName = machine ?? agent?.name ?? container?.name ?? serverName
 	const portalRoot = usePortalRoot()
 	const root = useRef<HTMLDivElement>(null)
 	const host = useRef<HTMLDivElement>(null)
@@ -82,6 +93,9 @@ export function TerminalScreen({
 	const [alt, setAlt] = useState(false)
 	const [kbd, setKbd] = useState(false)
 	const [pasteBox, setPasteBox] = useState(false)
+	// Long-press on a phone: a small Paste button where the finger was.
+	const [pressPaste, setPressPaste] = useState<{x: number; y: number} | null>(null)
+	const pasteRef = useRef<() => void>(() => {})
 	const [pasteText, setPasteText] = useState('')
 	const pasteField = useRef<HTMLTextAreaElement>(null)
 	const pasteCaret = useRef<number | null>(null)
@@ -103,14 +117,14 @@ export function TerminalScreen({
 	const openedAt = useRef(performance.now())
 	mods.current = {ctrl, alt}
 	const toast = useToast()
-	useVisualViewport(root, !embedded)
-	useScreenLock(root, true, !embedded)
-	// Phone layout only. An embedded desktop window must not push its own history entry.
+	useVisualViewport(root, !embedded && !inline)
+	useScreenLock(root, true, !embedded && !inline)
+	// Phone layout only. An embedded desktop window, or a row on the Terminals page, must not push its own history entry.
 	const onCloseRef = useRef(onClose)
 	onCloseRef.current = onClose
 	const overlayClosed = useRef(false)
 	useEffect(() => {
-		if (embedded) return
+		if (embedded || inline) return
 		overlayClosed.current = false
 		const id = 'terminal'
 		history.pushState({omarchyOverlay: id}, '', location.href)
@@ -121,9 +135,9 @@ export function TerminalScreen({
 		}
 		window.addEventListener('popstate', onPop)
 		return () => window.removeEventListener('popstate', onPop)
-	}, [embedded])
+	}, [embedded, inline])
 	const back = () => {
-		if (embedded) {
+		if (embedded || inline) {
 			onClose()
 			return
 		}
@@ -188,6 +202,9 @@ export function TerminalScreen({
 				term.focus()
 				return
 			}
+			// Paste, like a terminal on the machine: straight from the clipboard where the browser
+			// allows reading it (https://). On http:// browsers never let a page read the clipboard, so
+			// their own menu opens with Paste (xterm puts its input under the pointer for that).
 			if (!window.isSecureContext || !navigator.clipboard?.readText) return
 			e.preventDefault()
 			navigator.clipboard.readText().then(
@@ -195,7 +212,7 @@ export function TerminalScreen({
 					if (text) term.paste(text)
 					term.focus()
 				},
-				() => toast('Allow clipboard access for this site to paste with a right-click', true),
+				() => pasteRef.current(),
 			)
 		}
 		el.addEventListener('contextmenu', onContextMenu)
@@ -209,6 +226,29 @@ export function TerminalScreen({
 			if (decision.text) term.paste(decision.text)
 		}
 		el.addEventListener('paste', onPaste, true)
+		// Keyboard copy and paste as on a desktop: Ctrl+V and Ctrl+Shift+V paste (the browser's own
+		// paste, which works on http:// too), Ctrl+Shift+C copies, and Ctrl+C copies when text is
+		// selected (otherwise it interrupts, as always). Without this Ctrl+V sent ^V to the shell.
+		term.attachCustomKeyEventHandler((e) => {
+			if (e.type !== 'keydown' || !matchMedia('(any-pointer: fine)').matches || e.altKey || e.metaKey) return true
+			const k = e.key.toLowerCase()
+			if (e.ctrlKey && k === 'v') return false
+			if (e.ctrlKey && k === 'c' && (e.shiftKey || term.hasSelection())) {
+				const selected = term.getSelection()
+				if (!selected) return false
+				e.preventDefault()
+				copyText(selected).then(
+					() => {
+						toast('Copied')
+						clipText(selected, 'terminal').catch((err: Error) => toast(err.message, true))
+					},
+					() => toast('Couldn’t copy', true),
+				)
+				term.clearSelection()
+				return false
+			}
+			return true
+		})
 		const onClip = (e: ClipboardEvent) => {
 			const selected = term.getSelection()
 			const target = e.target
@@ -284,12 +324,18 @@ export function TerminalScreen({
 			}
 		}
 
+		let replaying = 0
+		let replayNext = false
 		const send = (data: string) => {
 			const ws = wsRef.current
 			if (ws?.readyState === WebSocket.OPEN) ws.send(data)
 		}
 		term.onData((data) => {
 			if (!forwardTerminalInput(data, focusReportFromUser)) return
+			// The terminal's own answers to questions found in a replayed screen (what kind of terminal,
+			// its colours, where the cursor is) would reach the shell as stray text: the extra
+			// characters that appeared when a terminal was opened again.
+			if (replaying > 0 && isTerminalReply(data)) return
 			if (data === '\x1b[I' || data === '\x1b[O') focusReportFromUser = false
 			// Drop the composition the opening tap just dumped. The on-screen keys send on their own.
 			if (ignoreOpeningFocus(coarsePointer(), performance.now() - openedAt.current)) return
@@ -358,12 +404,14 @@ export function TerminalScreen({
 			term.resize(s.cols, s.rows)
 			term.reset()
 			const scheme = location.protocol === 'https:' ? 'wss:' : 'ws:'
-			const qs = new URLSearchParams({...(app ? {appId: app.id} : {}), ...(agent ? {agentId: agent.id} : {}), cols: String(s.cols), rows: String(s.rows), ...(fresh.current ? {fresh: '1'} : {})})
+			const qs = new URLSearchParams({...(app ? {appId: app.id} : {}), ...(agent ? {agentId: agent.id} : {}), ...(container ? {containerId: container.name, containerMode: container.mode ?? 'shell'} : {}), cols: String(s.cols), rows: String(s.rows), ...(fresh.current ? {fresh: '1'} : {})})
 			fresh.current = false
 			const ws = new WebSocket(`${scheme}//${location.host}/api/terminal?${qs}`)
 			ws.binaryType = 'arraybuffer'
 			wsRef.current = ws
+			let opened = false
 			ws.onopen = () => {
+				opened = true
 				setState('connected')
 				haptic(8)
 				if (pending.current) {
@@ -379,7 +427,15 @@ export function TerminalScreen({
 				}
 			}
 			ws.onmessage = (e) => {
-				if (typeof e.data !== 'string') return term.write(new Uint8Array(e.data))
+				if (typeof e.data !== 'string') {
+					if (!replayNext) return term.write(new Uint8Array(e.data))
+					replayNext = false
+					replaying++
+					return term.write(new Uint8Array(e.data), () => {
+						// Answers are emitted while parsing; give a late one a moment too.
+						setTimeout(() => (replaying = Math.max(0, replaying - 1)), 250)
+					})
+				}
 				// Text frames are about the session: resumed (what was on screen follows, drawn at the
 				// size it was), and the size it's now at. Resize in order with the output around it.
 				let m: {type?: string; resumed?: boolean; cols?: number; rows?: number}
@@ -388,7 +444,10 @@ export function TerminalScreen({
 				} catch {
 					return
 				}
-				if (m.type === 'session') setResumed(!!m.resumed)
+				if (m.type === 'session') {
+					setResumed(!!m.resumed)
+					replayNext = !!m.resumed
+				}
 				if ((m.type === 'session' || m.type === 'size') && m.cols && m.rows) {
 					// In order with the output around it: a resumed screen replays at the size it was
 					// drawn, then the shell takes this window's size.
@@ -398,13 +457,9 @@ export function TerminalScreen({
 			}
 			ws.onclose = (e) => {
 				if (disposed || wsRef.current !== ws) return
-				if (e.code === 1000 && e.reason === 'Shell ended') {
-					setState('closed')
-					setMessage('The shell has ended.')
-				} else {
-					setState((st) => (st === 'connecting' ? 'error' : 'lost'))
-					setMessage(agent ? 'Your shell is still running on that computer. Reconnect to pick up where you left off.' : 'Your shell is still running on the server. Reconnect to pick up where you left off.')
-				}
+				const out = terminalCloseOutcome({opened, shellEnded: e.code === 1000 && e.reason === 'Shell ended', onComputer: !!agent})
+				setState(out.state)
+				setMessage(out.message)
 			}
 		}
 		connect()
@@ -453,17 +508,26 @@ export function TerminalScreen({
 			vp.scrollTop = before + dy
 			return vp.scrollTop !== before
 		}
+		// Press and hold (without moving) offers Paste; a reading of the clipboard needs a tap of its own.
+		let holdTimer = 0
+		const cancelHold = () => window.clearTimeout(holdTimer)
 		const onTouchStart = (e: TouchEvent) => {
 			stopFling()
+			cancelHold()
 			if (e.touches.length !== 1) return void (touch = null)
 			const y = e.touches[0].clientY
+			const x = e.touches[0].clientX
 			touch = {startY: y, y, t: performance.now(), v: 0, moved: false, carry: 0}
+			holdTimer = window.setTimeout(() => {
+				if (touch && !touch.moved) (haptic(10), setPressPaste({x, y}))
+			}, 500)
 		}
 		const onTouchMove = (e: TouchEvent) => {
 			if (!touch || e.touches.length !== 1) return
 			const y = e.touches[0].clientY
 			if (!touch.moved && Math.abs(y - touch.startY) < 6) return // not a drag yet: maybe a tap or a long press
 			touch.moved = true
+			cancelHold()
 			e.preventDefault() // ours, not the page's (or xterm's own, slower) scrolling
 			e.stopPropagation()
 			const now = performance.now()
@@ -475,6 +539,7 @@ export function TerminalScreen({
 			scrollBy(dy)
 		}
 		const onTouchEnd = (e: TouchEvent) => {
+			cancelHold()
 			const t = touch
 			touch = null
 			if (!t?.moved) return
@@ -507,6 +572,7 @@ export function TerminalScreen({
 			window.clearTimeout(readyTimer)
 			window.clearTimeout(sizeTimer)
 			rootEl?.removeEventListener('viewportchange', onResize)
+			cancelHold()
 			el.removeEventListener('touchstart', onTouchStart, {capture: true})
 			el.removeEventListener('touchmove', onTouchMove, {capture: true})
 			el.removeEventListener('touchend', onTouchEnd, {capture: true})
@@ -522,15 +588,30 @@ export function TerminalScreen({
 			document.removeEventListener('cut', onClip)
 			term.dispose()
 		}
-	}, [app, agent?.id, attempt])
+	}, [app, agent?.id, container?.name, container?.mode, attempt])
 
+	// A clip pasted as text goes into the terminal used last, not into every open one.
+	const clipTarget = useRef({})
 	useEffect(() => {
+		const me = clipTarget.current
+		markClipTarget(me)
+		// Listening on the document, because the screen's own element can be swapped out.
+		const mark = (e: Event) => {
+			if (e.target instanceof Node && root.current?.contains(e.target)) markClipTarget(me)
+		}
+		document.addEventListener('focusin', mark)
+		document.addEventListener('pointerdown', mark, true)
 		const onClipPaste = (e: Event) => {
 			const text = (e as CustomEvent<{text?: string}>).detail?.text
-			if (text) termRef.current?.paste(text)
+			if (text && isClipTarget(me)) termRef.current?.paste(text)
 		}
 		window.addEventListener('omarchy-clip-paste', onClipPaste)
-		return () => window.removeEventListener('omarchy-clip-paste', onClipPaste)
+		return () => {
+			window.removeEventListener('omarchy-clip-paste', onClipPaste)
+			document.removeEventListener('focusin', mark)
+			document.removeEventListener('pointerdown', mark, true)
+			unmarkClipTarget(me)
+		}
 	}, [])
 
 	const sendSeq = (seq: string) => {
@@ -570,6 +651,12 @@ export function TerminalScreen({
 		setPasteText('')
 		setPasteBox(true)
 	}
+	pasteRef.current = () => void paste()
+	useEffect(() => {
+		if (!pressPaste) return
+		const t = window.setTimeout(() => setPressPaste(null), 4000)
+		return () => window.clearTimeout(t)
+	}, [pressPaste])
 	const sendPaste = () => {
 		if (pasteText) {
 			haptic(8)
@@ -580,6 +667,9 @@ export function TerminalScreen({
 		window.setTimeout(() => termRef.current?.focus(), 50)
 	}
 	const live = state === 'connected'
+	const status = terminalStatusLabel(state, {attempt})
+	const where =
+		app ? ' · App shell' : agent ? ' · Shell through its connector' : container ? (container.mode === 'console' ? ' · Container login' : ' · Root shell') : ''
 	// End the shell that's running (and whatever is running in it) and start a new one.
 	const newSession = async () => {
 		haptic(6)
@@ -616,8 +706,8 @@ export function TerminalScreen({
 		{label: 'end', onClick: () => sendSeq(SEQ.end)},
 	]
 
-	return createPortal(
-		<div ref={root} className={`console terminal${embedded ? ' embedded' : ''}`} role="dialog" aria-modal={!embedded} aria-label={`${title} terminal, on ${machineName}`}>
+	const screen = (
+		<div ref={root} className={`console terminal${inline ? ' inline' : embedded ? ' embedded' : ''}${overSheet ? ' over-sheet' : ''}`} role={inline ? 'region' : 'dialog'} aria-modal={inline ? undefined : !embedded} aria-label={`${title} terminal, on ${machineName}`}>
 			<header className="console-bar">
 				<button className="round-btn" aria-label="Close terminal" onClick={back}>
 					<Icon name="back" size={20} />
@@ -633,7 +723,7 @@ export function TerminalScreen({
 					<b>{title}</b>
 					<span>
 						<i className={`dot ${live ? 'live' : state === 'connecting' ? '' : 'down'}`} />
-						{live ? `On ${machineName}${app ? ' · App shell' : agent ? ' · Shell through its connector' : ''}${resumed ? ' · resumed' : ''}` : state === 'connecting' ? `On ${machineName} · Connecting…` : `On ${machineName} · Disconnected`}
+						{live ? `${status}${where}${resumed ? ' · resumed' : ''} · ${machineName}` : `${status} · ${machineName}`}
 					</span>
 				</div>
 				<button className="round-btn" aria-label="New session" title="New session" onClick={newSession} disabled={!live}>
@@ -655,23 +745,45 @@ export function TerminalScreen({
 				}}
 			>
 				<div ref={host} className="term-host" />
-				{state !== 'connected' && state !== 'connecting' && (
+				{state !== 'connected' && (
 					<div className="console-overlay">
-						<Icon name={state === 'closed' ? 'logs' : state === 'lost' ? 'wifi' : 'alert'} size={34} />
-						<b>{state === 'closed' ? 'Session ended' : state === 'lost' ? 'Disconnected' : 'Terminal unavailable'}</b>
-						<span>{message}</span>
-						<button className="btn primary small" onClick={() => setAttempt((a) => a + 1)}>
-							{state === 'closed' ? 'New session' : state === 'lost' ? 'Reconnect' : 'Try again'}
-						</button>
+						{state === 'connecting' ? (
+							<>
+								<span className="spinner" />
+								<b>{status}</b>
+								<span>Opening a shell on {machineName}…</span>
+							</>
+						) : (
+							<>
+								<Icon name={state === 'closed' ? 'logs' : state === 'lost' ? 'wifi' : 'alert'} size={34} />
+								<b>{status}</b>
+								<span>{message}</span>
+								<button className="btn primary small" onClick={() => setAttempt((a) => a + 1)}>
+									{state === 'closed' ? 'New session' : state === 'lost' ? 'Reconnect' : 'Try again'}
+								</button>
+							</>
+						)}
 					</div>
 				)}
 			</div>
+			{pressPaste && (
+				<>
+					<div className="term-press-scrim" onPointerDown={() => setPressPaste(null)} />
+					<button
+						className="term-press-paste"
+						style={{left: Math.min(Math.max(12, pressPaste.x - 40), window.innerWidth - 92), top: Math.max(12, pressPaste.y - 56)}}
+						onClick={() => (setPressPaste(null), void paste())}
+					>
+						Paste
+					</button>
+				</>
+			)}
 			{pasteBox && (
 				<div className="term-paste" role="dialog" aria-label="Paste into terminal">
 					<div className="term-paste-card">
 						<div className="term-paste-head">
 							<b>Paste</b>
-							<span>Long-press in the box, tap Paste, then Send.</span>
+							<span>{matchMedia('(any-pointer: fine)').matches ? 'Press Ctrl+V (or right-click → Paste) in the box, then Send.' : 'Long-press in the box, tap Paste, then Send.'}</span>
 						</div>
 						<textarea
 							ref={pasteField}
@@ -717,7 +829,7 @@ export function TerminalScreen({
 					))}
 				</div>
 			</div>
-		</div>,
-		portalRoot,
+		</div>
 	)
+	return inline ? screen : createPortal(screen, portalRoot)
 }

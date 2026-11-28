@@ -256,6 +256,25 @@ class Helper(unittest.TestCase):
         self.assertEqual(self.handle("mount", ["/dev/sdg"], **kw), "ok")
         self.assertIn(["mount", "-o", "nosuid,nodev", "/dev/sdg", "/run/media/chris/My_Disk_2"], fake.log)
 
+    def test_names_and_ids_with_a_trailing_newline_are_refused(self):
+        # "$" matches just before a final newline, which would put a second fstab or udev line in.
+        with self.assertRaisesRegex(Exception, "Pool names"):
+            self.handle("pool-create", ["tank\n", "single", "/dev/sda"], **self.kw)
+        self.assertEqual(self.fake.files["/etc/fstab"], "UUID=1111 / btrfs defaults 0 0\n")
+        with self.assertRaisesRegex(Exception, "Pool names"):
+            self.handle("pool-import", ["old\n", "44444444-4444-4444-4444-444444444444"], **self.kw)
+        with self.assertRaisesRegex(Exception, "Choose a filesystem"):
+            self.handle("pool-import", ["old", "44444444-4444-4444-4444-444444444444\n"], **self.kw)
+        with self.assertRaisesRegex(Exception, "Not a drive"):
+            self.handle("smart", ["/dev/sda\n"], **self.kw)
+        lsblk = copy.deepcopy(LSBLK)
+        next(d for d in lsblk["blockdevices"] if d["path"] == "/dev/sda")["serial"] = "WD-A\n"
+        fake = Fake(lsblk)
+        kw = dict(run=fake.run, user=self.kw["user"], files=fake.files)
+        with self.assertRaisesRegex(Exception, "serial number"):
+            self.handle("sleep", ["/dev/sda", "10"], **kw)
+        self.assertFalse(any(x[0] == "hdparm" for x in fake.log))
+
     def test_pool_add_forget_and_scrub(self):
         self.handle("pool-create", ["tank", "single", "/dev/sda"], **self.kw)
         self.assertEqual(self.handle("pool-add", ["tank", "/dev/sdb"], **self.kw), "ok")
@@ -814,8 +833,13 @@ errors: 3 data errors, use '-v' for a list
         kw = dict(run=fake.run, user=self.kw["user"], files=files)
         self.assertEqual(self.handle("sleep", ["/dev/sdb", "20"], **kw), "ok")
         text = files[UDEV_SLEEP]
-        self.assertNotIn("/usr/bin/hdparm", text)
-        self.assertIn(hdparm_path(), text)
+        resolved = hdparm_path()
+        self.assertIn(resolved, text)
+        # /sbin/hdparm is text inside /usr/sbin/hdparm, and on Arch /usr/sbin and /usr/bin
+        # are the same directory, so the resolved path can be any one of these.
+        rest = text.replace(resolved, "RESOLVED")
+        for stale in ("/usr/bin/hdparm", "/usr/sbin/hdparm", "/sbin/hdparm"):
+            self.assertNotIn(stale, rest)
         self.assertIn('ENV{ID_SERIAL_SHORT}=="WD-A"', text)
         self.assertIn('ENV{ID_SERIAL_SHORT}=="WD-B"', text)
 

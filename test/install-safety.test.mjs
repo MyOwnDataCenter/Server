@@ -326,3 +326,20 @@ test('#552 README shows the piped --zfs command', async () => {
 	const cmd = 'curl -fsSL https://raw.githubusercontent.com/MyOwnDataCenter/server/main/install.sh | bash -s -- --zfs'
 	assert.equal(readme.split(cmd).length - 1, 2)
 })
+
+test('OMARCHY_SERVER_PORT that is not a port number stops the installer before anything is installed', async () => {
+	for (const bad of ['abc', '0', '65536', '80 80', '-1', '7780/tcp', '123456']) {
+		const r = await runFile(installPath, {OMARCHY_SERVER_PORT: bad, OMARCHY_SERVER_REPO: '', OMARCHY_SERVER_SOURCE: ''})
+		assert.equal(r.code, 1, `${bad}: ${r.stderr}`)
+		assert.match(r.stderr, /OMARCHY_SERVER_PORT is "[^"]*" but must be a number from 1 to 65535/, bad)
+	}
+})
+
+test('a valid OMARCHY_SERVER_PORT is kept as a plain number', async () => {
+	const fn = extract(installSh, 'check_port')
+	for (const [given, want] of [['7780', '7780'], ['80', '80'], ['65535', '65535'], ['08080', '8080']]) {
+		const r = await runBash(`${die}\n${fn}\nPORT=${given}\ncheck_port\nprintf '%s' "$PORT"`)
+		assert.equal(r.code, 0, r.stderr)
+		assert.equal(r.stdout, want)
+	}
+})

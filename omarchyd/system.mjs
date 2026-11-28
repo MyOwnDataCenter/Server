@@ -3,6 +3,7 @@ import {execFile} from 'node:child_process'
 import {readFile, readdir, stat, statfs} from 'node:fs/promises'
 import os from 'node:os'
 import {join} from 'node:path'
+import {createThermalWatch, readThermalProbes, sensorsFromProbes} from './thermal.mjs'
 
 const sh = (cmd, args, timeout = 10_000) =>
 	new Promise((resolve) => execFile(cmd, args, {timeout, maxBuffer: 8 * 1024 * 1024}, (error, stdout) => resolve(error && !stdout ? '' : String(stdout))))
@@ -71,7 +72,9 @@ export async function memoryUsage() {
 	)
 	const size = info.MemTotal ?? os.totalmem()
 	const used = size - (info.MemAvailable ?? os.freemem())
-	return {size, totalUsed: used, system: used, apps: [], machines: []}
+	const swapTotal = info.SwapTotal ?? 0
+	const swap = swapTotal > 0 ? {total: swapTotal, used: Math.max(0, swapTotal - (info.SwapFree ?? 0))} : undefined
+	return {size, totalUsed: used, system: used, apps: [], machines: [], ...(swap ? {swap} : {})}
 }
 
 // What takes up the drive: apps, machines and your files are measured in the background (du can
@@ -223,32 +226,15 @@ async function isVirtual() {
 	return virtual
 }
 
-// The hottest CPU sensor we can find (coretemp, k10temp, zenpower or a thermal zone).
-export async function cpuTemperature() {
-	let best = null
-	for (const hw of await readdir('/sys/class/hwmon').catch(() => [])) {
-		const dir = `/sys/class/hwmon/${hw}`
-		const name = (await read(`${dir}/name`)).trim()
-		if (!/coretemp|k10temp|k8temp|zenpower|cpu|acpitz|soc|x86_pkg/.test(name)) continue
-		// Older kernels keep the readings one folder down.
-		for (const d of [dir, `${dir}/device`]) {
-			for (const f of await readdir(d).catch(() => [])) {
-				if (!/^temp\d+_input$/.test(f)) continue
-				const t = Number(await read(`${d}/${f}`)) / 1000
-				if (Number.isFinite(t) && t > 0 && t < 150 && (best === null || t > best)) best = t
-			}
-		}
-	}
-	if (best === null) {
-		for (const z of await readdir('/sys/class/thermal').catch(() => [])) {
-			if (!z.startsWith('thermal_zone')) continue
-			const t = Number(await read(`/sys/class/thermal/${z}/temp`)) / 1000
-			if (Number.isFinite(t) && t > 0 && t < 150 && (best === null || t > best)) best = t
-		}
-	}
-	if (best === null) return {warning: 'normal', temperature: null, reason: (await isVirtual()) ? 'virtual' : 'no-sensor'}
-	const temperature = Math.round(best)
-	return {warning: temperature >= 90 ? 'hot' : temperature >= 80 ? 'warm' : 'normal', temperature}
+// The processor temperature, plus every other sensor a person can choose.
+// `temperature` stays the processor reading so older callers keep working.
+const thermalWatch = createThermalWatch()
+export async function cpuTemperature({list = readdir, read: readText = read, watch = thermalWatch} = {}) {
+	const sensors = watch.observe(sensorsFromProbes(await readThermalProbes({list, read: readText})))
+	const headline = sensors.find((sensor) => sensor.id === 'processor') ?? sensors.filter((sensor) => sensor.kind === 'processor').sort((a, b) => b.celsius - a.celsius)[0]
+	if (!headline) return {warning: 'normal', temperature: null, reason: (await isVirtual()) ? 'virtual' : 'no-sensor', sensors}
+	const temperature = Math.round(headline.celsius)
+	return {warning: temperature >= 90 ? 'hot' : temperature >= 80 ? 'warm' : 'normal', temperature, sensors}
 }
 
 const num = (s) => {

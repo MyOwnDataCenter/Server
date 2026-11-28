@@ -17,6 +17,7 @@ export type MachineTab = {id: string; label: string; body: ReactNode}
 /**
  * Lower sections of a machine. Selection is by click or Enter, not by moving focus:
  * opening a section fetches it, so arrowing through the row must not load every one.
+ * The panel is not a tab stop. Tab moves from the selected tab to the first control inside.
  */
 export function MachineTabs({label, tabs, tab, onTab}: {label: string; tabs: MachineTab[]; tab: string; onTab: (id: string) => void}) {
 	const listRef = useRef<HTMLDivElement>(null)
@@ -57,7 +58,7 @@ export function MachineTabs({label, tabs, tab, onTab}: {label: string; tabs: Mac
 					)
 				})}
 			</div>
-			<div role="tabpanel" aria-labelledby={`mtab-${current.id}`} tabIndex={0} className="machine-tab-panel">
+			<div role="tabpanel" aria-labelledby={`mtab-${current.id}`} tabIndex={-1} className="machine-tab-panel">
 				<div className="machine-tab-body">{current.body}</div>
 			</div>
 		</div>

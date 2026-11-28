@@ -6,9 +6,10 @@ import { createPortal } from "react-dom";
 import { mutate, type FileEntry } from "../../api";
 import { useDialogFocus } from "../../focus";
 import { Icon, type IconName } from "../../icons";
-import { bytes, haptic, usePortalRoot, useToast } from "../../ui";
+import { bytes, haptic, useConfirm, usePortalRoot, useToast } from "../../ui";
 import { ZIP_ENTRY_LIMIT, decodeTextFile, encodeTextFile, handleDocumentLinkClick, nextGridCell, renderMarkdownHtml, shouldIgnoreViewerKey, zipTruncatedNote } from "./helpers";
 import type { Sheet, Shape, ZipEntry } from "./office";
+import { panDeltaForKey } from "./panKeys";
 
 const enc = encodeURIComponent;
 const viewUrl = (path: string) => `/api/files/view?path=${enc(path)}`;
@@ -144,31 +145,44 @@ type Tools = { node: ReactNode; ownsArrows?: boolean; dirty?: boolean };
 
 export function FileViewer(p: ViewerProps) {
   const root = usePortalRoot();
+  const confirm = useConfirm();
   const [i, setI] = useState(p.index);
   const f = p.files[Math.min(i, p.files.length - 1)];
   const [tools, setTools] = useState<Tools>({ node: null });
   const [zoomed, setZoomed] = useState(false);
   const has = { prev: i > 0, next: i < p.files.length - 1 };
-  const guard = () => !tools.dirty || confirm("Discard your unsaved changes?");
-  const step = (d: number) => {
+  const askDiscard = async () => {
+    if (!tools.dirty) return true;
+    return confirm({
+      title: "Discard unsaved changes?",
+      body: "Edits in this file won’t be saved.",
+      confirm: "Discard",
+      danger: true,
+      icon: "alert",
+    });
+  };
+  const step = async (d: number) => {
     const n = i + d;
-    if (n < 0 || n >= p.files.length || !guard()) return;
+    if (n < 0 || n >= p.files.length) return;
+    if (!(await askDiscard())) return;
     haptic(4);
     setTools({ node: null });
     setZoomed(false);
     setI(n);
   };
-  const close = () => guard() && p.onClose();
+  const close = async () => {
+    if (await askDiscard()) p.onClose();
+  };
   const dialogRef = useRef<HTMLDivElement>(null);
-  const isTop = useDialogFocus(!!f, dialogRef, close, {
+  const isTop = useDialogFocus(!!f, dialogRef, () => void close(), {
     canEscape: (e) => !(e.target as HTMLElement | null)?.closest("input, textarea, [contenteditable=true]"),
   });
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const el = e.target as HTMLElement;
       if (!isTop() || el.closest("input, textarea, [contenteditable=true]")) return;
-      if (!tools.ownsArrows && e.key === "ArrowLeft") step(-1);
-      else if (!tools.ownsArrows && e.key === "ArrowRight") step(1);
+      if (!tools.ownsArrows && e.key === "ArrowLeft") void step(-1);
+      else if (!tools.ownsArrows && e.key === "ArrowRight") void step(1);
     };
     document.addEventListener("keydown", onKey, true);
     return () => document.removeEventListener("keydown", onKey, true);
@@ -197,12 +211,12 @@ export function FileViewer(p: ViewerProps) {
         if (!s) return;
         const dx = e.changedTouches[0].clientX - s.x;
         const dy = e.changedTouches[0].clientY - s.y;
-        if (Math.abs(dx) > 60 && Math.abs(dx) > Math.abs(dy) * 1.5 && Date.now() - s.t < 600) step(dx < 0 ? 1 : -1);
-        else if (dy > 110 && Math.abs(dy) > Math.abs(dx) * 1.5 && kind === "image") close();
+        if (Math.abs(dx) > 60 && Math.abs(dx) > Math.abs(dy) * 1.5 && Date.now() - s.t < 600) void step(dx < 0 ? 1 : -1);
+        else if (dy > 110 && Math.abs(dy) > Math.abs(dx) * 1.5 && kind === "image") void close();
       }}
     >
       <header className="fv-bar">
-        <button className="icon-btn" onClick={close} aria-label="Close viewer" title="Close (Esc)">
+        <button className="icon-btn" onClick={() => void close()} aria-label="Close viewer" title="Close (Esc)">
           <Icon name="back" size={22} />
         </button>
         <span className="fv-title">
@@ -236,12 +250,12 @@ export function FileViewer(p: ViewerProps) {
         <Body f={f} kind={kind} setTools={setTools} setZoomed={setZoomed} onDownload={() => p.onDownload(f)} onChanged={p.onChanged} />
       </div>
       {has.prev && (
-        <button className="fv-nav prev" onClick={() => step(-1)} aria-label="Previous file" title="Previous (←)">
+        <button className="fv-nav prev" onClick={() => void step(-1)} aria-label="Previous file" title="Previous (←)">
           <Icon name="back" size={26} />
         </button>
       )}
       {has.next && (
-        <button className="fv-nav next" onClick={() => step(1)} aria-label="Next file" title="Next (→)">
+        <button className="fv-nav next" onClick={() => void step(1)} aria-label="Next file" title="Next (→)">
           <Icon name="chevron" size={26} />
         </button>
       )}
@@ -401,8 +415,24 @@ function ImageView(b: BodyProps) {
           </button>
         </>
       ),
+      // A zoomed photo owns the arrow keys (they pan it); at 100% they still switch files.
+      ownsArrows: z.s > 1,
     });
   }, [z.s, z.x, z.y]);
+  const panning = z.s > 1;
+  useEffect(() => {
+    if (!panning) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.defaultPrevented || e.ctrlKey || e.altKey || e.metaKey || (e.target as HTMLElement | null)?.closest?.("input, textarea, [contenteditable=true]")) return;
+      const d = panDeltaForKey(e.key);
+      if (!d) return;
+      e.preventDefault();
+      const cur = zRef.current;
+      setRef.current(cur.s, cur.x + d.x, cur.y + d.y);
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [panning]);
   useEffect(() => {
     const el = box.current;
     if (!el) return;
@@ -653,6 +683,7 @@ async function renderMarkdown(src: string) {
 function TextView(b: BodyProps) {
   const { f } = b;
   const toast = useToast();
+  const confirm = useConfirm();
   const [reload, setReload] = useState(0);
   const { text, error, editable: textEditable, bom, eol } = useText(f, reload);
   const isMd = b.kind === "markdown";
@@ -681,13 +712,27 @@ function TextView(b: BodyProps) {
       setSaving(false);
     }
   };
+  const cancelEdit = async () => {
+    if (
+      dirty &&
+      !(await confirm({
+        title: "Discard unsaved changes?",
+        body: "Edits in this file won’t be saved.",
+        confirm: "Discard",
+        danger: true,
+        icon: "alert",
+      }))
+    )
+      return;
+    setMode(isMd ? "view" : "source");
+  };
   useEffect(() => {
     b.setTools({
       dirty,
       node:
         text == null ? null : mode === "edit" ? (
           <>
-            <button className="btn small" onClick={() => (!dirty || confirm("Discard your changes?")) && setMode(isMd ? "view" : "source")}>
+            <button className="btn small" onClick={() => void cancelEdit()}>
               Cancel
             </button>
             <button className="btn small primary" onClick={save} disabled={saving || !dirty}>
@@ -703,7 +748,7 @@ function TextView(b: BodyProps) {
               </button>
             )}
             {mode === "source" && (
-              <button className={`icon-btn${wrap ? " on" : ""}`} aria-label="Wrap lines" title="Wrap lines" onClick={() => setWrap((w) => !w)}>
+              <button className={`icon-btn${wrap ? " on" : ""}`} aria-label="Wrap lines" aria-pressed={wrap} title="Wrap lines" onClick={() => setWrap((w) => !w)}>
                 <Icon name="wrap" size={20} />
               </button>
             )}
@@ -850,6 +895,7 @@ function Grid({ rows, editable, onEdit, header }: { rows: string[][]; editable?:
 }
 function CsvView(b: BodyProps) {
   const toast = useToast();
+  const confirm = useConfirm();
   const [reload, setReload] = useState(0);
   const { text, error, editable: textEditable, bom } = useText(b.f, reload);
   const sep = ext(b.f.name) === "tsv" || b.f.type === "text/tab-separated-values" ? "\t" : ",";
@@ -883,12 +929,27 @@ function CsvView(b: BodyProps) {
       setSaving(false);
     }
   };
+  const cancelEdit = async () => {
+    if (
+      dirty &&
+      !(await confirm({
+        title: "Discard unsaved changes?",
+        body: "Edits in this file won’t be saved.",
+        confirm: "Discard",
+        danger: true,
+        icon: "alert",
+      }))
+    )
+      return;
+    setRows(orig);
+    setEditing(false);
+  };
   useEffect(() => {
     b.setTools({
       dirty,
       node: !rows ? null : editing ? (
         <>
-          <button className="btn small" onClick={() => (!dirty || confirm("Discard your changes?")) && (setRows(orig), setEditing(false))}>Cancel</button>
+          <button className="btn small" onClick={() => void cancelEdit()}>Cancel</button>
           <button className="btn small primary" disabled={!dirty || saving} onClick={save}>
             <Icon name="save" size={17} />
             {saving ? "Saving…" : "Save"}
@@ -901,7 +962,7 @@ function CsvView(b: BodyProps) {
         </button>
       ) : null,
     });
-  }, [rows, editing, dirty, saving]);
+  }, [rows, editing, dirty, saving, orig]);
   if (error) return <Failed {...b} error={error} />;
   if (!rows) return <Loading />;
   return (
@@ -938,7 +999,7 @@ function XlsxView(b: BodyProps) {
       {sheets.length > 1 && (
         <nav className="fv-tabs" aria-label="Sheets">
           {sheets.map((x, n) => (
-            <button key={n} className={n === tab ? "on" : undefined} onClick={() => setTab(n)}>{x.name}</button>
+            <button key={n} className={n === tab ? "on" : undefined} aria-current={n === tab ? "true" : undefined} onClick={() => setTab(n)}>{x.name}</button>
           ))}
         </nav>
       )}

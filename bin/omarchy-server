@@ -3,9 +3,10 @@
 #   omarchy-server              status and address
 #   omarchy-server open         open the web app
 #   omarchy-server restart      restart both services (also: start, stop)
-#   omarchy-server logs [-f]    recent log lines (follow with -f)
+#   omarchy-server logs [-f]    recent log lines, including the desktop screen sharing (follow with -f)
 #   omarchy-server widget on    add the status icon to the top bar (off to remove)
 #   omarchy-server uninstall    remove Omarchy Server, keeping your data (--purge deletes that too)
+#   omarchy-server reset-password [--name NAME]  set a forgotten web sign-in password
 set -u
 UNITS=(omarchyd.service omarchy-server-web.service)
 DESKTOP_UNIT=omarchy-server-desktop.service
@@ -234,6 +235,7 @@ usage() {
 		waybar) echo "Use: omarchy-server waybar" ;;
 		widget) echo "Use: omarchy-server widget on|off" ;;
 		uninstall) echo "Use: omarchy-server uninstall [--purge] [-y]" ;;
+		reset-password) echo "Use: omarchy-server reset-password [--name NAME]   set a forgotten web sign-in password (signs everyone out)" ;;
 		*)
 			cat <<'EOF'
 omarchy-server: check, open, start, stop and restart My Own Data Center on this machine.
@@ -243,6 +245,7 @@ omarchy-server: check, open, start, stop and restart My Own Data Center on this 
   omarchy-server logs [-f|--follow] [-n N] [--since TIME]  recent log lines
   omarchy-server widget on    add the status icon to the top bar (off to remove)
   omarchy-server uninstall    remove My Own Data Center, keeping your data (--purge deletes that too)
+  omarchy-server reset-password [--name NAME]  set a forgotten web sign-in password
 EOF
 			;;
 	esac
@@ -365,7 +368,7 @@ case "$cmd" in
 				*) echo "Use: omarchy-server logs [-f|--follow] [-n N] [--since TIME]" >&2; exit 2 ;;
 			esac
 		done
-		jargs=(--user -u omarchyd -u omarchy-server-web)
+		jargs=(--user -u omarchyd -u omarchy-server-web -u omarchy-server-desktop -u omarchy-server-desktop-now)
 		[ -n "$since" ] && jargs+=(--since "$since")
 		if [ "$follow" = 1 ]; then
 			[ "$has_lines" = 1 ] && jargs+=(-n "$lines")
@@ -472,12 +475,43 @@ EOF
 		done
 		do_uninstall "$purge" "$yes"
 		;;
+	reset-password)
+		if wants_help "$@"; then usage reset-password; exit 0; fi
+		name_args=()
+		while [ $# -gt 0 ]; do
+			case "$1" in
+				--name) [ $# -ge 2 ] || { usage reset-password >&2; exit 2; }; name_args=(--name "$2"); shift 2 ;;
+				*) usage reset-password >&2; exit 2 ;;
+			esac
+		done
+		# The same node, backend and data folder the service runs, read from its unit.
+		exec_line=$(sed -n 's/^ExecStart=//p' "$UNIT_DIR/omarchyd.service" 2>/dev/null | head -1)
+		read -r node_bin cli_path _ <<<"$exec_line"
+		data_dir=$(sed -n 's/.* --data \([^ ]*\).*/\1/p' <<<"$exec_line")
+		if [ -z "$node_bin" ] || [ -z "$cli_path" ] || [ -z "$data_dir" ]; then
+			echo "Can't find the MODC backend service ($UNIT_DIR/omarchyd.service). Is My Own Data Center installed?" >&2
+			exit 1
+		fi
+		was_running=0
+		systemctl --user is-active --quiet omarchyd.service 2>/dev/null && was_running=1
+		# omarchyd keeps the accounts in memory and would write the old password back, so it stops first.
+		if [ "$was_running" = 1 ]; then
+			echo "Stopping the MODC backend while the password is changed…"
+			systemctl --user stop omarchyd.service || { echo "Couldn't stop omarchyd. See: omarchy-server logs" >&2; exit 1; }
+		fi
+		status=0
+		"$node_bin" "$cli_path" reset-password "${name_args[@]}" --data "$data_dir" </dev/tty || status=$?
+		if [ "$was_running" = 1 ]; then
+			systemctl --user start omarchyd.service || { echo "Couldn't start omarchyd again. Run: omarchy-server start" >&2; exit 1; }
+		fi
+		exit "$status"
+		;;
 	-h | --help | help)
 		if [ "$cmd" = help ] && [ $# -gt 0 ]; then
 			if [ $# -eq 1 ]; then
 				case "$1" in
 					-h | --help | help) usage ;;
-					status | open | start | stop | restart | logs | waybar | widget | uninstall) usage "$1" ;;
+					status | open | start | stop | restart | logs | waybar | widget | uninstall | reset-password) usage "$1" ;;
 					*) printf 'Unknown command: %s (try: omarchy-server help)\n' "$1" >&2; exit 2 ;;
 				esac
 			elif wants_help "$@"; then

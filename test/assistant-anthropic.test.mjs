@@ -244,7 +244,7 @@ test('an Anthropic key has a fixed address, needs a key, and its turns go to /me
 		const events = []
 		await asst.runTurn({userId: 'owner', role: 'owner', message: 'hi', emit: (e) => events.push(e)})
 		assert.deepEqual(urls, ['https://api.anthropic.com/v1/messages'])
-		assert.deepEqual(events.map((e) => e.event), ['text', 'done'])
+		assert.deepEqual(events.map((e) => e.event), ['speaker', 'text', 'done'])
 	} finally {
 		await rm(dataDir, {recursive: true, force: true})
 	}

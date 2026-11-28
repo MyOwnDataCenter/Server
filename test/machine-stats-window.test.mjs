@@ -39,3 +39,13 @@ test('the machine panels filter the hour, dash a stopped CPU, and format server 
 	assert.match(src, /formatServerDiskGb\(node\.data\.storage\.freeGb\)/)
 	assert.doesNotMatch(src, /freeGb\} GB free/)
 })
+
+test('memory status shows only the size while the machine is not running', async () => {
+	const {memoryStatusText} = await import('../web/src/machines/statsWindow.ts')
+	const fmt = (mb) => `${mb} MiB`
+	assert.equal(memoryStatusText(false, {memMb: 900}, 2048, fmt), '2048 MiB')
+	assert.equal(memoryStatusText(true, {memMb: 900}, 2048, fmt), '900 MiB of 2048 MiB')
+	assert.equal(memoryStatusText(true, null, 2048, fmt), '2048 MiB')
+	const src = await readFile(new URL('../web/src/machines/panels.tsx', import.meta.url), 'utf8')
+	assert.match(src, /memoryStatusText\(/)
+})

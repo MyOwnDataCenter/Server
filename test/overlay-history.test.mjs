@@ -34,8 +34,10 @@ test('the full-screen terminal and phone console follow that history, and the em
 		assert.match(src, /addEventListener\('popstate'/)
 		assert.match(src, /history\.back\(\)/)
 	}
-	assert.match(terminal, /if \(embedded\) return/)
+	assert.match(terminal, /if \(embedded \|\| inline\) return/)
 	assert.match(consoleSrc, /if \(embedded\) return/)
-	// The desktop window close stays a direct close: embedded never pushes an entry.
-	assert.doesNotMatch(terminal.slice(0, terminal.indexOf('if (embedded) return')), /history\.pushState/)
+	// A desktop window and a row on the Terminals page close directly: neither pushes an entry.
+	const gate = terminal.indexOf('if (embedded || inline) return')
+	assert.ok(gate > 0)
+	assert.doesNotMatch(terminal.slice(0, gate), /history\.pushState/)
 })

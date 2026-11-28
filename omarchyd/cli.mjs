@@ -2,6 +2,8 @@
 // omarchyd serve [--port 2021] [--web-port 7780] [--data DIR]  run the backend (localhost only)
 // omarchyd create-owner [--name NAME] [--data DIR]             create the owner account; asks for the password here
 // omarchyd has-owner [--data DIR]                             exit 0 if the owner account exists
+// omarchyd reset-password [--name NAME] [--data DIR]           set a forgotten password; asks for it here. omarchyd must be stopped
+import {connect} from 'node:net'
 import os from 'node:os'
 import {join} from 'node:path'
 import {parseArgs} from 'node:util'
@@ -27,6 +29,7 @@ const USAGE = `omarchyd: the My Own Data Center backend
   omarchyd serve [--port 2021] [--web-port 7780] [--data <dir>]
   omarchyd create-owner [--name <name>] [--data <dir>]
   omarchyd has-owner [--data <dir>]
+  omarchyd reset-password [--name <name>] [--data <dir>] [--port 2021]
   omarchyd -h | --help | help`
 
 let values
@@ -60,8 +63,8 @@ if (positionals.length > 1) {
 	console.error(`omarchyd: unexpected argument “${positionals[1]}”`)
 	process.exit(2)
 }
-if (!['serve', 'has-owner', 'create-owner'].includes(command)) {
-	console.error(`Unknown command “${command}”. Use: serve | create-owner | has-owner`)
+if (!['serve', 'has-owner', 'create-owner', 'reset-password'].includes(command)) {
+	console.error(`Unknown command “${command}”. Use: serve | create-owner | has-owner | reset-password`)
 	process.exit(2)
 }
 const dataDir = values.data !== undefined ? values.data : join(process.env.XDG_DATA_HOME || join(os.homedir(), '.local/share'), 'omarchy-server')
@@ -209,6 +212,60 @@ if (command === 'serve') {
 		}
 		await accounts.createOwner({name, password})
 		console.log(`Created the owner account “${name}”. Sign in with that name and password.`)
+	} catch (e) {
+		console.error(e.message)
+		process.exit(1)
+	}
+} else if (command === 'reset-password') {
+	// The running omarchyd keeps the accounts in memory and would write the old password back.
+	let port
+	try {
+		port = parsePort(values.port, undefined, {flag: '--port', fallback: 2021})
+	} catch (error) {
+		console.error(`omarchyd: ${error.message}`)
+		process.exit(1)
+	}
+	const listening = await new Promise((resolve) => {
+		const socket = connect({host: '127.0.0.1', port})
+		const done = (up) => (socket.destroy(), resolve(up))
+		socket.once('connect', () => done(true))
+		socket.once('error', () => done(false))
+		socket.setTimeout(1000, () => done(false))
+	})
+	if (listening) {
+		console.error('omarchyd is running. Use “omarchy-server reset-password”, which stops it first, or run “systemctl --user stop omarchyd” and try again.')
+		process.exit(1)
+	}
+	if (values.name !== undefined && !NAME_OK.test(values.name)) {
+		console.error(nameRejected(values.name))
+		process.exit(1)
+	}
+	let accounts
+	try {
+		accounts = await openAccounts(dataDir, {create: false})
+	} catch (error) {
+		console.error(`omarchyd: ${formatDataDirError(dataDir, error)}`)
+		process.exit(1)
+	}
+	if (!accounts.hasOwner()) {
+		console.error(`There is no owner account yet. Create one with: node ${CLI_PATH} create-owner --data ${dataDir}`)
+		process.exit(1)
+	}
+	if (!process.stdin.isTTY) {
+		console.error('Run this in a terminal so the password can be typed privately')
+		process.exit(1)
+	}
+	try {
+		const who = values.name ?? accounts.listAccounts().find((a) => a.role === 'owner')?.name ?? 'the owner'
+		const password = await askHidden(`Password for ${who}: `)
+		const again = await askHidden('Again: ')
+		if (password !== again) {
+			console.error('The passwords don’t match.')
+			process.exit(1)
+		}
+		const {name, twoFactor} = await accounts.resetPassword({name: values.name, newPassword: password})
+		console.log(`The password for “${name}” is set, and every session is signed out. Sign in with “${name}” and the new password.`)
+		if (twoFactor) console.log('Two-factor sign-in is still on: you will also need the code from your authenticator app.')
 	} catch (e) {
 		console.error(e.message)
 		process.exit(1)

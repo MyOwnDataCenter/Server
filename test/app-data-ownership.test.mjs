@@ -11,6 +11,7 @@ import {after, before, describe, test} from 'node:test'
 
 import {openAccounts} from '../omarchyd/accounts.mjs'
 import {startOmarchyd} from '../omarchyd/server.mjs'
+import {freePort} from './free-port.mjs'
 
 describe('app data under a hidden home folder', () => {
 	let root, home, data, d, auth, calls
@@ -103,7 +104,7 @@ describe('app data under a hidden home folder', () => {
 
 	test('installing an app whose data lives under ~/.local hands that data to the container user', async () => {
 		const store = join(root, 'store')
-		const port = 35112
+		const port = await freePort()
 		await mkdir(join(store, 'media'), {recursive: true})
 		await writeFile(join(store, 'omarchy-app-store.yml'), 'id: demo\nname: Demo Store\n')
 		await writeFile(join(store, 'media/omarchy-app.yml'), `manifestVersion: 1\nid: media\nname: Media\nversion: "1"\nport: ${port}\nweb:\n  service: jellyfin\n  port: 8096\n`)
@@ -125,6 +126,15 @@ describe('app data under a hidden home folder', () => {
 		}
 		assert.match(handed, new RegExp(config.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
 		assert.doesNotMatch(handed, /\.ssh/)
+		// The install opens its page after the folder is handed over. Wait until that finishes,
+		// so the test’s server can close the page and the process can exit.
+		const endInstall = Date.now() + 5_000
+		for (;;) {
+			const media = (await call('apps.list', undefined, 'query')).find((a) => a.id === 'media')
+			if (media && media.state !== 'installing') break
+			if (Date.now() > endInstall) break
+			await new Promise((r) => setTimeout(r, 30))
+		}
 	})
 
 	test('a data folder that is a link to a hidden home folder is never handed over', async () => {

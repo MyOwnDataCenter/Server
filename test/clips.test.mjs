@@ -95,6 +95,11 @@ async function boot({limits, homeInside = false} = {}) {
 			await writeChunk(Buffer.from(row.body))
 			return {size: row.body.length, mtime: row.mtime}
 		},
+		async remove(id, path) {
+			calls.push({op: 'remove', id, path})
+			stored.delete(key(id, path))
+			return true
+		},
 		async push(id, path, size, readChunk) {
 			const parts = []
 			for (;;) {
@@ -375,7 +380,9 @@ test('a server file is a reference, paste copies it, and a change stops the past
 	try {
 		const file = join(b.home, 'Documents', 'notes.txt')
 		await writeFile(file, 'alpha')
-		await assert.rejects(() => b.clips.procedures['clips.addFile'].run({scope: 'server', path: '/Home/Documents'}, b.ctx(owner)), /Choose a file/)
+		const folderClip = await b.clips.procedures['clips.addFile'].run({scope: 'server', path: '/Home/Documents'}, b.ctx(owner))
+		assert.equal(folderClip.dir, true)
+		assert.equal(folderClip.kind, 'file')
 		await assert.rejects(() => b.clips.procedures['clips.addFile'].run({scope: 'server', path: '/Home/../etc/passwd'}, b.ctx(owner)), /invalid-path|outside/)
 		const clip = await b.clips.procedures['clips.addFile'].run({scope: 'server', path: '/Home/Documents/notes.txt'}, b.ctx(owner))
 		assert.equal(clip.ref.scope, 'server')
@@ -521,6 +528,198 @@ test('factory reset’s clip hook removes every book', async () => {
 		await b.clips.procedures['clips.addText'].run({text: 'member secret'}, b.ctx(member))
 		await b.clips.resetAll()
 		assert.equal(await stat(join(b.data, 'clips')).then(() => false, (e) => e.code === 'ENOENT'), true)
+	} finally {
+		await rm(b.root, {recursive: true, force: true})
+	}
+})
+
+test('a clip whose text looks like a path or a hidden file can still be saved into a folder', async () => {
+	const b = await boot()
+	try {
+		for (const text of ['/etc/hosts', 'https://example.com/a', '.env', '..']) {
+			const clip = await b.clips.procedures['clips.addText'].run({text}, b.ctx(owner))
+			assert.equal(clip.name.includes('/'), false, `name ${clip.name}`)
+			assert.equal(clip.name.startsWith('.'), false, `name ${clip.name}`)
+			const saved = await b.clips.procedures['clips.paste'].run({id: clip.id, dest: {folder: '/Home/Documents'}}, b.ctx(owner))
+			assert.equal(await readFile(join(b.home, 'Documents', saved.path.split('/').at(-1)), 'utf8'), text)
+		}
+	} finally {
+		await rm(b.root, {recursive: true, force: true})
+	}
+})
+
+test('clips are listed newest first, with missing and offline kept apart', async () => {
+	const b = await boot()
+	try {
+		await b.clips.procedures['clips.addText'].run({text: 'first'}, b.ctx(owner))
+		await b.clips.procedures['clips.addText'].run({text: 'second'}, b.ctx(owner))
+		const listed = await b.clips.procedures['clips.list'].run(null, b.ctx(owner))
+		assert.deepEqual(listed.clips.map((clip) => clip.preview), ['second', 'first'])
+		assert.equal(listed.clips[0].availability, 'available')
+		assert.equal(listed.clips[0].machine, 'Terminal')
+		const file = join(b.home, 'Documents', 'notes.txt')
+		await writeFile(file, 'alpha')
+		await b.clips.procedures['clips.addFile'].run({scope: 'server', path: '/Home/Documents/notes.txt'}, b.ctx(owner))
+		await rm(file)
+		const gone = (await b.clips.procedures['clips.list'].run(null, b.ctx(owner))).clips.find((clip) => clip.kind === 'file')
+		assert.equal(gone.availability, 'missing')
+		assert.equal(gone.machine, 'This server')
+		b.stored.set(b.key('computer0001', 'docs/note.txt'), {name: 'note.txt', size: 4, mtime: 1, dir: false, body: Buffer.from('note')})
+		await b.clips.procedures['clips.addFile'].run({scope: 'swarm', id: 'computer0001', path: 'docs/note.txt'}, b.ctx(owner))
+		b.readers.swarm = async () => ({name: 'nix', online: false, stats: {}})
+		const before = b.calls.filter((call) => call.op === 'stat').length
+		const offline = (await b.clips.procedures['clips.list'].run(null, b.ctx(owner))).clips.find((clip) => clip.ref?.scope === 'swarm')
+		assert.equal(offline.availability, 'offline')
+		assert.equal(offline.machine, 'nix')
+		assert.equal(b.calls.filter((call) => call.op === 'stat').length, before)
+		b.readers.swarm = async () => ({name: 'nix', online: true, stats: {}})
+		b.stored.delete(b.key('computer0001', 'docs/note.txt'))
+		const missing = (await b.clips.procedures['clips.list'].run(null, b.ctx(owner))).clips.find((clip) => clip.ref?.scope === 'swarm')
+		assert.equal(missing.availability, 'missing')
+		const vm = await b.clips.procedures['clips.addFile'].run({scope: 'machine', id: 'abcd1234', path: 'Documents/secret.txt'}, b.ctx(owner))
+		const vmRow = (await b.clips.procedures['clips.list'].run(null, b.ctx(owner))).clips.find((clip) => clip.id === vm.id)
+		assert.equal(vmRow.availability, 'offline')
+		assert.equal(vmRow.machine, 'Dev')
+		assert.notEqual(vmRow.availability, 'missing')
+	} finally {
+		await rm(b.root, {recursive: true, force: true})
+	}
+})
+
+test('two paths are one clip, a cut moves only after paste, and a folder stays on this server', async () => {
+	const b = await boot()
+	try {
+		await writeFile(join(b.home, 'Documents', 'a.txt'), 'aaa')
+		await writeFile(join(b.home, 'Documents', 'b.txt'), 'bbb')
+		const many = await b.clips.procedures['clips.addFile'].run({
+			scope: 'server',
+			paths: ['/Home/Documents/a.txt', '/Home/Documents/b.txt'],
+		}, b.ctx(owner))
+		assert.equal(many.ref.items.length, 2)
+		assert.match(many.preview, /2 files/)
+		const saved = await b.clips.procedures['clips.paste'].run({id: many.id, dest: {folder: '/Home'}}, b.ctx(owner))
+		assert.equal(await readFile(join(b.home, 'a.txt'), 'utf8'), 'aaa')
+		assert.equal(await readFile(join(b.home, 'b.txt'), 'utf8'), 'bbb')
+		assert.ok(saved)
+		await writeFile(join(b.home, 'Documents', 'cut.txt'), 'cut-me')
+		const cut = await b.clips.procedures['clips.addFile'].run({scope: 'server', path: '/Home/Documents/cut.txt', cut: true}, b.ctx(owner))
+		await b.clips.procedures['clips.paste'].run({id: cut.id, dest: {folder: '/Home'}}, b.ctx(owner))
+		assert.equal(await readFile(join(b.home, 'cut.txt'), 'utf8'), 'cut-me')
+		assert.equal(await stat(join(b.home, 'Documents', 'cut.txt')).then(() => true, (error) => error.code !== 'ENOENT'), false)
+		await mkdir(join(b.home, 'Inbox'))
+		const docs = await b.clips.procedures['clips.addFile'].run({scope: 'server', path: '/Home/Documents'}, b.ctx(owner))
+		await b.clips.procedures['clips.paste'].run({id: docs.id, dest: {folder: '/Home/Inbox'}}, b.ctx(owner))
+		assert.equal(await stat(join(b.home, 'Inbox', 'Documents')).then((info) => info.isDirectory(), () => false), true)
+		await assert.rejects(() => b.clips.procedures['clips.paste'].run({id: docs.id, dest: {computer: 'computer0001', folder: 'inbox'}}, b.ctx(owner)), /folder/)
+		let written = ''
+		b.readers.writeClipboard = async (text) => {
+			written = text
+		}
+		const text = await b.clips.procedures['clips.addText'].run({text: 'hello clip'}, b.ctx(owner))
+		await b.clips.procedures['clips.paste'].run({id: text.id, dest: {clipboard: 'server'}}, b.ctx(owner))
+		assert.equal(written, 'hello clip')
+	} finally {
+		await rm(b.root, {recursive: true, force: true})
+	}
+})
+
+test('a cut removes the source only after the paste has landed', async () => {
+	const b = await boot()
+	try {
+		b.stored.set(b.key('computer0001', 'docs/cut.txt'), {name: 'cut.txt', size: 4, mtime: 10, dir: false, body: Buffer.from('snip')})
+		const clip = await b.clips.procedures['clips.addFile'].run({scope: 'swarm', id: 'computer0001', path: 'docs/cut.txt', cut: true}, b.ctx(owner))
+		assert.equal(b.stored.has(b.key('computer0001', 'docs/cut.txt')), true)
+		const saved = await b.clips.procedures['clips.paste'].run({id: clip.id, dest: {folder: '/Home/Documents'}}, b.ctx(owner))
+		assert.equal(await readFile(join(b.home, 'Documents', saved.path.split('/').at(-1)), 'utf8'), 'snip')
+		assert.equal(b.stored.has(b.key('computer0001', 'docs/cut.txt')), false)
+		const pullAt = b.calls.findIndex((call) => call.op === 'pull' && call.path === 'docs/cut.txt')
+		const removeAt = b.calls.findIndex((call) => call.op === 'remove' && call.path === 'docs/cut.txt')
+		assert.ok(pullAt >= 0 && removeAt > pullAt)
+
+		b.stored.set(b.key('computer0001', 'docs/stay.txt'), {name: 'stay.txt', size: 4, mtime: 3, dir: false, body: Buffer.from('keep')})
+		const stuck = await b.clips.procedures['clips.addFile'].run({scope: 'swarm', id: 'computer0001', path: 'docs/stay.txt', cut: true}, b.ctx(owner))
+		b.fleet.remove = async () => {
+			throw new Error('remove failed')
+		}
+		const kept = await b.clips.procedures['clips.paste'].run({id: stuck.id, dest: {folder: '/Home'}}, b.ctx(owner))
+		assert.equal(kept.kept, true)
+		assert.equal(b.stored.has(b.key('computer0001', 'docs/stay.txt')), true)
+		assert.equal(await readFile(join(b.home, kept.path.split('/').at(-1)), 'utf8'), 'keep')
+
+		await writeFile(join(b.home, 'Documents', 'gone.txt'), 'bye')
+		const local = await b.clips.procedures['clips.addFile'].run({scope: 'server', path: '/Home/Documents/gone.txt', cut: true}, b.ctx(owner))
+		const sent = await b.clips.procedures['clips.paste'].run({id: local.id, dest: {computer: 'computer0001', folder: 'inbox'}}, b.ctx(owner))
+		assert.equal(sent.path, 'inbox/gone.txt')
+		assert.equal(b.stored.get(b.key('computer0001', 'inbox/gone.txt')).body.toString(), 'bye')
+		assert.equal(await stat(join(b.home, 'Documents', 'gone.txt')).then(() => false, (error) => error.code === 'ENOENT'), true)
+	} finally {
+		await rm(b.root, {recursive: true, force: true})
+	}
+})
+
+test('several paths send the first file, and a cut waits until every copy has landed', async () => {
+	const b = await boot()
+	try {
+		b.readers.swarm = async () => ({name: 'nix', online: true, stats: {}})
+		b.stored.set(b.key('computer0001', 'docs/a.txt'), {name: 'a.txt', size: 3, mtime: 1, dir: false, body: Buffer.from('aaa')})
+		b.stored.set(b.key('computer0001', 'docs/b.txt'), {name: 'b.txt', size: 3, mtime: 1, dir: false, body: Buffer.from('bbb')})
+		const remote = await b.clips.procedures['clips.addFile'].run({scope: 'swarm', id: 'computer0001', paths: ['docs/a.txt', 'docs/b.txt']}, b.ctx(owner))
+		const saved = await b.clips.procedures['clips.paste'].run({id: remote.id, dest: {folder: '/Home/Documents'}}, b.ctx(owner))
+		assert.equal(await readFile(join(b.home, 'Documents', saved.path.split('/').at(-1)), 'utf8'), 'aaa')
+		assert.equal(b.stored.has(b.key('computer0001', 'docs/a.txt')), true)
+		assert.equal(b.stored.has(b.key('computer0001', 'docs/b.txt')), true)
+		assert.equal(b.calls.some((call) => call.op === 'pull' && call.path === 'docs/b.txt'), false)
+		const sent = await b.clips.procedures['clips.paste'].run({id: remote.id, dest: {computer: 'computer0002', folder: 'inbox'}}, b.ctx(owner))
+		assert.equal(sent.path, 'inbox/a.txt')
+		assert.equal(b.stored.get(b.key('computer0002', 'inbox/a.txt')).size, 3)
+		assert.equal(b.stored.get(b.key('computer0002', 'inbox/a.txt')).body.toString(), 'aaa')
+		b.stored.delete(b.key('computer0001', 'docs/a.txt'))
+		const missing = (await b.clips.procedures['clips.list'].run(null, b.ctx(owner))).clips.find((clip) => clip.id === remote.id)
+		assert.equal(missing.availability, 'missing')
+		b.stored.set(b.key('computer0001', 'docs/Pack'), {name: 'Pack', size: 0, mtime: 1, dir: true, body: Buffer.alloc(0)})
+		const folder = await b.clips.procedures['clips.addFile'].run({scope: 'swarm', id: 'computer0001', path: 'docs/Pack'}, b.ctx(owner))
+		await assert.rejects(() => b.clips.procedures['clips.paste'].run({id: folder.id, dest: {folder: '/Home'}}, b.ctx(owner)), /whole folder from another computer/)
+
+		await writeFile(join(b.home, 'Documents', 'c.txt'), 'ccc')
+		await writeFile(join(b.home, 'Documents', 'd.txt'), 'ddd')
+		const cut = await b.clips.procedures['clips.addFile'].run({scope: 'server', paths: ['/Home/Documents/c.txt', '/Home/Documents/d.txt'], cut: true}, b.ctx(owner))
+		let copies = 0
+		const realCopy = b.files.copy.bind(b.files)
+		b.files.copy = async (input) => {
+			copies += 1
+			if (copies === 2) throw new Error('disk full')
+			return realCopy(input)
+		}
+		await assert.rejects(() => b.clips.procedures['clips.paste'].run({id: cut.id, dest: {folder: '/Home'}}, b.ctx(owner)), /disk full/)
+		assert.equal(await readFile(join(b.home, 'Documents', 'c.txt'), 'utf8'), 'ccc')
+		assert.equal(await readFile(join(b.home, 'Documents', 'd.txt'), 'utf8'), 'ddd')
+		b.files.copy = realCopy
+		await b.clips.procedures['clips.paste'].run({id: cut.id, dest: {folder: '/Home'}}, b.ctx(owner))
+		assert.equal(await readFile(join(b.home, 'c.txt'), 'utf8'), 'ccc')
+		assert.equal(await readFile(join(b.home, 'd.txt'), 'utf8'), 'ddd')
+		assert.equal(await stat(join(b.home, 'Documents', 'c.txt')).then(() => false, (error) => error.code === 'ENOENT'), true)
+		assert.equal(await stat(join(b.home, 'Documents', 'd.txt')).then(() => false, (error) => error.code === 'ENOENT'), true)
+	} finally {
+		await rm(b.root, {recursive: true, force: true})
+	}
+})
+
+test('several text clips are one clipboard, and a file in that batch is refused', async () => {
+	const b = await boot()
+	try {
+		let written = ''
+		b.readers.writeClipboard = async (text) => {
+			written = text
+		}
+		const first = await b.clips.procedures['clips.addText'].run({text: 'older note'}, b.ctx(owner))
+		const second = await b.clips.procedures['clips.addText'].run({text: 'newer note'}, b.ctx(owner))
+		const joined = await b.clips.procedures['clips.paste'].run({ids: [second.id, first.id], dest: {clipboard: 'server'}}, b.ctx(owner))
+		assert.equal(written, 'newer note\n\nolder note')
+		assert.equal(joined.text, written)
+		await writeFile(join(b.home, 'Documents', 'notes.txt'), 'file')
+		const file = await b.clips.procedures['clips.addFile'].run({scope: 'server', path: '/Home/Documents/notes.txt'}, b.ctx(owner))
+		await assert.rejects(() => b.clips.procedures['clips.paste'].run({ids: [second.id, file.id], dest: {clipboard: 'server'}}, b.ctx(owner)), /different places/)
+		assert.equal(written, 'newer note\n\nolder note')
 	} finally {
 		await rm(b.root, {recursive: true, force: true})
 	}

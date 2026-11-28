@@ -2,6 +2,7 @@ import {lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type 
 import {useQuery, useQueryClient} from '@tanstack/react-query'
 
 import {getBootstrap, query, type Bootstrap, type User, type UserApp} from './api'
+import {plural} from './plural'
 import {bootstrapPollInterval, useServerReachable} from './connection'
 import {AppSheet} from './AppSheet'
 import {AppViewer} from './AppViewer'
@@ -11,6 +12,9 @@ import {OPEN_FLEET} from './fleet/openMember'
 import {OPEN_STORE, type StoreBinding} from './fleet/openStore'
 import {BootstrapContext, useAction, useApps, useNotifications, useUpdates, useUser} from './data'
 import {Icon, type IconName} from './icons'
+import {entrypointHost} from './entrypointHost'
+import {isOwner} from './isOwner'
+import {APP_TITLE, pageTitle} from './pageTitle'
 import {Apps} from './screens/Apps'
 import {Connect, Login} from './screens/Auth'
 import {Home} from './screens/Home'
@@ -18,8 +22,10 @@ import {Desktop} from './desktop/Desktop'
 import {resetDeskConfig} from './desktop/config'
 import {OPEN_SETTINGS} from './desktop/settingsPage'
 import {safeSession} from './safeStorage'
+import {phoneSettingsGearAction} from './settingsChrome'
 import {ScreenErrorBoundary} from './screenBoundary'
 import {inAppBackTarget, markInAppHistory, readInAppHistoryFlag} from './inAppHistory'
+import {ThemeModeButton} from './theme/ThemeModeButton'
 import {Backdrop, Sheet, SheetHeader, haptic, layoutAsked, scrollPhoneToTop, useLayout, usePrefs, type Prefs} from './ui'
 import {WhatsNewOnUpdate} from './WhatsNew'
 import {WelcomeForUser} from './Welcome'
@@ -27,11 +33,13 @@ import {InstallerPrompt} from './InstallerPrompt'
 import {consumeReopenAssistant, reopenOnMount} from './assistant'
 import {closeAssistantView, openAssistantView, resetAssistantTurn, useAssistantTurn} from './assistantTurn'
 import {AssistantLookContext, cleanLook, DEFAULT_LOOK, type AssistantLook} from './character/AssistantCharacter'
+import {StatViewProvider} from './fleet/StatRegion'
 import {AssistantCharacterWidget} from './character/widgets'
 
 const Clips = lazy(() => import('./screens/Clips').then((m) => ({default: m.Clips})))
 const Files = lazy(() => import('./screens/Files').then((m) => ({default: m.Files})))
 const Machines = lazy(() => import('./screens/Machines').then((m) => ({default: m.Machines})))
+const Terminals = lazy(() => import('./fleet/Terminals').then((m) => ({default: m.Terminals})))
 const More = lazy(() => import('./screens/More').then((m) => ({default: m.More})))
 const Settings = lazy(() => import('./screens/Settings').then((m) => ({default: m.Settings})))
 const Store = lazy(() => import('./screens/Store').then((m) => ({default: m.Store})))
@@ -41,12 +49,12 @@ const Assistant = lazy(() => import('./screens/Assistant').then((m) => ({default
 function ScreenFallback() {
 	return (
 		<main className="screen center">
-			<span className="spinner" aria-label="Loading" />
+			<span className="spinner" role="status" aria-label="Loading" />
 		</main>
 	)
 }
 
-type Tab = 'home' | 'apps' | 'files' | 'machines' | 'more' | 'settings' | 'store' | 'clips'
+type Tab = 'home' | 'apps' | 'files' | 'machines' | 'terminals' | 'more' | 'settings' | 'store' | 'clips'
 // `tone`: the palette colour each tab's icon takes in the themed looks (the same as on the desktop).
 const TABS: {id: Tab; label: string; icon: IconName; active: IconName; tone: string}[] = [
 	{id: 'home', label: 'Home', icon: 'home', active: 'home-filled', tone: 'var(--accent)'},
@@ -55,8 +63,13 @@ const TABS: {id: Tab; label: string; icon: IconName; active: IconName; tone: str
 	{id: 'machines', label: 'Machines', icon: 'machine', active: 'machine-filled', tone: 'var(--teal)'},
 	{id: 'more', label: 'System', icon: 'activity', active: 'activity-filled', tone: 'var(--peach)'},
 ]
-const tabFromHash = (): Tab => {
+function dockTabs(_owner: boolean) {
+	// Phone dock stays Home / Apps / Files / Machines / System. Terminals stays on #/terminals and System for owners; desktop may still pin it.
+	return TABS
+}
+const tabFromHash = (allowTerminals: boolean): Tab => {
 	const h = location.hash.replace('#/', '') as Tab
+	if (h === 'terminals') return allowTerminals ? 'terminals' : 'home'
 	return h === 'settings' || h === 'store' || h === 'clips' || TABS.some((t) => t.id === h) ? h : 'home'
 }
 
@@ -118,7 +131,7 @@ export function App() {
 	if (boot.isLoading) {
 		content = (
 			<main className="auth center">
-				<span className="spinner" style={{width: 30, height: 30, margin: '0 auto', color: 'var(--accent-text)'}} aria-label="Loading" />
+				<span className="spinner" style={{width: 30, height: 30, margin: '0 auto', color: 'var(--accent-text)'}} role="status" aria-label="Loading" />
 			</main>
 		)
 	} else if (boot.error || !b) {
@@ -138,9 +151,11 @@ export function App() {
 		content = (
 			<BootstrapContext.Provider value={b}>
 			<AssistantLookContext.Provider value={lookValue}>
+			<StatViewProvider prefs={prefs} setPrefs={setPrefs}>
 				{layout.desktop ? <Desktop boot={b} prefs={prefs} setPrefs={setPrefs} onSignedOut={refresh} reopenAssistant={reopenAssistant} /> : <Shell boot={b} prefs={prefs} setPrefs={setPrefs} onSignedOut={refresh} reopenAssistant={reopenAssistant} />}
 				{askLayout ? <WelcomeForUser prefs={prefs} setPrefs={setPrefs} onDone={() => setAskLayout(false)} /> : <WhatsNewOnUpdate version={b.touch.version} onDone={() => setWhatsNewDone(true)} />}
 				<InstallerPrompt ready={whatsNewDone} />
+			</StatViewProvider>
 			</AssistantLookContext.Provider>
 			</BootstrapContext.Provider>
 		)
@@ -154,7 +169,7 @@ export function App() {
 }
 
 function Shell({boot, prefs, setPrefs, onSignedOut, reopenAssistant}: {boot: Bootstrap; prefs: Prefs; setPrefs: (p: Prefs) => void; onSignedOut: () => void; reopenAssistant?: boolean}) {
-	const [tab, setTab] = useState<Tab>(tabFromHash)
+	const [tab, setTab] = useState<Tab>(() => tabFromHash(false))
 	const [storeBound, setStoreBound] = useState<StoreBinding | null>(null)
 	const [appId, setAppId] = useState<string | null>(null)
 	// An app open inside My Own Data Center (full screen, back button returns here).
@@ -165,17 +180,24 @@ function Shell({boot, prefs, setPrefs, onSignedOut, reopenAssistant}: {boot: Boo
 		return () => window.removeEventListener(VIEW_APP, onView)
 	}, [])
 	const [bellOpen, setBellOpen] = useState(false)
+	// Remount Settings when the chrome gear resets a nested page to main.
+	const [settingsEpoch, setSettingsEpoch] = useState(0)
 	const [terminal, setTerminal] = useState<{app?: {id: string; name?: string; icon?: string}; input?: string} | null>(null)
 	const [assistantOpen, setAssistantOpen] = useState(() => !!reopenAssistant)
 	const turn = useAssistantTurn()
 	const keepAssistant = assistantOpen || turn.streaming
 	const user = useUser()
+	// Every terminal socket is owner-only. Hide the tab until that is known.
+	const owner = isOwner(user.data)
+	const tabs = dockTabs(owner)
 	// omarchyd only gives the owner a shell.
-	const openTerminal = user.data?.role === 'member' ? undefined : (app?: {id: string; name?: string; icon?: string}, input?: string) => {
-		haptic(8)
-		setAppId(null)
-		setTerminal({app, input})
-	}
+	const openTerminal = !owner
+		? undefined
+		: (app?: {id: string; name?: string; icon?: string}, input?: string) => {
+				haptic(8)
+				setAppId(null)
+				setTerminal({app, input})
+			}
 	// "Open Terminal" buttons elsewhere (e.g. a one-time fix for network shares).
 	useEffect(() => {
 		const onOpen = (e: Event) => openTerminal?.(undefined, (e as CustomEvent<string>).detail)
@@ -186,11 +208,30 @@ function Shell({boot, prefs, setPrefs, onSignedOut, reopenAssistant}: {boot: Boo
 	const updates = useUpdates()
 	const notifications = useNotifications()
 
+	// Each phone screen is its own history entry, so each one names itself in the tab and the history list.
 	useEffect(() => {
-		const onHash = () => setTab(tabFromHash())
+		document.title = pageTitle(tab)
+		return () => {
+			document.title = APP_TITLE
+		}
+	}, [tab])
+	useEffect(() => {
+		const onHash = () => setTab(tabFromHash(owner))
 		window.addEventListener('hashchange', onHash)
 		return () => window.removeEventListener('hashchange', onHash)
-	}, [])
+	}, [owner])
+	useEffect(() => {
+		if (!user.isSuccess) return
+		const hash = location.hash.replace('#/', '')
+		if (owner) {
+			if (hash === 'terminals') setTab('terminals')
+			return
+		}
+		if (hash === 'terminals' || tab === 'terminals') {
+			history.replaceState(null, '', '#/home')
+			setTab('home')
+		}
+	}, [user.isSuccess, owner, tab])
 	useEffect(() => {
 		const onOpen = (e: Event) => {
 			setStoreBound((e as CustomEvent<StoreBinding>).detail ?? null)
@@ -204,10 +245,17 @@ function Shell({boot, prefs, setPrefs, onSignedOut, reopenAssistant}: {boot: Boo
 	}, [])
 	useEffect(() => {
 		const onOpen = (e: Event) => {
-			safeSession.set('omarchy-server:settings-page', String((e as CustomEvent<string>).detail || 'main'))
-			setTab('settings')
-			markInAppHistory((key, value) => sessionStorage.setItem(key, value))
-			history.pushState(null, '', '#/settings')
+			const page = String((e as CustomEvent<string>).detail || 'main')
+			if (page === 'main') safeSession.remove('omarchy-server:settings-page')
+			else safeSession.set('omarchy-server:settings-page', page)
+			setTab((cur) => {
+				if (cur === 'settings') setSettingsEpoch((n) => n + 1)
+				else {
+					markInAppHistory((key, value) => sessionStorage.setItem(key, value))
+					history.pushState(null, '', '#/settings')
+				}
+				return 'settings'
+			})
 			scrollPhoneToTop()
 		}
 		window.addEventListener(OPEN_SETTINGS, onOpen)
@@ -236,6 +284,17 @@ function Shell({boot, prefs, setPrefs, onSignedOut, reopenAssistant}: {boot: Boo
 			scrollPhoneToTop()
 		}
 	}
+	// Chrome gear: open Settings from elsewhere; if already in Settings (including Appearance), return to main.
+	const openSettingsFromChrome = () => {
+		if (phoneSettingsGearAction(tab) === 'reset-main') {
+			haptic(5)
+			safeSession.remove('omarchy-server:settings-page')
+			setSettingsEpoch((n) => n + 1)
+			scrollPhoneToTop()
+			return
+		}
+		go('settings')
+	}
 	// A direct open of #/settings (or store, or clips) has no in-app entry to pop.
 	const backInApp = () => {
 		const flag = readInAppHistoryFlag((key) => sessionStorage.getItem(key))
@@ -249,7 +308,7 @@ function Shell({boot, prefs, setPrefs, onSignedOut, reopenAssistant}: {boot: Boo
 	const online = conn.reachable
 	const updateCount = updates.data?.length ?? 0
 	const notes = notifications.data ?? []
-	const index = TABS.findIndex((t) => t.id === tab)
+	const index = tabs.findIndex((t) => t.id === tab)
 
 	return (
 		<>
@@ -259,19 +318,20 @@ function Shell({boot, prefs, setPrefs, onSignedOut, reopenAssistant}: {boot: Boo
 					<span className="device">
 						<span className={`dot ${online ? 'live' : 'down'}`} />
 						{boot.server?.device ?? 'server'}
-						<span className="mono">{boot.server?.host}</span>
+						<span className="mono">{entrypointHost(boot.server)}</span>
 					</span>
 					<span className="spacer-x" />
 					<button
 						className="round-btn"
 						aria-label="Settings"
-						onClick={() => go('settings')}
+						onClick={openSettingsFromChrome}
 					>
 						<Icon name="settings" size={20} />
 					</button>
+					<ThemeModeButton prefs={prefs} setPrefs={setPrefs} className="round-btn theme-mode" size={20} />
 					<button
 						className={`round-btn bell${notes.length ? ' lit' : ''}${notes.includes('update-available') ? ' ringing' : ''}`}
-						aria-label={notes.length ? `${notes.length} notifications` : 'Notifications'}
+						aria-label={notes.length ? plural(notes.length, 'notification') : 'Notifications'}
 						onClick={() => {
 							haptic(6)
 							setBellOpen(true)
@@ -306,25 +366,26 @@ function Shell({boot, prefs, setPrefs, onSignedOut, reopenAssistant}: {boot: Boo
 						{tab === 'apps' && <Apps onOpenApp={(a) => setAppId(a.id)} onStore={() => go('store')} />}
 						{tab === 'files' && <Files />}
 						{tab === 'store' && <Store bound={storeBound} onOpenInstalled={(a) => setAppId(a.id)} onBack={backInApp} onTerminal={openTerminal && ((input) => openTerminal(undefined, input))} />}
-						{tab === 'machines' && <Machines onOpenApp={(a) => setAppId(a.id)} onTerminal={openTerminal} />}
-						{tab === 'more' && <More prefs={prefs} setPrefs={setPrefs} onSignedOut={onSignedOut} onSettings={() => go('settings')} onClips={() => go('clips')} />}
+						{tab === 'machines' && <Machines prefs={prefs} setPrefs={setPrefs} onOpenApp={(a) => setAppId(a.id)} onTerminal={openTerminal} />}
+						{tab === 'terminals' && owner && <Terminals />}
+						{tab === 'more' && <More prefs={prefs} setPrefs={setPrefs} onSignedOut={onSignedOut} onSettings={() => go('settings')} onClips={() => go('clips')} onTerminals={owner ? () => go('terminals') : undefined} />}
 						{tab === 'clips' && <Clips onBack={backInApp} />}
-						{tab === 'settings' && <Settings prefs={prefs} setPrefs={setPrefs} onSignedOut={onSignedOut} onBack={backInApp} />}
+						{tab === 'settings' && <Settings key={settingsEpoch} prefs={prefs} setPrefs={setPrefs} onSignedOut={onSignedOut} onBack={backInApp} />}
 					</main>
 				</Suspense>
 				</ScreenErrorBoundary>
 				</div>
 			</div>
-			<nav className="dock" aria-label="Main">
+			<nav className="dock" aria-label="Main" data-tabs={tabs.length} style={{'--dock-tabs': tabs.length} as CSSProperties}>
 				<span className="indicator" style={{transform: `translateX(${Math.max(index, 0) * 100}%)`, opacity: index < 0 ? 0 : 1}} aria-hidden="true" />
-				{TABS.map((t) => (
+				{tabs.map((t) => (
 					<button key={t.id} aria-current={tab === t.id ? 'page' : undefined} onClick={() => {
 						if (t.id === 'store') setStoreBound(null)
 						go(t.id)
 					}} style={{'--tone': t.tone} as CSSProperties}>
 						<Icon name={tab === t.id ? t.active : t.icon} size={23} stroke={tab === t.id ? 2 : 1.75} />
 						{t.label}
-						{t.id === 'apps' && updateCount > 0 && <span className="count">{updateCount}</span>}
+						{t.id === 'apps' && updateCount > 0 && <span className="badge-update" aria-label={plural(updateCount, 'update')}>{updateCount}</span>}
 					</button>
 				))}
 			</nav>

@@ -1031,7 +1031,10 @@ describe('omarchyd storage', () => {
 		await mkdir(data)
 		// No smb.conf yet (Arch's samba doesn't ship one): it's written before the password is set.
 		const smbConf = join(root, 'smb.conf')
-		const s = createStorage({dataDir: data, home: '/home/chris', files, run, fstabPath: fstab, smbConf})
+		// An older helper, not the one installed on this machine. That one may already know guests.
+		const oldHelper = join(root, 'old-helper.mjs')
+		await writeFile(oldHelper, 'export {}\n')
+		const s = createStorage({dataDir: data, home: '/home/chris', files, run, fstabPath: fstab, smbConf, helperFile: oldHelper})
 		const disks = await s.procedures['storage.disks'].run()
 		const role = Object.fromEntries(disks.map((d) => [d.name, d.role]))
 		assert.deepEqual(role, {nvme0n1: 'system', sda: 'blank', sdb: 'blank', sdc: 'data', sdd: 'pool'})

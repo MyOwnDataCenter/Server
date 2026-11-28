@@ -14,6 +14,11 @@ indent_size = 4
 indent_style = space
 indent_size = 2
 
+# Python is written with four spaces.
+[*.py]
+indent_style = space
+indent_size = 4
+
 [web/src/screens/{Files.tsx,viewer/*.{ts,tsx}}]
 indent_style = space
 indent_size = 2

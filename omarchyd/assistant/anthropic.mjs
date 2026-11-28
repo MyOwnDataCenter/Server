@@ -49,7 +49,8 @@ export function anthropicMessages(messages) {
 		} else if (m.role === 'assistant') {
 			// Thinking from this run of the tool loop goes first, exactly as it came.
 			const blocks = Array.isArray(m.thinking) ? m.thinking.map((b) => ({...b})) : []
-			if (m.content) blocks.push({type: 'text', text: String(m.content)})
+			// The API refuses a text block that is only whitespace, and a saved chat replays every message.
+			if (String(m.content ?? '').trim()) blocks.push({type: 'text', text: String(m.content)})
 			for (const t of m.tool_calls ?? []) blocks.push({type: 'tool_use', id: safeId(t.id), name: t.function?.name, input: parseInput(t.function?.arguments)})
 			push('assistant', blocks)
 		} else if (m.role === 'tool') {
@@ -80,12 +81,21 @@ export function flattenToolTurns(messages) {
 export const anthropicTools = (tools) =>
 	(tools ?? []).map((t) => ({name: t.function?.name, description: t.function?.description ?? '', input_schema: t.function?.parameters ?? {type: 'object', properties: {}}}))
 
+// An error body that isn't JSON is shown only when it is short plain text. A proxy's or gateway's HTML page,
+// or a long dump, becomes one plain sentence instead.
+export const plainBody = (raw, status) => {
+	const text = raw ? String(raw).trim() : ''
+	if (!text) return `HTTP ${status}`
+	if (/^</.test(text) || /<\/?(?:html|head|body)\b/i.test(text) || text.length > 300) return `The AI service answered with an error page (HTTP ${status}). Check the endpoint address or try again.`
+	return text
+}
+
 const errorText = (raw, status) => {
 	try {
 		const m = JSON.parse(raw)?.error?.message
 		if (m) return String(m)
 	} catch {}
-	return (raw && String(raw).trim()) || `HTTP ${status}`
+	return plainBody(raw, status)
 }
 
 export async function* streamAnthropic({baseUrl = ANTHROPIC, apiKey, model, messages, tools, effort, fetchImpl = fetch, signal, retried = false}) {
@@ -159,6 +169,7 @@ export async function* streamAnthropic({baseUrl = ANTHROPIC, apiKey, model, mess
 			finished = true
 			// A reply cut off by its length limit may hold a half-written tool call: run none of it.
 			if (stopReason === 'max_tokens') yield {type: 'error', message: 'The answer ran out of room and was cut off; try again or ask for less'}
+			else if (stopReason === 'model_context_window_exceeded') yield {type: 'error', message: 'This chat is too long for the model to answer; start a new chat'}
 			else if (stopReason === 'refusal') yield {type: 'error', message: 'The model declined to answer this'}
 			else yield* toolEvents
 		}
@@ -175,7 +186,9 @@ export async function* streamAnthropic({baseUrl = ANTHROPIC, apiKey, model, mess
 	let buf = ''
 	if (res.body) {
 		for await (const chunk of res.body) {
-			buf += (typeof chunk === 'string' ? chunk : decoder.decode(chunk, {stream: true})).replace(/\r\n/g, '\n')
+			// A chunk can end between the \r and the \n, so the whole buffer is normalized, not just the new piece.
+			buf += typeof chunk === 'string' ? chunk : decoder.decode(chunk, {stream: true})
+			buf = buf.replace(/\r\n/g, '\n')
 			let idx
 			while ((idx = buf.indexOf('\n\n')) >= 0) {
 				const event = buf.slice(0, idx)

@@ -7,7 +7,7 @@ import {basename, join} from 'node:path'
 import {removeAtomic, writeAtomic} from '../atomic.mjs'
 import {RpcError} from '../rpc.mjs'
 
-const clipTitle = (s) => String(s ?? '').replace(/\s+/g, ' ').trim().slice(0, 48) || 'Chat'
+const clipTitle = (s) => [...String(s ?? '').replace(/\s+/g, ' ').trim()].slice(0, 48).join('') || 'Chat'
 const ID = () => 'c_' + randomBytes(6).toString('hex')
 const AID = () => 'a_' + randomBytes(6).toString('hex')
 // Generated ids only. The id is a path segment, and the id stored in the file is not trusted.

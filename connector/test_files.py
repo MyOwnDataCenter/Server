@@ -69,6 +69,30 @@ class FilesJailTest(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             agent.split_home_path("")
 
+    def test_moving_a_folder_between_drives_keeps_its_hidden_files(self):
+        # os.rename fails across drives; the move then copies and deletes the original.
+        src = os.path.join(self.home, "Project")
+        os.makedirs(os.path.join(src, ".git"))
+        os.makedirs(os.path.join(self.home, "Elsewhere"))
+        for rel in ("notes.txt", ".env", os.path.join(".git", "HEAD")):
+            with open(os.path.join(src, rel), "w", encoding="utf-8") as fh:
+                fh.write(rel)
+        real_rename = os.rename
+
+        def cross_drive(a, b, *rest, **kw):
+            raise OSError(18, "Invalid cross-device link")
+
+        os.rename = cross_drive
+        try:
+            agent.files_transfer({"from": "Project", "to": "Elsewhere"}, False, **self.roots)
+        finally:
+            os.rename = real_rename
+        moved = os.path.join(self.home, "Elsewhere", "Project")
+        self.assertFalse(os.path.exists(src))
+        self.assertEqual(open(os.path.join(moved, ".env"), encoding="utf-8").read(), ".env")
+        self.assertTrue(os.path.exists(os.path.join(moved, ".git", "HEAD")))
+        self.assertTrue(os.path.exists(os.path.join(moved, "notes.txt")))
+
     def test_reads_a_file_and_a_symlink_that_stays_inside(self):
         path = os.path.join(self.home, "note.txt")
         with open(path, "w", encoding="utf-8") as fh:

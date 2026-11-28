@@ -1,18 +1,22 @@
 // Direct Hyprland GPU WebCodecs renderer (H.264/HEVC/HEVC-4:4:4 Annex-B over WebSocket -> hardware VideoDecoder -> WebGL2 Catmull-Rom + CAS Canvas).
 // Renders either the full Hyprland desktop monitor OR an individual native Hyprland Linux window.
-import {useEffect, useRef, useState} from 'react'
+import {useEffect, useMemo, useRef, useState} from 'react'
+import {useQuery} from '@tanstack/react-query'
 
-import {mutate} from './api'
+import {mutate, query} from './api'
 import {
-	applyMetaToStreamControl,
-	applyReconfigAppliedToStreamControl,
-	applyReconfigUnsupportedToStreamControl,
-	createStreamControlState,
-	shouldReplayHandshakeReconfig,
+	applyMetaToProfiledStreamState,
+	applyReconfigAppliedToProfiledStreamState,
+	applyReconfigUnsupportedToProfiledStreamState,
+	classifyNetworkQuality,
+	computeAudioJitterBudget,
+	computeVideoDropPolicy,
+	createRttStats,
+	updateRttStats,
 } from './hyprlandStreamState.mjs'
+import {bindConsoleWheel} from './consoleHelpers'
 import {Icon} from './icons'
-
-export type StreamCodec = 'hevc444' | 'hevc' | 'hevc10' | 'h264'
+import {getRailDeviceId, StreamProfilerSheet, type StreamCodec, type StreamProfile, type StreamProfilesResponse} from './screens/StreamProfiler'
 
 export type HyprlandWindow = {
 	address: string
@@ -451,19 +455,59 @@ const SHARPNESS_PRESETS: Record<SharpnessPreset, {label: string; value: number; 
 	off: {label: 'Sharp: Off', value: 0, next: 'crisp'},
 }
 
-function readQualityTier(): StreamQualityTier {
+function readQualityTierOverride(): StreamQualityTier | null {
 	try {
 		const v = localStorage.getItem(QUALITY_TIER_KEY)
 		if (v === 'balanced' || v === 'high' || v === 'ultra') return v
 	} catch {}
-	return 'balanced'
+	return null
 }
 
-function readChroma444(): boolean {
+function readChroma444Override(): boolean | null {
 	try {
-		return localStorage.getItem(CHROMA_444_KEY) === '1'
+		const v = localStorage.getItem(CHROMA_444_KEY)
+		if (v === '1') return true
+		if (v === '0') return false
 	} catch {}
-	return false
+	return null
+}
+
+export function resolveEffectiveStreamConfig({
+	profile,
+	caps,
+	tierOverride,
+	chromaOverride,
+	codecFallback,
+	defaultBitrate,
+	defaultFps,
+}: {
+	profile: StreamProfile | null
+	caps: {baseCodec: StreamCodec; supports444: boolean; supportsOpus: boolean}
+	tierOverride: StreamQualityTier | null
+	chromaOverride: boolean | null
+	codecFallback: StreamCodec | null
+	defaultBitrate: number
+	defaultFps: number
+}): {codec: StreamCodec; bitrate: number; quality: number; fps: number; compression: number; chroma444: boolean; selectorValue: 'profile' | StreamQualityTier} {
+	const effectiveTier = tierOverride ?? (profile ? null : 'balanced')
+	const tier = effectiveTier ? QUALITY_TIERS[effectiveTier] : null
+	const effectiveBitrate = tier ? tier.bitrate : profile?.bitrate || QUALITY_TIERS.balanced.bitrate || defaultBitrate
+	const effectiveQuality = tier ? tier.quality : profile?.quality || QUALITY_TIERS.balanced.quality || 0
+	const effectiveFps = profile?.fps || defaultFps
+	const effectiveCompression = profile?.compression || 0
+	const non444Base: StreamCodec = profile && profile.codec !== 'hevc444' ? profile.codec : caps.baseCodec
+	const want444 = codecFallback ? false : chromaOverride !== null ? chromaOverride : profile?.codec === 'hevc444'
+	const effective444 = want444 && caps.supports444
+	const effectiveCodec: StreamCodec = codecFallback ?? (effective444 ? 'hevc444' : non444Base)
+	return {
+		codec: effectiveCodec,
+		bitrate: effectiveBitrate,
+		quality: effectiveQuality,
+		fps: effectiveFps,
+		compression: effectiveCompression,
+		chroma444: effectiveCodec === 'hevc444',
+		selectorValue: tierOverride ?? (profile ? 'profile' : 'balanced'),
+	}
 }
 
 function readSharpnessPreset(fallback: number): SharpnessPreset {
@@ -605,6 +649,8 @@ export function HyprlandView({
 	const audioCtxRef = useRef<AudioContext | null>(null)
 	const audioGainRef = useRef<GainNode | null>(null)
 	const nextAudioTimeRef = useRef(0)
+	const rttStatsRef = useRef<{rttMs: number | null; jitterMs: number; samples: number}>(createRttStats())
+	const audioResyncsRef = useRef(0)
 	const hostRef = useRef<HTMLDivElement>(null)
 	const canvasRef = useRef<HTMLCanvasElement>(null)
 	const fpsSpanRef = useRef<HTMLSpanElement>(null)
@@ -629,56 +675,86 @@ export function HyprlandView({
 	const pendingPtrRef = useRef<{ux: number; uy: number} | null>(null)
 	const ptrTimerRef = useRef<number | null>(null)
 	const wsRef = useRef<WebSocket | null>(null)
+	const deviceId = useMemo(() => getRailDeviceId(), [])
 	const [caps, setCaps] = useState<{baseCodec: StreamCodec; supports444: boolean; supportsOpus: boolean} | null>(null)
 	const [codecFallback, setCodecFallback] = useState<StreamCodec | null>(null)
-	const [qualityTier, setQualityTierState] = useState<StreamQualityTier>(readQualityTier)
-	const [chroma444, setChroma444State] = useState<boolean>(readChroma444)
+	const codecFallbackRef = useRef<StreamCodec | null>(codecFallback)
+	codecFallbackRef.current = codecFallback
+	const [reconnectNonce, setReconnectNonce] = useState(0)
+	const [tierOverride, setTierOverrideState] = useState<StreamQualityTier | null>(readQualityTierOverride)
+	const [chromaOverride, setChromaOverrideState] = useState<boolean | null>(readChroma444Override)
 	const [confirmedCodec, setConfirmedCodec] = useState<StreamCodec | null>(null)
 	const [showStats, setShowStats] = useState(false)
+	const [showProfiler, setShowProfiler] = useState(false)
 	const showStatsRef = useRef(false)
 	showStatsRef.current = showStats
-	const qualityTierRef = useRef<StreamQualityTier>(qualityTier)
-	qualityTierRef.current = qualityTier
-	const chroma444Ref = useRef<boolean>(chroma444)
-	chroma444Ref.current = chroma444
+	const tierOverrideRef = useRef<StreamQualityTier | null>(tierOverride)
+	tierOverrideRef.current = tierOverride
+	const chromaOverrideRef = useRef<boolean | null>(chromaOverride)
+	chromaOverrideRef.current = chromaOverride
 	const activeCodecRef = useRef<StreamCodec>('h264')
 	const [attempt, setAttempt] = useState(0)
 
-	const sendLiveReconfig = (nextTier: StreamQualityTier, next444: boolean) => {
+	const sendLiveReconfig = (nextTier: StreamQualityTier | null, nextChroma: boolean | null, nextFallback: StreamCodec | null = codecFallbackRef.current) => {
 		const ws = wsRef.current
 		if (!ws || ws.readyState !== WebSocket.OPEN || !caps) return
-		const tier = QUALITY_TIERS[nextTier]
-		const nextCodec: StreamCodec = next444 && caps.supports444 ? 'hevc444' : (codecFallback ?? caps.baseCodec)
-		activeCodecRef.current = nextCodec
+		const cfg = resolveEffectiveStreamConfig({
+			profile: activeProfileRef.current,
+			caps,
+			tierOverride: nextTier,
+			chromaOverride: nextChroma,
+			codecFallback: nextFallback,
+			defaultBitrate: bitrate,
+			defaultFps: fps,
+		})
+		activeCodecRef.current = cfg.codec
 		ws.send(
 			JSON.stringify({
 				type: 'reconfig',
-				bitrate: tier ? tier.bitrate : bitrate,
-				quality: tier ? tier.quality : 0,
-				codec: nextCodec,
+				bitrate: cfg.bitrate,
+				quality: cfg.quality,
+				codec: cfg.codec,
 			}),
 		)
 	}
 
-	const setQualityTier = (next: StreamQualityTier) => {
-		setQualityTierState(next)
-		qualityTierRef.current = next
+	const setQualityChoice = (choice: 'profile' | StreamQualityTier) => {
+		const nextTier: StreamQualityTier | null = choice === 'profile' ? null : choice
+		setTierOverrideState(nextTier)
+		tierOverrideRef.current = nextTier
 		try {
-			localStorage.setItem(QUALITY_TIER_KEY, next)
+			if (nextTier === null) localStorage.removeItem(QUALITY_TIER_KEY)
+			else localStorage.setItem(QUALITY_TIER_KEY, nextTier)
 		} catch {}
-		sendLiveReconfig(next, chroma444Ref.current)
+		sendLiveReconfig(nextTier, chromaOverrideRef.current)
 	}
 
 	const toggleChroma444 = () => {
-		const curDisplay = confirmedCodec !== null ? confirmedCodec === 'hevc444' : chroma444Ref.current
+		if (!caps) return
+		const cur = resolveEffectiveStreamConfig({
+			profile: activeProfileRef.current,
+			caps,
+			tierOverride: tierOverrideRef.current,
+			chromaOverride: chromaOverrideRef.current,
+			codecFallback: codecFallbackRef.current,
+			defaultBitrate: bitrate,
+			defaultFps: fps,
+		})
+		const curDisplay = confirmedCodec !== null ? confirmedCodec === 'hevc444' : cur.chroma444
 		const next = !curDisplay
-		setChroma444State(next)
-		chroma444Ref.current = next
+		setChromaOverrideState(next)
+		chromaOverrideRef.current = next
 		setConfirmedCodec(null)
 		try {
 			localStorage.setItem(CHROMA_444_KEY, next ? '1' : '0')
 		} catch {}
-		sendLiveReconfig(qualityTierRef.current, next)
+		// Commit cleared fallback to both state and ref when retrying 4:4:4 so controls and future tier changes stay consistent.
+		const nextFallback = next ? null : codecFallbackRef.current
+		if (next && codecFallbackRef.current !== null) {
+			codecFallbackRef.current = null
+			setCodecFallback(null)
+		}
+		sendLiveReconfig(tierOverrideRef.current, next, nextFallback)
 	}
 
 	const cycleSharpness = () => {
@@ -695,6 +771,13 @@ export function HyprlandView({
 		}
 	}
 
+	const profilesQ = useQuery({
+		queryKey: ['hyprland.profiles'],
+		queryFn: () => query<StreamProfilesResponse>('hyprland.profiles'),
+		staleTime: 10_000,
+		retry: false,
+	})
+
 	useEffect(() => {
 		let cancelled = false
 		probeCapabilities()
@@ -709,10 +792,52 @@ export function HyprlandView({
 		}
 	}, [])
 
-	useEffect(() => {
-		setCodecFallback(null)
-	}, [attempt])
+	const activeProfile = useMemo(() => {
+		const store = profilesQ.data
+		const activeId = store?.activeByDevice?.[deviceId] ?? store?.defaultProfileId ?? null
+		return activeId ? store?.profiles?.find((p) => p.id === activeId) ?? null : null
+	}, [profilesQ.data, deviceId])
 
+	const activeProfileKey = activeProfile
+		? `${activeProfile.id}:${activeProfile.codec}:${activeProfile.fps}:${activeProfile.bitrate}:${activeProfile.quality}:${activeProfile.compression}`
+		: ''
+
+	useEffect(() => {
+		codecFallbackRef.current = null
+		setCodecFallback(null)
+	}, [activeProfileKey, attempt])
+
+	useEffect(() => {
+		const onActivated = () => {
+			tierOverrideRef.current = null
+			chromaOverrideRef.current = null
+			codecFallbackRef.current = null
+			setTierOverrideState(null)
+			setChromaOverrideState(null)
+			setCodecFallback(null)
+			try {
+				localStorage.removeItem(QUALITY_TIER_KEY)
+				localStorage.removeItem(CHROMA_444_KEY)
+			} catch {}
+		}
+		window.addEventListener('omarchy:stream-profile-activated', onActivated)
+		return () => window.removeEventListener('omarchy:stream-profile-activated', onActivated)
+	}, [])
+
+	const profilesReady = !profilesQ.isPending || !!profilesQ.data
+	const activeProfileRef = useRef(activeProfile)
+	activeProfileRef.current = activeProfile
+	const resolvedConfig = caps
+		? resolveEffectiveStreamConfig({
+				profile: activeProfile,
+				caps,
+				tierOverride,
+				chromaOverride,
+				codecFallback,
+				defaultBitrate: bitrate,
+				defaultFps: fps,
+			})
+		: null
 	const refreshCanvasRect = () => {
 		const el = canvasRef.current
 		if (!el) return null
@@ -833,9 +958,12 @@ export function HyprlandView({
 		src.buffer = ab
 		src.connect(gain)
 		const now = ac.currentTime
-		// Tight 35 ms jitter cushion; resync automatically if network stalls or resumes from silence gating
-		if (nextAudioTimeRef.current < now + 0.005 || nextAudioTimeRef.current > now + 0.16) {
-			nextAudioTimeRef.current = now + 0.035
+		// Adaptive jitter cushion: 35 ms on LAN, expanding smoothly on WAN/relayed links to prevent audio skips
+		const {targetSec, minLeadSec, maxLeadSec} = computeAudioJitterBudget({...rttStatsRef.current, mode: 'pcm'})
+		if (nextAudioTimeRef.current < now + minLeadSec || nextAudioTimeRef.current > now + maxLeadSec) {
+			// Count only genuine recent underruns, not normal resumes after >200 ms silence gating
+			if (nextAudioTimeRef.current > now - 0.2 && nextAudioTimeRef.current < now + minLeadSec) audioResyncsRef.current++
+			nextAudioTimeRef.current = now + targetSec
 		}
 		src.start(nextAudioTimeRef.current)
 		nextAudioTimeRef.current += ab.duration
@@ -936,14 +1064,23 @@ export function HyprlandView({
 			setError('This browser does not support WebCodecs hardware video decoding.')
 			return
 		}
-		if (!caps) return
-		const initTier = QUALITY_TIERS[qualityTierRef.current]
-		const initCodec: StreamCodec = codecFallback ?? (chroma444Ref.current && caps.supports444 ? 'hevc444' : caps.baseCodec)
+		if (!caps || !profilesReady) return
+		const prof = activeProfileRef.current
+		const initCfg = resolveEffectiveStreamConfig({
+			profile: prof,
+			caps,
+			tierOverride: tierOverrideRef.current,
+			chromaOverride: chromaOverrideRef.current,
+			codecFallback: codecFallbackRef.current,
+			defaultBitrate: bitrate,
+			defaultFps: fps,
+		})
+		const initCodec: StreamCodec = initCfg.codec
 		activeCodecRef.current = initCodec
-		const activeFps = fps
-		const activeBitrate = initTier ? initTier.bitrate : bitrate
-		const activeQuality = initTier ? initTier.quality : 0
-		const activeCompression = 0
+		const activeFps = initCfg.fps
+		const activeBitrate = initCfg.bitrate
+		const activeQuality = initCfg.quality
+		const activeCompression = initCfg.compression
 		let disposed = false
 		let decoder: VideoDecoder | null = null
 		let audioDecoder: WebAudioDecoderLike | null = null
@@ -967,7 +1104,8 @@ export function HyprlandView({
 		let queueHighSince = 0
 		const decodeStartMap = new Map<number, number>()
 		let lastDecMs = 0
-		let lastRttMs: number | null = null
+		rttStatsRef.current = createRttStats()
+		audioResyncsRef.current = 0
 		let lastServerStats: {encMs: number; encP95Ms: number; mbps: number; polish: number; roi: number; slices: number} | null = null
 		let metaEncName = ''
 		let metaDim = ''
@@ -988,12 +1126,20 @@ export function HyprlandView({
 				if (lastServerStats.roi > 0) parts.push(`ROI ${lastServerStats.roi}`)
 			}
 			if (lastDecMs > 0) parts.push(`Dec ${lastDecMs.toFixed(1)}ms`)
-			if (lastRttMs !== null) parts.push(`RTT ${lastRttMs.toFixed(1)}ms`)
-			parts.push(audioModeLabel)
+			const rttState = rttStatsRef.current
+			if (rttState.rttMs !== null) {
+				const q = classifyNetworkQuality(rttState)
+				const jitterPart = rttState.samples >= 2 ? ` ±${rttState.jitterMs.toFixed(1)}ms` : ''
+				const netTag = q === 'high-jitter' ? ' · High RTT/jitter' : ''
+				parts.push(`RTT ${rttState.rttMs.toFixed(1)}ms${jitterPart}${netTag}`)
+			}
+			const audioBudget = computeAudioJitterBudget({...rttState, mode: audioModeLabel.startsWith('Opus') ? 'opus' : 'pcm'})
+			const resyncPart = audioResyncsRef.current > 0 ? `, ${audioResyncsRef.current} resync` : ''
+			parts.push(`${audioModeLabel} (${Math.round(audioBudget.targetSec * 1000)}ms buf${resyncPart})`)
 			statsOverlayRef.current.textContent = parts.join(' · ')
 		}
 
-		// Schedule decoded WebCodecs AudioData (10 ms Opus) onto WebAudio with tight 25 ms jitter cushion via per-view GainNode.
+		// Schedule decoded WebCodecs AudioData (10 ms Opus) onto WebAudio with RTT-adaptive jitter cushion via per-view GainNode.
 		const scheduleAudioData = (ad: WebAudioDataLike) => {
 			try {
 				if (mutedRef.current) return
@@ -1023,8 +1169,11 @@ export function HyprlandView({
 				src.buffer = ab
 				src.connect(gain)
 				const now = ac.currentTime
-				if (nextAudioTimeRef.current < now + 0.004 || nextAudioTimeRef.current > now + 0.14) {
-					nextAudioTimeRef.current = now + 0.025
+				const {targetSec, minLeadSec, maxLeadSec} = computeAudioJitterBudget({...rttStatsRef.current, mode: 'opus'})
+				if (nextAudioTimeRef.current < now + minLeadSec || nextAudioTimeRef.current > now + maxLeadSec) {
+					// Count only genuine recent underruns, not normal resumes after >200 ms silence gating
+					if (nextAudioTimeRef.current > now - 0.2 && nextAudioTimeRef.current < now + minLeadSec) audioResyncsRef.current++
+					nextAudioTimeRef.current = now + targetSec
 				}
 				src.start(nextAudioTimeRef.current)
 				nextAudioTimeRef.current += ab.duration
@@ -1123,16 +1272,33 @@ export function HyprlandView({
 			const next = nextFallbackCodec(cur)
 			if (!next) return false
 			if (cur === 'hevc444') {
-				setChroma444State(false)
-				chroma444Ref.current = false
+				setChromaOverrideState(false)
+				chromaOverrideRef.current = false
 				try {
 					localStorage.setItem(CHROMA_444_KEY, '0')
 				} catch {}
-				// If live stream already opened, downgrade 4:4:4 -> 4:2:0 in-place with zero reconnect!
+				// If live stream already opened, downgrade 4:4:4 -> 4:2:0 in-place with zero reconnect while preserving active bitrate & QP!
 				if (gotFirstFrame && wsRef.current?.readyState === WebSocket.OPEN) {
-					const t = QUALITY_TIERS[qualityTierRef.current]
-					activeCodecRef.current = next
-					wsRef.current.send(JSON.stringify({type: 'reconfig', bitrate: t ? t.bitrate : bitrate, quality: t ? t.quality : 0, codec: next}))
+					codecFallbackRef.current = next
+					setCodecFallback(next)
+					const fallbackCfg = resolveEffectiveStreamConfig({
+						profile: activeProfileRef.current,
+						caps,
+						tierOverride: tierOverrideRef.current,
+						chromaOverride: false,
+						codecFallback: next,
+						defaultBitrate: bitrate,
+						defaultFps: fps,
+					})
+					activeCodecRef.current = fallbackCfg.codec
+					wsRef.current.send(
+						JSON.stringify({
+							type: 'reconfig',
+							bitrate: fallbackCfg.bitrate,
+							quality: fallbackCfg.quality,
+							codec: fallbackCfg.codec,
+						}),
+					)
 					return true
 				}
 			}
@@ -1140,7 +1306,9 @@ export function HyprlandView({
 			try {
 				sessionStorage.setItem(CODEC_PREF_KEY, next)
 			} catch {}
+			codecFallbackRef.current = next
 			setCodecFallback(next)
+			setReconnectNonce((n) => n + 1)
 			return true
 		}
 
@@ -1326,26 +1494,32 @@ export function HyprlandView({
 			codec: initCodec,
 		})
 		const scheme = location.protocol === 'https:' ? 'wss:' : 'ws:'
-		let streamControl = createStreamControlState({
-			tier: qualityTierRef.current,
-			chroma444Pref: chroma444Ref.current,
-			effective444: initCodec === 'hevc444',
-			codec: initCodec,
-		})
+		const handshakeCfg = {
+			codec: initCfg.codec,
+			bitrate: initCfg.bitrate,
+			quality: initCfg.quality,
+			tierOverride: tierOverrideRef.current,
+			chromaOverride: chromaOverrideRef.current,
+			codecFallback: codecFallbackRef.current,
+		}
+		let appliedCfg = {...handshakeCfg}
 		const ws = new WebSocket(`${scheme}//${location.host}/api/hyprland/stream?${qs.toString()}`)
 		ws.binaryType = 'arraybuffer'
 		wsRef.current = ws
 		ws.onopen = () => {
 			if (!disposed && ws.readyState === WebSocket.OPEN) {
 				ws.send(JSON.stringify({type: 'audio', enabled: !mutedRef.current}))
-				if (
-					shouldReplayHandshakeReconfig(streamControl, {
-						tier: qualityTierRef.current,
-						chroma444Pref: chroma444Ref.current,
-						supportsHevc444: caps.supports444,
-					})
-				) {
-					sendLiveReconfig(qualityTierRef.current, chroma444Ref.current)
+				const latestCfg = resolveEffectiveStreamConfig({
+					profile: activeProfileRef.current,
+					caps,
+					tierOverride: tierOverrideRef.current,
+					chromaOverride: chromaOverrideRef.current,
+					codecFallback: codecFallbackRef.current,
+					defaultBitrate: bitrate,
+					defaultFps: fps,
+				})
+				if (latestCfg.codec !== handshakeCfg.codec || latestCfg.bitrate !== handshakeCfg.bitrate || latestCfg.quality !== handshakeCfg.quality) {
+					sendLiveReconfig(tierOverrideRef.current, chromaOverrideRef.current, codecFallbackRef.current)
 				}
 				pingBuf[0] = 0x14
 				pingView.setFloat64(1, performance.now(), false)
@@ -1371,8 +1545,8 @@ export function HyprlandView({
 						canvasRectRef.current = null
 						if (typeof msg.codec === 'string' && msg.codec) currentCodec = msg.codec
 						const encStr = String(msg.encoder || 'h264')
-						const metaUpdate = applyMetaToStreamControl(streamControl, encStr)
-						streamControl = metaUpdate.state
+						const metaUpdate = applyMetaToProfiledStreamState(appliedCfg, encStr)
+						appliedCfg = metaUpdate.appliedCfg
 						activeCodecRef.current = metaUpdate.actualCodec
 						setConfirmedCodec(metaUpdate.actualCodec)
 						metaEncName = encStr === 'hevc444_vaapi_dmabuf' ? 'HEVC 4:4:4' : encStr === 'hevc10_vaapi_dmabuf' ? 'HEVC 10-bit' : encStr === 'hevc_vaapi_dmabuf' ? 'HEVC' : 'H.264'
@@ -1408,27 +1582,33 @@ export function HyprlandView({
 							canvasRef.current.style.cursor = c
 						}
 					} else if (msg.type === 'reconfig_applied') {
-						const appliedUpdate = applyReconfigAppliedToStreamControl(streamControl, {
-							codec: msg.codec,
-							tier: qualityTierRef.current,
-							chroma444Pref: chroma444Ref.current,
+						const appliedUpdate = applyReconfigAppliedToProfiledStreamState(appliedCfg, {
+							msgCodec: msg.codec,
+							msgBitrate: msg.bitrate,
+							msgQuality: msg.quality,
+							activeCodec: activeCodecRef.current,
+							tierOverride: tierOverrideRef.current,
+							chromaOverride: chromaOverrideRef.current,
+							codecFallback: codecFallbackRef.current,
 						})
-						streamControl = appliedUpdate.state
-						if (appliedUpdate.confirmedCodec) {
-							activeCodecRef.current = appliedUpdate.confirmedCodec
-							setConfirmedCodec(appliedUpdate.confirmedCodec)
-						}
+						appliedCfg = appliedUpdate.appliedCfg
+						activeCodecRef.current = appliedUpdate.appliedCodec
+						setConfirmedCodec(appliedUpdate.appliedCodec)
 					} else if (msg.type === 'reconfig_unsupported') {
-						const rolledBack = applyReconfigUnsupportedToStreamControl(streamControl)
-						qualityTierRef.current = rolledBack.tier
-						chroma444Ref.current = rolledBack.chroma444Pref
+						const rolledBack = applyReconfigUnsupportedToProfiledStreamState(appliedCfg)
+						tierOverrideRef.current = rolledBack.tierOverride
+						chromaOverrideRef.current = rolledBack.chromaOverride
+						codecFallbackRef.current = rolledBack.codecFallback
 						activeCodecRef.current = rolledBack.codec
-						setQualityTierState(rolledBack.tier)
-						setChroma444State(rolledBack.chroma444Pref)
+						setTierOverrideState(rolledBack.tierOverride)
+						setChromaOverrideState(rolledBack.chromaOverride)
+						setCodecFallback(rolledBack.codecFallback)
 						setConfirmedCodec(rolledBack.codec)
 						try {
-							localStorage.setItem(QUALITY_TIER_KEY, rolledBack.tier)
-							localStorage.setItem(CHROMA_444_KEY, rolledBack.chroma444Pref ? '1' : '0')
+							if (rolledBack.tierOverride === null) localStorage.removeItem(QUALITY_TIER_KEY)
+							else localStorage.setItem(QUALITY_TIER_KEY, rolledBack.tierOverride)
+							if (rolledBack.chromaOverride === null) localStorage.removeItem(CHROMA_444_KEY)
+							else localStorage.setItem(CHROMA_444_KEY, rolledBack.chromaOverride ? '1' : '0')
 						} catch {}
 					} else if (msg.type === 'error') {
 						setStatusTracked('error')
@@ -1441,8 +1621,9 @@ export function HyprlandView({
 			if (buf.byteLength === 9 && buf[0] === 0x04) {
 				const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength)
 				const rtt = performance.now() - dv.getFloat64(1, false)
-				if (rtt >= 0 && rtt < 10000) {
-					lastRttMs = lastRttMs === null ? rtt : lastRttMs * 0.6 + rtt * 0.4
+				const nextRtt = updateRttStats(rttStatsRef.current, rtt)
+				if (nextRtt !== rttStatsRef.current) {
+					rttStatsRef.current = nextRtt
 					renderStatsOverlay()
 				}
 				return
@@ -1482,13 +1663,14 @@ export function HyprlandView({
 			if (decoder && decoder.state === 'configured') {
 				const q = decoder.decodeQueueSize
 				const nowMs = performance.now()
-				if (q >= 4) {
+				const dropPolicy = computeVideoDropPolicy(rttStatsRef.current)
+				if (q >= dropPolicy.queueThreshold) {
 					if (queueHighSince === 0) queueHighSince = nowMs
 				} else {
 					queueHighSince = 0
 				}
-				// Drop to next keyframe only on sustained decode backlog (>=4 frames for >80ms) or hard cap (>12), avoiding false stalls on brief WAN bursts
-				if (!isKey && (q > 12 || (queueHighSince > 0 && nowMs - queueHighSince > 80))) {
+				// Drop to next keyframe only on sustained decode backlog or hard cap, scaling tolerance with WAN RTT/jitter to absorb TCP burst drains
+				if (!isKey && (q > dropPolicy.hardCap || (queueHighSince > 0 && nowMs - queueHighSince > dropPolicy.sustainMs))) {
 					needKey = true
 					queueHighSince = 0
 					scheduleKeyframeReq()
@@ -1555,7 +1737,7 @@ export function HyprlandView({
 				blitter?.destroy()
 			} catch {}
 		}
-	}, [effectiveMode, effectiveAddress, effectiveOutput, caps, codecFallback, fps, bitrate, attempt, chrome])
+	}, [effectiveMode, effectiveAddress, effectiveOutput, caps, profilesReady, activeProfileKey, reconnectNonce, fps, bitrate, attempt, chrome])
 
 	const sendBinaryMove = (ux: number, uy: number) => {
 		const ws = wsRef.current
@@ -1687,6 +1869,19 @@ export function HyprlandView({
 		return () => el.removeEventListener('pointerrawupdate', onRaw)
 	}, [canvasMode])
 
+	// A native, non-passive listener: React's onWheel is passive, so its preventDefault is ignored and a
+	// pinch or Ctrl+scroll would also zoom the browser page.
+	const sendScrollRef = useRef(sendBinaryScroll)
+	sendScrollRef.current = sendBinaryScroll
+	useEffect(() => {
+		const el = canvasRef.current
+		if (!el) return
+		return bindConsoleWheel(el, (e) => {
+			e.preventDefault()
+			sendScrollRef.current(e.deltaX * 0.15, e.deltaY * 0.15)
+		})
+	}, [canvasMode])
+
 	const encoderLabel =
 		meta?.encoder === 'hevc444_vaapi_dmabuf'
 			? 'HEVC 4:4:4 DMA-BUF'
@@ -1712,6 +1907,7 @@ export function HyprlandView({
 			}}
 			onBlur={releaseHeldInputs}
 			onKeyDown={(e) => {
+				if (showProfiler) return
 				ensureAudioCtx()
 				const tag = (e.target as HTMLElement | null)?.tagName
 				if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return
@@ -1723,6 +1919,7 @@ export function HyprlandView({
 				sendBinaryKey(code, true, modsMask(e))
 			}}
 			onKeyUp={(e) => {
+				if (showProfiler) return
 				const tag = (e.target as HTMLElement | null)?.tagName
 				if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return
 				const code = EVDEV_CODE[e.code]
@@ -1774,10 +1971,11 @@ export function HyprlandView({
 						<select
 							className="hypr-select"
 							aria-label="Stream bitrate quality"
-							value={qualityTier}
-							onChange={(e) => setQualityTier(e.target.value as StreamQualityTier)}
+							value={resolvedConfig?.selectorValue ?? (tierOverride ?? (activeProfile ? 'profile' : 'balanced'))}
+							onChange={(e) => setQualityChoice(e.target.value as 'profile' | StreamQualityTier)}
 							title="Live stream bitrate & quality preset (instant, zero reconnect)"
 						>
+							{activeProfile && <option value="profile">{`Profile (${Math.round(activeProfile.bitrate / 1000)} Mbps)`}</option>}
 							<option value="balanced">{QUALITY_TIERS.balanced.label}</option>
 							<option value="high">{QUALITY_TIERS.high.label}</option>
 							<option value="ultra">{QUALITY_TIERS.ultra.label}</option>
@@ -1785,13 +1983,24 @@ export function HyprlandView({
 						{caps?.supports444 && (
 							<button
 								type="button"
-								className={`btn small${(confirmedCodec !== null ? confirmedCodec === 'hevc444' : chroma444) ? ' primary' : ''}`}
+								className={`btn small${(confirmedCodec !== null ? confirmedCodec === 'hevc444' : !!resolvedConfig?.chroma444) ? ' primary' : ''}`}
 								onClick={toggleChroma444}
 								title="Toggle hardware HEVC 4:4:4 full chroma for razor-sharp colored text (instant, zero reconnect)"
 							>
 								4:4:4
 							</button>
 						)}
+						<button
+							type="button"
+							className={`btn small${showProfiler ? ' primary' : ''}`}
+							onClick={() => {
+								releaseHeldInputs()
+								setShowProfiler(true)
+							}}
+							title="Benchmark GPU and manage per-device stream profiles"
+						>
+							Profiles
+						</button>
 						<button type="button" className="btn small" onClick={cycleSharpness} title="Cycle WebGL2 AMD FidelityFX CAS sharpening">
 							{SHARPNESS_PRESETS[sharpnessPreset].label}
 						</button>
@@ -1855,10 +2064,6 @@ export function HyprlandView({
 				onPointerLeave={() => {
 					if (canvasRef.current) canvasRef.current.style.cursor = 'default'
 					releaseHeldInputs()
-				}}
-				onWheel={(e) => {
-					e.preventDefault()
-					sendBinaryScroll(e.deltaX * 0.15, e.deltaY * 0.15)
 				}}
 			/>
 
@@ -2004,6 +2209,7 @@ export function HyprlandView({
 									type="button"
 									className="btn primary small"
 									onClick={() => {
+										profilesQ.refetch().catch(() => {})
 										setAttempt((a) => a + 1)
 									}}
 								>
@@ -2019,6 +2225,24 @@ export function HyprlandView({
 					)}
 				</div>
 			)}
+			<div onKeyDown={(e) => e.stopPropagation()} onKeyUp={(e) => e.stopPropagation()}>
+				<StreamProfilerSheet
+					open={showProfiler}
+					onClose={() => setShowProfiler(false)}
+					onProfileActivated={() => {
+						tierOverrideRef.current = null
+						chromaOverrideRef.current = null
+						codecFallbackRef.current = null
+						setTierOverrideState(null)
+						setChromaOverrideState(null)
+						setCodecFallback(null)
+						try {
+							localStorage.removeItem(QUALITY_TIER_KEY)
+							localStorage.removeItem(CHROMA_444_KEY)
+						} catch {}
+					}}
+				/>
+			</div>
 		</div>
 	)
 }

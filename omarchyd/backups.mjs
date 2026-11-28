@@ -23,7 +23,18 @@ import {pipeline} from 'node:stream/promises'
 
 import {removeAtomic, writeAtomic} from './atomic.mjs'
 import {fetchErrorMessage, httpDownloadErrorMessage} from './fetch-error.mjs'
+import {
+	GDRIVE_SCOPE,
+	GdriveQuotaError,
+	buildGdriveAuthUrl,
+	cleanClientId,
+	cleanFolderName,
+	createGdriveClient,
+	parseAuthCodeInput,
+	pkceChallenge,
+} from './gdrive.mjs'
 import {RpcError} from './rpc.mjs'
+import {stoppedMessage} from './exec-error.mjs'
 
 export const RESTIC_VERSION = '0.18.1'
 // From restic's SHA256SUMS for 0.18.1 (https://github.com/restic/restic/releases/tag/v0.18.1).
@@ -43,8 +54,10 @@ const APP_ID = /^[a-z0-9][a-z0-9-]{0,63}$/
 
 const DEFAULTS = {
 	nas: null, // {host, port?, share, folder, username, domain?}
+	gdrive: null, // {enabled, mode: 'direct'|'mirror', folderName, folderId, email, displayName, packSizeMiB, quotaPausedUntil, quota}
 	repo: '/Home/Backups/Omarchy Server',
 	include: {apps: true, settings: true, machineBackups: false},
+	customPaths: [],
 	pauseApps: true,
 	schedule: {frequency: 'daily', hour: 3, weekday: 0},
 	keep: {daily: 7, weekly: 4, monthly: 6},
@@ -146,7 +159,8 @@ export function defaultSpawn(cmd, args, {env, input, onLine, timeout = 6 * 60 * 
 		let out = ''
 		let err = ''
 		let buf = ''
-		const timer = setTimeout(() => child.kill('SIGTERM'), timeout)
+		let timedOut = false
+		const timer = setTimeout(() => ((timedOut = true), child.kill('SIGTERM')), timeout)
 		child.stdout.on('data', (s) => {
 			out += s
 			if (out.length > 64 * 1024 * 1024) out = out.slice(-32 * 1024 * 1024)
@@ -162,7 +176,7 @@ export function defaultSpawn(cmd, args, {env, input, onLine, timeout = 6 * 60 * 
 		child.on('close', (code) => {
 			clearTimeout(timer)
 			if (code === 0) return resolve({stdout: out, stderr: err})
-			const e = new Error(`${cmd}: ${(err || out).trim().split('\n').slice(-3).join(' ') || `exit ${code}`}`)
+			const e = new Error(timedOut ? stoppedMessage(cmd, {killed: true}, timeout) : `${cmd}: ${(err || out).trim().split('\n').slice(-3).join(' ') || `exit ${code}`}`)
 			e.code = code
 			e.stdout = out
 			e.stderr = err
@@ -173,16 +187,19 @@ export function defaultSpawn(cmd, args, {env, input, onLine, timeout = 6 * 60 * 
 	})
 }
 
-export function createBackups({dataDir, home = os.homedir(), serverDataDir = join(home, '.config', 'omarchy-server'), files, apps, swarm = null, run = defaultSpawn, fetchImpl = globalThis.fetch, arch = os.arch() === 'arm64' ? 'arm64' : 'amd64', resticPath = null, unshare = true, now = () => Date.now(), timers = true}) {
+export function createBackups({dataDir, home = os.homedir(), serverDataDir = join(home, '.config', 'omarchy-server'), files, apps, swarm = null, run = defaultSpawn, fetchImpl = globalThis.fetch, arch = os.arch() === 'arm64' ? 'arm64' : 'amd64', resticPath = null, unshare = true, now = () => Date.now(), timers = true, gdriveOptions = {}}) {
 	const dir = join(dataDir, 'backups')
 	const configFile = join(dir, 'config.json')
 	const secretFile = join(dir, 'secrets.json')
 	const historyFile = join(dir, 'history.json')
 	const pausedFile = join(dir, 'paused-apps.json')
 	const keyFile = join(dir, 'recovery-key')
+	const gdriveIndexFile = join(dir, 'gdrive-index.json')
+	const gdriveCacheDir = join(dir, 'gdrive-cache')
 	const binDir = join(dir, 'bin')
 	let config = structuredClone(DEFAULTS)
-	let secrets = {} // {nasPassword}
+	let secrets = {} // {nasPassword, gdriveClientId, gdriveClientSecret, gdriveRefreshToken}
+	const pendingOAuth = new Map() // state -> {codeVerifier, redirectUri, clientId, clientSecret, folderName, expiresAt}
 	let history = []
 	const pausedApps = new Set()
 	let job = null // {step, progress, startedAt}
@@ -190,6 +207,40 @@ export function createBackups({dataDir, home = os.homedir(), serverDataDir = joi
 	let engineInstall = null
 	let timer = null
 	let startedAt = 0
+
+	const gdrive = createGdriveClient({
+		indexFile: gdriveIndexFile,
+		cacheDir: gdriveCacheDir,
+		fetchImpl,
+		now,
+		getCredentials: async () => ({
+			clientId: secrets.gdriveClientId ?? '',
+			clientSecret: secrets.gdriveClientSecret ?? '',
+			refreshToken: secrets.gdriveRefreshToken ?? '',
+			folderId: config.gdrive?.folderId ?? null,
+			folderName: config.gdrive?.folderName ?? 'My Own Data Center Backups',
+		}),
+		...gdriveOptions,
+	})
+	const hasGdrive = () => !!(config.gdrive?.enabled && config.gdrive?.folderId && secrets.gdriveRefreshToken)
+	const hasTarget = () => !!config.nas || hasGdrive()
+	const isDirectDrive = () => hasGdrive() && config.gdrive.mode === 'direct' && !config.nas
+	const packSizeArgs = () => {
+		const mib = clampInt(config.gdrive?.packSizeMiB, 16, 128, 64)
+		return hasGdrive() ? ['--pack-size', String(mib)] : []
+	}
+	async function withServerRepo(fn, {forceDirect = false} = {}) {
+		if (forceDirect || isDirectDrive()) {
+			if (!config.gdrive?.folderId || !secrets.gdriveRefreshToken) throw new RpcError('PRECONDITION_FAILED', 'Connect Google Drive first')
+			const bridge = await gdrive.startResticBridge(config.gdrive.folderId, {repoPrefix: 'server'})
+			try {
+				return await fn(bridge.repoUrl, bridge)
+			} finally {
+				await bridge.close()
+			}
+		}
+		return fn(await serverRepo(), null)
+	}
 
 	const plainObject = (v) => !!v && typeof v === 'object' && !Array.isArray(v)
 	// Only a missing file is "not set up". Any other read, parse, or shape error is damaged:
@@ -468,7 +519,13 @@ export function createBackups({dataDir, home = os.homedir(), serverDataDir = joi
 	async function localFiles(root) {
 		const out = new Map()
 		async function walk(d) {
-			for (const e of await readdir(d, {withFileTypes: true}).catch(() => [])) {
+			// A folder that is gone is empty. One that cannot be read is not: treating it as empty would
+			// make the NAS copy delete everything it holds for that folder.
+			const entries = await readdir(d, {withFileTypes: true}).catch((error) => {
+				if (error?.code === 'ENOENT') return []
+				throw new RpcError('PRECONDITION_FAILED', `Couldn’t read the backup folder ${relative(root, d) || '.'}, so the NAS copy wasn’t changed (${error?.code ?? error?.message}).`)
+			})
+			for (const e of entries) {
 				const p = join(d, e.name)
 				if (e.isDirectory()) await walk(p)
 				else if (e.isFile() && !e.name.endsWith('.tmp')) {
@@ -561,13 +618,13 @@ export function createBackups({dataDir, home = os.homedir(), serverDataDir = joi
 			}
 		}
 	}
-	async function backupOne(paths, tags, extra, step, base, span) {
+	async function backupOne(paths, tags, extra, step, base, span, {repo = null} = {}) {
 		job = {...job, step, progress: base}
-		const args = ['backup', '--json', '--host', 'omarchy-server', ...tags.flatMap((t) => ['--tag', t]), ...extra, ...paths]
+		const args = ['backup', ...packSizeArgs(), '--json', '--host', 'omarchy-server', ...tags.flatMap((t) => ['--tag', t]), ...extra, ...paths]
 		let stdout = ''
 		let warning
 		try {
-			stdout = (await restic(args, {inside: tags.some((t) => t.startsWith('app:')), onLine: progressLine(base, span, step)})).stdout
+			stdout = (await restic(args, {inside: tags.some((t) => t.startsWith('app:')), repo, onLine: progressLine(base, span, step)})).stdout
 		} catch (e) {
 			if (e?.code !== 3) throw e
 			stdout = e.stdout ?? ''
@@ -589,82 +646,164 @@ export function createBackups({dataDir, home = os.homedir(), serverDataDir = joi
 	async function runBackup(reason = 'manual') {
 		await ready
 		if (job) throw new RpcError('CONFLICT', 'A backup is already running')
-		if (!config.nas || !(await hasKey())) throw new RpcError('PRECONDITION_FAILED', 'Set up backups first')
-		const entry = {id: randomBytes(4).toString('hex'), reason, startedAt: now(), endedAt: null, ok: false, error: null, items: [], added: 0, nas: null}
-		history.unshift(entry)
-		await saveHistory()
-		job = {step: 'Getting ready', progress: 0, startedAt: entry.startedAt}
+		// Claim it before the first await, so a second request in the meantime is refused too.
+		job = {step: 'Getting ready', progress: 0, startedAt: now()}
+		const entry = {id: randomBytes(4).toString('hex'), reason, startedAt: job.startedAt, endedAt: null, ok: false, error: null, items: [], added: 0, nas: null, gdrive: null}
+		try {
+			if (!hasTarget() || !(await hasKey())) throw new RpcError('PRECONDITION_FAILED', 'Set up backups first')
+			history.unshift(entry)
+			await saveHistory()
+		} catch (error) {
+			job = null
+			throw error
+		}
 		const done = (async () => {
 			try {
-				await ensureRepo({allowInit: false})
-				const targets = config.include.apps ? await apps.backupTargets() : []
-				const steps = targets.length + (config.include.settings ? 1 : 0) + (config.include.machineBackups ? 1 : 0)
-				const span = 0.7 / Math.max(1, steps)
-				let n = 0
-				for (const app of targets) {
-					if (!(await exists(app.dir))) continue
-					const pause = config.pauseApps && app.running
-					if (pause) {
-						await markPaused(app.id)
-						await apps.pauseForBackup(app.id).catch(() => {})
-					}
-					try {
-						const r = await backupOne([app.dir], [`app:${app.id}`], [], `Saving ${app.name}`, n * span, span)
-						entry.items.push({kind: 'app', id: app.id, name: app.name, ok: true, added: r.added, ...(r.warning ? {warning: r.warning} : {})})
-						entry.added += r.added
-					} catch (e) {
-						entry.items.push({kind: 'app', id: app.id, name: app.name, ok: false, error: e.message})
-					} finally {
+				const direct = isDirectDrive()
+				const runCore = async (repoUrl, bridge) => {
+					if (!direct) await ensureRepo({allowInit: false})
+					const targets = config.include.apps ? await apps.backupTargets() : []
+					const customPaths = Array.isArray(config.customPaths) ? config.customPaths : []
+					const steps = targets.length + (config.include.settings ? 1 : 0) + (config.include.machineBackups ? 1 : 0) + customPaths.length
+					const span = (direct ? 0.85 : 0.7) / Math.max(1, steps)
+					let n = 0
+					for (const app of targets) {
+						if (!(await exists(app.dir))) continue
+						const pause = config.pauseApps && app.running
 						if (pause) {
-							await apps.resumeAfterBackup(app.id).catch((e) => entry.items.push({kind: 'app', id: app.id, name: app.name, ok: false, error: `Didn’t start again: ${e.message}`}))
-							await unmarkPaused(app.id).catch(() => {})
+							await markPaused(app.id)
+							await apps.pauseForBackup(app.id).catch(() => {})
 						}
-					}
-					n++
-				}
-				if (config.include.settings) {
-					try {
-						const paths = [dataDir, ...((await exists(serverDataDir)) ? [serverDataDir] : [])]
-						const r = await backupOne(paths, ['settings'], settingsExcludes().flatMap((x) => ['--exclude', x]), 'Saving server settings', n * span, span)
-						entry.items.push({kind: 'settings', name: 'Server settings', ok: true, added: r.added, ...(r.warning ? {warning: r.warning} : {})})
-						entry.added += r.added
-					} catch (e) {
-						entry.items.push({kind: 'settings', name: 'Server settings', ok: false, error: e.message})
-					}
-					n++
-				}
-				if (config.include.machineBackups) {
-					try {
-						const {real} = await files.resolve('/Home/Backups/Machines', {mustExist: false})
-						if (await exists(real)) {
-							const r = await backupOne([real], ['machines'], [], 'Saving VM backups', n * span, span)
-							entry.items.push({kind: 'machines', name: 'VM backups', ok: true, added: r.added, ...(r.warning ? {warning: r.warning} : {})})
+						try {
+							const r = await backupOne([app.dir], [`app:${app.id}`], [], `Saving ${app.name}`, n * span, span, {repo: repoUrl})
+							entry.items.push({kind: 'app', id: app.id, name: app.name, ok: true, added: r.added, ...(r.warning ? {warning: r.warning} : {})})
 							entry.added += r.added
+						} catch (e) {
+							entry.items.push({kind: 'app', id: app.id, name: app.name, ok: false, error: e.message})
+						} finally {
+							if (pause) {
+								await apps.resumeAfterBackup(app.id).catch((e) => entry.items.push({kind: 'app', id: app.id, name: app.name, ok: false, error: `Didn’t start again: ${e.message}`}))
+								await unmarkPaused(app.id).catch(() => {})
+							}
 						}
-					} catch (e) {
-						entry.items.push({kind: 'machines', name: 'VM backups', ok: false, error: e.message})
+						n++
 					}
-					n++
+					if (config.include.settings) {
+						try {
+							const paths = [dataDir, ...((await exists(serverDataDir)) ? [serverDataDir] : [])]
+							const r = await backupOne(paths, ['settings'], settingsExcludes().flatMap((x) => ['--exclude', x]), 'Saving server settings', n * span, span, {repo: repoUrl})
+							entry.items.push({kind: 'settings', name: 'Server settings', ok: true, added: r.added, ...(r.warning ? {warning: r.warning} : {})})
+							entry.added += r.added
+						} catch (e) {
+							entry.items.push({kind: 'settings', name: 'Server settings', ok: false, error: e.message})
+						}
+						n++
+					}
+					if (config.include.machineBackups) {
+						try {
+							const {real} = await files.resolve('/Home/Backups/Machines', {mustExist: false})
+							if (await exists(real)) {
+								const r = await backupOne([real], ['machines'], [], 'Saving VM backups', n * span, span, {repo: repoUrl})
+								entry.items.push({kind: 'machines', name: 'VM backups', ok: true, added: r.added, ...(r.warning ? {warning: r.warning} : {})})
+								entry.added += r.added
+							}
+						} catch (e) {
+							entry.items.push({kind: 'machines', name: 'VM backups', ok: false, error: e.message})
+						}
+						n++
+					}
+					for (const vp of customPaths) {
+						const label = basename(vp) || vp
+						try {
+							const {real} = await files.resolve(vp, {mustExist: true})
+							const r = await backupOne([real], [`folder:${encodeURIComponent(vp)}`], [], `Saving ${label}`, n * span, span, {repo: repoUrl})
+							entry.items.push({kind: 'folder', id: vp, name: label, ok: true, added: r.added, ...(r.warning ? {warning: r.warning} : {})})
+							entry.added += r.added
+						} catch (e) {
+							entry.items.push({kind: 'folder', id: vp, name: label, ok: false, error: e.message})
+						}
+						n++
+					}
+					const bridgeQuotaErr = bridge?.stats?.().quotaError
+					if (bridgeQuotaErr) throw bridgeQuotaErr
+					job = {...job, step: 'Tidying old backups', progress: direct ? 0.9 : 0.72}
+					const k = config.keep
+					await restic(['forget', ...packSizeArgs(), '--group-by', 'host,tags', '--keep-daily', String(k.daily), '--keep-weekly', String(k.weekly), '--keep-monthly', String(k.monthly), '--keep-last', '1', '--prune'], {inside: !direct, repo: repoUrl})
+					if (now() - (config.lastCheckAt ?? 0) > 7 * 86400_000) {
+						job = {...job, step: 'Checking the backups', progress: direct ? 0.94 : 0.76}
+						await restic(['check', direct ? '--read-data-subset=1%' : '--read-data-subset=2%'], {inside: !direct, repo: repoUrl})
+						config.lastCheckAt = now()
+						await saveConfig()
+					}
+					if (direct && bridge) {
+						const st = bridge.stats()
+						if (st.quotaError) throw st.quotaError
+						entry.gdrive = {ok: true, mode: 'direct', uploaded: st.uploadedFiles, uploadedBytes: st.uploadedBytes}
+						if (config.gdrive.quotaPausedUntil) {
+							config.gdrive.quotaPausedUntil = 0
+							await saveConfig().catch(() => {})
+						}
+					}
 				}
-				job = {...job, step: 'Tidying old backups', progress: 0.72}
-				const k = config.keep
-				await restic(['forget', '--group-by', 'host,tags', '--keep-daily', String(k.daily), '--keep-weekly', String(k.weekly), '--keep-monthly', String(k.monthly), '--keep-last', '1', '--prune'], {inside: true})
-				if (now() - (config.lastCheckAt ?? 0) > 7 * 86400_000) {
-					job = {...job, step: 'Checking the backups', progress: 0.76}
-					await restic(['check', '--read-data-subset=2%'], {inside: true})
-					config.lastCheckAt = now()
-					await saveConfig()
-				}
-				job = {...job, step: 'Copying to the NAS', progress: 0.8}
-				try {
-					const m = await mirrorOnce((f) => (job = {...job, progress: 0.8 + 0.2 * f}))
-					entry.nas = {ok: true, ...m}
-				} catch (e) {
-					entry.nas = {ok: false, error: e.message}
+				if (direct) {
+					try {
+						await withServerRepo(runCore, {forceDirect: true})
+					} catch (e) {
+						if (e instanceof GdriveQuotaError) {
+							config.gdrive.quotaPausedUntil = now() + e.retryAfterMs
+							await saveConfig().catch(() => {})
+							entry.gdrive = {ok: false, mode: 'direct', quotaPaused: true, error: e.message}
+						} else {
+							entry.gdrive = {ok: false, mode: 'direct', error: e.message}
+							throw e
+						}
+					}
+				} else {
+					await runCore(await serverRepo(), null)
+					if (config.nas) {
+						job = {...job, step: 'Copying to the NAS', progress: 0.8}
+						try {
+							const m = await mirrorOnce((f) => (job = {...job, progress: 0.8 + (hasGdrive() ? 0.1 : 0.2) * f}))
+							entry.nas = {ok: true, ...m}
+						} catch (e) {
+							entry.nas = {ok: false, error: e.message}
+						}
+					}
+					if (hasGdrive()) {
+						const baseP = config.nas ? 0.9 : 0.8
+						const spanP = config.nas ? 0.1 : 0.2
+						job = {...job, step: 'Uploading encrypted backup to Google Drive', progress: baseP}
+						try {
+							const m = await mirrorGdriveOnce((f) => (job = {...job, progress: baseP + spanP * f}))
+							entry.gdrive = {ok: true, mode: 'mirror', ...m}
+							if (config.gdrive.quotaPausedUntil) {
+								config.gdrive.quotaPausedUntil = 0
+								await saveConfig().catch(() => {})
+							}
+						} catch (e) {
+							if (e instanceof GdriveQuotaError) {
+								config.gdrive.quotaPausedUntil = now() + e.retryAfterMs
+								await saveConfig().catch(() => {})
+								entry.gdrive = {ok: false, mode: 'mirror', quotaPaused: true, error: e.message}
+							} else {
+								entry.gdrive = {ok: false, mode: 'mirror', error: e.message}
+							}
+						}
+					}
 				}
 				const failed = entry.items.filter((i) => !i.ok)
-				entry.ok = !failed.length && entry.nas?.ok
-				entry.error = failed.length ? `${failed.map((i) => i.name).join(', ')}: ${failed[0].error}` : entry.nas?.ok ? null : `Saved on this server, but not copied to the NAS: ${entry.nas.error}`
+				const nasOk = !config.nas || !!entry.nas?.ok
+				const driveOk = !hasGdrive() || !!entry.gdrive?.ok
+				entry.ok = !failed.length && nasOk && driveOk
+				entry.error = failed.length
+					? `${failed.map((i) => i.name).join(', ')}: ${failed[0].error}`
+					: !nasOk
+						? `Saved on this server, but not copied to the NAS: ${entry.nas?.error}`
+						: !driveOk
+							? entry.gdrive?.quotaPaused
+								? entry.gdrive.error
+								: `Saved on this server, but Google Drive upload failed: ${entry.gdrive?.error}`
+							: null
 			} catch (e) {
 				entry.ok = false
 				entry.error = e.message
@@ -711,7 +850,9 @@ export function createBackups({dataDir, home = os.homedir(), serverDataDir = joi
 	async function ensureComputerRepo(id, {allowInit = true} = {}) {
 		if (!allowInit) {
 			const real = await repoReal({create: false}).catch(() => null)
-			if (!real || !(await exists(join(real, 'server', 'config'))) || !(await exists(join(real, 'computers', id, 'config')))) throw new RpcError('PRECONDITION_FAILED', 'The backup folder is empty or missing. Is the drive connected?')
+			if (!real || (!isDirectDrive() && !(await exists(join(real, 'server', 'config')))) || !(await exists(join(real, 'computers', id, 'config')))) {
+				throw new RpcError('PRECONDITION_FAILED', 'The backup folder is empty or missing. Is the drive connected?')
+			}
 		}
 		const repo = await computerRepo(id)
 		if ((await exists(join(repo, 'config'))) && (await exists(computerKey(id)))) return repo
@@ -766,6 +907,13 @@ export function createBackups({dataDir, home = os.homedir(), serverDataDir = joi
 	let mirrorChain = Promise.resolve()
 	// One NAS copy at a time; a run that finishes while another copy is going waits for it.
 	const mirrorOnce = (onProgress) => (mirrorChain = mirrorChain.catch(() => {}).then(() => mirror(onProgress)))
+	let gdriveMirrorChain = Promise.resolve()
+	const mirrorGdriveOnce = (onProgress, {prefix = ''} = {}) =>
+		(gdriveMirrorChain = gdriveMirrorChain.catch(() => {}).then(async () => {
+			if (!hasGdrive()) throw new RpcError('PRECONDITION_FAILED', 'Google Drive isn’t connected')
+			const root = await repoReal({create: false})
+			return gdrive.mirrorLocalRepo(config.gdrive.folderId, root, {onProgress, prefix})
+		}))
 	const DEFAULT_COMPUTER = {enabled: false, folders: [], schedule: {frequency: 'daily', hour: 1, weekday: 0}, lastSuccessAt: 0, lastAttemptAt: 0, failures: 0, failedSlot: 0}
 	const computerConfig = (id) => ({...structuredClone(DEFAULT_COMPUTER), ...(config.computers?.[id] ?? {})})
 	const COMPUTER_RETRY_DELAYS = [0, 30 * 60_000, 2 * 60 * 60_000]
@@ -899,7 +1047,7 @@ export function createBackups({dataDir, home = os.homedir(), serverDataDir = joi
 		await ready
 		if (input?.remove === true) return removeComputerBackups(input.id)
 		const a = await agentOf(input.id)
-		if (!config.nas || !(await hasKey())) throw new RpcError('PRECONDITION_FAILED', 'Set up backups for this server first')
+		if (!hasTarget() || !(await hasKey())) throw new RpcError('PRECONDITION_FAILED', 'Set up backups for this server first')
 		const c = computerConfig(a.id)
 		if (input.folders !== undefined) c.folders = cleanFolders(input.folders)
 		if (input.schedule) c.schedule = cleanOptions({schedule: input.schedule}).schedule
@@ -928,12 +1076,18 @@ export function createBackups({dataDir, home = os.homedir(), serverDataDir = joi
 		if (!a.on) throw new RpcError('FORBIDDEN', `Backups aren’t switched on for ${a.name}`)
 		if (!a.online) throw new RpcError('PRECONDITION_FAILED', `${a.name} is offline right now`)
 		const entry = {id: randomBytes(4).toString('hex'), computer: a.id, name: a.name, reason, startedAt: now(), endedAt: null, ok: false, error: null, items: [], added: 0, nas: null}
-		history.unshift(entry)
-		c.lastAttemptAt = now()
-		config.computers = {...(config.computers ?? {}), [a.id]: c}
-		await saveConfig()
-		await saveHistory()
+		// Claim it before the first await, so a second request in the meantime is refused too.
 		computerJobs.set(a.id, {step: 'Getting ready', progress: 0, startedAt: entry.startedAt})
+		try {
+			history.unshift(entry)
+			c.lastAttemptAt = now()
+			config.computers = {...(config.computers ?? {}), [a.id]: c}
+			await saveConfig()
+			await saveHistory()
+		} catch (error) {
+			computerJobs.delete(a.id)
+			throw error
+		}
 		const poll = pollComputerProgress(a.id, (job, p) => {
 			computerJobs.set(a.id, {...job, step: p.step || 'Backing up', progress: 0.85 * p.percent})
 		})
@@ -958,14 +1112,36 @@ export function createBackups({dataDir, home = os.homedir(), serverDataDir = joi
 				computerJobs.set(a.id, {...computerJobs.get(a.id), step: 'Tidying old backups', progress: 0.88})
 				const k = config.keep
 				await restic(['forget', '--group-by', 'host,paths', '--keep-daily', String(k.daily), '--keep-weekly', String(k.weekly), '--keep-monthly', String(k.monthly), '--keep-last', '1', '--prune'], {repo, passwordFile: computerKey(a.id)})
-				computerJobs.set(a.id, {...computerJobs.get(a.id), step: 'Copying to the NAS', progress: 0.92})
-				try {
-					entry.nas = {ok: true, ...(await mirrorOnce())}
-				} catch (e) {
-					entry.nas = {ok: false, error: e.message}
+				if (config.nas) {
+					computerJobs.set(a.id, {...computerJobs.get(a.id), step: 'Copying to the NAS', progress: 0.92})
+					try {
+						entry.nas = {ok: true, ...(await mirrorOnce())}
+					} catch (e) {
+						entry.nas = {ok: false, error: e.message}
+					}
 				}
-				entry.ok = !!entry.nas?.ok
-				entry.error = entry.ok ? null : `Saved on this server, but not copied to the NAS: ${entry.nas.error}`
+				if (hasGdrive()) {
+					computerJobs.set(a.id, {...computerJobs.get(a.id), step: 'Uploading encrypted backup to Google Drive', progress: 0.95})
+					try {
+						entry.gdrive = {ok: true, ...(await mirrorGdriveOnce(undefined, {prefix: isDirectDrive() ? 'computers/' : ''}))}
+					} catch (e) {
+						if (e instanceof GdriveQuotaError) {
+							config.gdrive.quotaPausedUntil = now() + e.retryAfterMs
+							await saveConfig().catch(() => {})
+							entry.gdrive = {ok: false, quotaPaused: true, error: e.message}
+						} else {
+							entry.gdrive = {ok: false, error: e.message}
+						}
+					}
+				}
+				const nasOk = !config.nas || !!entry.nas?.ok
+				const driveOk = !hasGdrive() || !!entry.gdrive?.ok
+				entry.ok = nasOk && driveOk
+				entry.error = !nasOk
+					? `Saved on this server, but not copied to the NAS: ${entry.nas?.error}`
+					: !driveOk
+						? `Saved on this server, but Google Drive upload failed: ${entry.gdrive?.error}`
+						: null
 				const cc = computerConfig(a.id)
 				cc.lastSuccessAt = entry.startedAt
 				cc.failures = 0
@@ -1174,7 +1350,7 @@ export function createBackups({dataDir, home = os.homedir(), serverDataDir = joi
 		await ready
 		// Computers: due if a scheduled time has passed since its last good backup (so one that was
 		// off or asleep catches up when it's back), and it hasn't been tried in the last half hour.
-		if (swarm && config.nas && (await hasKey())) {
+		if (swarm && hasTarget() && (await hasKey())) {
 			const started = []
 			for (const a of await swarm.agents().catch(() => [])) {
 				const c = computerConfig(a.id)
@@ -1184,7 +1360,9 @@ export function createBackups({dataDir, home = os.homedir(), serverDataDir = joi
 			}
 			await Promise.all(started)
 		}
-		if (!config.nas || job || !(await hasKey())) return
+		if (!hasTarget() || job || !(await hasKey())) return
+		// If paused by Google Drive's 750 GB daily upload cap, wait until the cooldown expires.
+		if (hasGdrive() && config.gdrive.quotaPausedUntil && now() < config.gdrive.quotaPausedUntil && !config.nas) return
 		const slot = latestSlot(config.schedule, now())
 		if (!slot || lastServerActivity() >= slot) return
 		await runBackup('scheduled').catch(() => {})
@@ -1196,15 +1374,36 @@ export function createBackups({dataDir, home = os.homedir(), serverDataDir = joi
 		}
 	}).catch((e) => console.error('[omarchyd] backups', e.message))
 
+	function gdriveSummary() {
+		const g = config.gdrive
+		return {
+			connected: !!(g?.folderId && secrets.gdriveRefreshToken),
+			enabled: !!g?.enabled,
+			mode: g?.mode === 'mirror' ? 'mirror' : 'direct',
+			folderName: g?.folderName ?? 'My Own Data Center Backups',
+			folderId: g?.folderId ?? null,
+			email: g?.email ?? '',
+			displayName: g?.displayName ?? '',
+			packSizeMiB: clampInt(g?.packSizeMiB, 16, 128, 64),
+			quota: g?.quota ?? null,
+			quotaPausedUntil: Number(g?.quotaPausedUntil) || 0,
+			hasClientId: !!secrets.gdriveClientId,
+			hasClientSecret: !!secrets.gdriveClientSecret,
+			scope: GDRIVE_SCOPE,
+		}
+	}
+
 	// ---- procedures ----------------------------------------------------------------------------
 	async function status() {
 		await ready
-		const configured = !!config.nas && (await hasKey())
+		const configured = hasTarget() && (await hasKey())
 		return {
 			configured,
 			nas: config.nas ? {...config.nas, hasPassword: !!secrets.nasPassword} : null,
+			gdrive: gdriveSummary(),
 			repo: config.repo,
-			include: config.include,
+			include: {apps: config.include?.apps !== false, settings: config.include?.settings !== false, machineBackups: config.include?.machineBackups === true},
+			customPaths: Array.isArray(config.customPaths) ? config.customPaths : [],
 			pauseApps: config.pauseApps,
 			schedule: config.schedule,
 			keep: config.keep,
@@ -1275,9 +1474,32 @@ export function createBackups({dataDir, home = os.homedir(), serverDataDir = joi
 		throw new RpcError('PRECONDITION_FAILED', 'That folder already has backups. Use “Restore from an existing backup”, or choose another folder.')
 	}
 
+	function cleanCustomPaths(list) {
+		if (!Array.isArray(list)) return []
+		if (list.length > 16) throw new RpcError('BAD_REQUEST', 'Choose up to 16 extra folders')
+		const out = []
+		for (const raw of list) {
+			const p = String(raw ?? '').trim().replace(/\/+$/, '')
+			if (!p) continue
+			if (!(p.startsWith('/Home/') || p === '/Home' || p.startsWith('/Pools/') || p === '/Pools') || p.includes('..') || /["\x00-\x1f]/.test(p)) {
+				throw new RpcError('BAD_REQUEST', `Extra backup folder “${p.slice(0, 60)}” must be under /Home or /Pools`)
+			}
+			if (!out.includes(p)) out.push(p)
+		}
+		return out
+	}
+
 	function cleanOptions(input = {}) {
 		const out = {}
-		if (input.include) out.include = {apps: input.include.apps !== false, settings: input.include.settings !== false, machineBackups: input.include.machineBackups === true}
+		if (input.include) {
+			out.include = {
+				apps: input.include.apps !== false,
+				settings: input.include.settings !== false,
+				machineBackups: input.include.machineBackups === true,
+			}
+			if (input.include.customPaths !== undefined) out.customPaths = cleanCustomPaths(input.include.customPaths)
+		}
+		if (input.customPaths !== undefined) out.customPaths = cleanCustomPaths(input.customPaths)
 		if (input.pauseApps !== undefined) out.pauseApps = input.pauseApps !== false
 		if (input.schedule) {
 			const f = ['off', 'daily', 'weekly'].includes(input.schedule.frequency) ? input.schedule.frequency : 'daily'
@@ -1324,15 +1546,15 @@ export function createBackups({dataDir, home = os.homedir(), serverDataDir = joi
 		let newKey = false
 		let stage = 'folder'
 		try {
-			if (opts.repo && opts.repo !== config.repo && (await hasKey()) && (await exists(join(await serverRepo(), 'config')))) throw new RpcError('CONFLICT', 'The backup folder can’t move once backups exist')
+			if (opts.repo && opts.repo !== config.repo && (await hasKey()) && !isDirectDrive() && (await exists(join(await serverRepo(), 'config')))) throw new RpcError('CONFLICT', 'The backup folder can’t move once backups exist')
 			Object.assign(config, opts)
-			if (!config.nas) throw new RpcError('BAD_REQUEST', 'Connect a NAS first')
+			if (!hasTarget()) throw new RpcError('BAD_REQUEST', 'Connect a NAS or Google Drive first')
 			stage = 'engine'
 			await ensureEngine()
 			if (resetSince()) throw new RpcError('PRECONDITION_FAILED', 'Backups were reset')
 			stage = 'folder'
 			if (!(await hasKey())) {
-				const real = await repoReal({create: false}).catch(() => null)
+				const real = !isDirectDrive() ? await repoReal({create: false}).catch(() => null) : null
 				const storeThere = real && ((await exists(join(real, 'server', 'config'))) || ((await exists(join(real, 'config'))) && (await exists(join(real, 'keys')))))
 				if (storeThere) throw new RpcError('PRECONDITION_FAILED', `${config.repo} already has a backup, but the recovery key is missing. Use “Restore from an existing backup” with the old key.`)
 				if (resetSince()) throw new RpcError('PRECONDITION_FAILED', 'Backups were reset')
@@ -1342,7 +1564,7 @@ export function createBackups({dataDir, home = os.homedir(), serverDataDir = joi
 				config.keySaved = false
 				out.recoveryKey = key
 			}
-			await ensureRepo()
+			if (!isDirectDrive()) await ensureRepo()
 		} catch (e) {
 			if (!resetSince()) config = before
 			if (newKey) await rm(keyFile, {force: true})
@@ -1377,6 +1599,27 @@ export function createBackups({dataDir, home = os.homedir(), serverDataDir = joi
 	async function snapshots() {
 		await ready
 		if (!(await hasKey())) return []
+		if (isDirectDrive()) {
+			return withServerRepo(
+				async (repoUrl) => {
+					const idx = await gdrive.loadIndex()
+					if (!idx.files['server/config']) return []
+					const {stdout} = await restic(['snapshots', '--json'], {repo: repoUrl, timeout: 120_000})
+					const list = JSON.parse(stdout || '[]')
+					return list
+						.map((s) => ({
+							id: s.id,
+							shortId: s.short_id ?? s.id.slice(0, 8),
+							time: Date.parse(s.time),
+							tags: s.tags ?? [],
+							paths: s.paths ?? [],
+							size: s.summary?.total_bytes_processed ?? null,
+						}))
+						.sort((a, b) => b.time - a.time)
+				},
+				{forceDirect: true},
+			)
+		}
 		const real = await repoReal({create: false}).catch(() => null)
 		if (!real) return []
 		await migrateLegacyRepo(real)
@@ -1403,12 +1646,21 @@ export function createBackups({dataDir, home = os.homedir(), serverDataDir = joi
 		const snapshotId = String(input.snapshotId ?? '')
 		const appId = String(input.appId ?? '')
 		if (!SNAPSHOT.test(snapshotId) || !APP_ID.test(appId)) throw new RpcError('BAD_REQUEST', 'Bad restore')
-		const snap = (await snapshots()).find((s) => s.id === snapshotId || s.shortId === snapshotId)
-		if (!snap || !snap.tags.includes(`app:${appId}`)) throw new RpcError('NOT_FOUND', 'That backup doesn’t have this app')
-		const app = (await apps.backupTargets()).find((a) => a.id === appId)
-		if (!app) throw new RpcError('NOT_FOUND', 'Install the app first, then restore its data')
-		if (!snap.paths.includes(app.dir)) throw new RpcError('PRECONDITION_FAILED', 'That backup was made for a different folder')
-		job = {step: `Restoring ${app.name}`, progress: 0, startedAt: now()}
+		// Claim it before the first await, so a backup or a second restore asked for in the meantime is refused.
+		job = {step: 'Getting ready', progress: 0, startedAt: now()}
+		let snap
+		let app
+		try {
+			snap = (await snapshots()).find((s) => s.id === snapshotId || s.shortId === snapshotId)
+			if (!snap || !snap.tags.includes(`app:${appId}`)) throw new RpcError('NOT_FOUND', 'That backup doesn’t have this app')
+			app = (await apps.backupTargets()).find((a) => a.id === appId)
+			if (!app) throw new RpcError('NOT_FOUND', 'Install the app first, then restore its data')
+			if (!snap.paths.includes(app.dir)) throw new RpcError('PRECONDITION_FAILED', 'That backup was made for a different folder')
+		} catch (error) {
+			job = null
+			throw error
+		}
+		job = {...job, step: `Restoring ${app.name}`}
 		const stampNow = now()
 		const aside = `${app.dir}.before-restore-${stampNow}`
 		// Restored beside the app first (restic recreates the whole path under the target), then swapped in.
@@ -1418,7 +1670,9 @@ export function createBackups({dataDir, home = os.homedir(), serverDataDir = joi
 		let stopped = false
 		try {
 			await mkdir(staging, {mode: 0o700})
-			await restic(['restore', snap.id, '--target', staging, '--include', app.dir, '--json'], {inside: true, onLine: progressLine(0, 0.9, `Restoring ${app.name}`)})
+			await withServerRepo(async (repoUrl) => {
+				await restic(['restore', snap.id, '--target', staging, '--include', app.dir, '--json'], {inside: true, repo: repoUrl, onLine: progressLine(0, 0.9, `Restoring ${app.name}`)})
+			})
 			const restored = join(staging, app.dir)
 			if (!(await exists(restored))) throw new Error('The backup had no files for this app')
 			if (app.running) {
@@ -1522,23 +1776,278 @@ export function createBackups({dataDir, home = os.homedir(), serverDataDir = joi
 		}
 	}
 
+	// ---- Google Drive (encrypted zero-knowledge off-site & direct-to-Drive 30 TB target) -------
+	async function gdriveStatus({refreshQuota = false} = {}) {
+		await ready
+		if (refreshQuota && config.gdrive?.folderId && secrets.gdriveRefreshToken) {
+			try {
+				const info = await gdrive.about()
+				config.gdrive = {...config.gdrive, email: info.email, displayName: info.displayName, quota: info.quota}
+				await saveConfig().catch(() => {})
+			} catch {
+				/* keep cached quota if temporarily offline */
+			}
+		}
+		return gdriveSummary()
+	}
+
+	async function gdriveAuthStart(input = {}) {
+		await ready
+		refuseDamaged(configFile)
+		refuseDamaged(secretFile)
+		const clientId = input.clientId !== undefined ? cleanClientId(input.clientId) : secrets.gdriveClientId ? cleanClientId(secrets.gdriveClientId) : ''
+		if (!clientId) throw new RpcError('BAD_REQUEST', 'Enter your Google OAuth Client ID')
+		const sameClient = !!secrets.gdriveClientId && clientId === secrets.gdriveClientId
+		const clientSecret = input.clientSecret !== undefined ? String(input.clientSecret ?? '').trim() : sameClient ? String(secrets.gdriveClientSecret ?? '') : ''
+		if (clientSecret.length > 300 || /[\x00-\x1f]/.test(clientSecret)) throw new RpcError('BAD_REQUEST', 'Invalid Google OAuth Client Secret')
+		const redirectUri = String(input.redirectUri ?? '').trim()
+		if (!/^https?:\/\/[^\s\x00-\x1f]{1,300}$/i.test(redirectUri)) throw new RpcError('BAD_REQUEST', 'Invalid redirect URI')
+		const folderName = cleanFolderName(input.folderName ?? config.gdrive?.folderName ?? 'My Own Data Center Backups')
+		const nowMs = now()
+		for (const [k, v] of pendingOAuth) if (v.expiresAt <= nowMs) pendingOAuth.delete(k)
+		const state = randomBytes(24).toString('base64url')
+		const codeVerifier = randomBytes(32).toString('base64url')
+		pendingOAuth.set(state, {codeVerifier, redirectUri, clientId, clientSecret, folderName, expiresAt: nowMs + 15 * 60_000})
+		secrets.gdriveClientId = clientId
+		if (clientSecret) secrets.gdriveClientSecret = clientSecret
+		else if (!sameClient) delete secrets.gdriveClientSecret
+		await saveSecrets()
+		return {
+			authUrl: buildGdriveAuthUrl({clientId, redirectUri, state, codeChallenge: pkceChallenge(codeVerifier), authUrl: gdrive.authUrl}),
+			state,
+			redirectUri,
+			scope: GDRIVE_SCOPE,
+		}
+	}
+
+	async function gdriveAuthFinish(input = {}) {
+		await ready
+		refuseDamaged(configFile)
+		refuseDamaged(secretFile)
+		const started = epoch
+		const {code, state: parsedState} = parseAuthCodeInput(input.code, input.state)
+		if (!parsedState) {
+			throw new RpcError('BAD_REQUEST', 'Missing sign-in state parameter. Paste the full callback URL from your browser address bar.')
+		}
+		const pending = pendingOAuth.get(parsedState)
+		if (!pending || pending.expiresAt <= now()) {
+			throw new RpcError('BAD_REQUEST', 'That Google sign-in expired or didn’t match. Start “Connect Google Drive” again.')
+		}
+		pendingOAuth.delete(parsedState)
+		const tokens = await gdrive.exchangeCode({
+			clientId: pending.clientId,
+			clientSecret: pending.clientSecret,
+			code,
+			redirectUri: pending.redirectUri,
+			codeVerifier: pending.codeVerifier,
+		})
+		if (!tokens.refreshToken && !secrets.gdriveRefreshToken) {
+			throw new RpcError('PRECONDITION_FAILED', 'Google didn’t return a refresh token. Remove this app from your Google Account permissions and connect again.')
+		}
+		if (started !== epoch) throw new RpcError('PRECONDITION_FAILED', 'Backups were reset')
+		const prevSecrets = {...secrets}
+		secrets.gdriveClientId = pending.clientId
+		if (pending.clientSecret) secrets.gdriveClientSecret = pending.clientSecret
+		if (tokens.refreshToken) secrets.gdriveRefreshToken = tokens.refreshToken
+		let info
+		let folderId
+		try {
+			info = await gdrive.about()
+			folderId = await gdrive.ensureRootFolder(pending.folderName)
+		} catch (e) {
+			secrets = prevSecrets
+			throw e instanceof RpcError ? e : new RpcError('PRECONDITION_FAILED', e.message)
+		}
+		if (started !== epoch) throw new RpcError('PRECONDITION_FAILED', 'Backups were reset')
+		await saveSecrets()
+		config.gdrive = {
+			enabled: config.gdrive?.enabled ?? false,
+			mode: config.gdrive?.mode === 'mirror' ? 'mirror' : config.nas ? 'mirror' : 'direct',
+			folderName: pending.folderName,
+			folderId,
+			email: info.email,
+			displayName: info.displayName,
+			packSizeMiB: clampInt(config.gdrive?.packSizeMiB, 16, 128, 64),
+			quota: info.quota,
+			quotaPausedUntil: 0,
+		}
+		await saveConfig()
+		return gdriveSummary()
+	}
+
+	async function gdriveConfigure(input = {}) {
+		await ready
+		refuseDamaged(configFile)
+		refuseDamaged(secretFile)
+		refuseDamaged(historyFile)
+		const started = epoch
+		const resetSince = () => started !== epoch
+		if (job) throw new RpcError('CONFLICT', 'Wait for the running backup to finish')
+		if (!config.gdrive?.folderId || !secrets.gdriveRefreshToken) {
+			throw new RpcError('PRECONDITION_FAILED', 'Connect your Google Drive account first')
+		}
+		const before = structuredClone(config)
+		const out = {}
+		let newKey = false
+		try {
+			const folderName = input.folderName !== undefined ? cleanFolderName(input.folderName) : config.gdrive.folderName
+			let folderId = config.gdrive.folderId
+			if (folderName !== config.gdrive.folderName) {
+				folderId = await gdrive.ensureRootFolder(folderName)
+			}
+			const mode = input.mode === 'mirror' || input.mode === 'direct' ? input.mode : config.gdrive.mode || (config.nas ? 'mirror' : 'direct')
+			const packSizeMiB = input.packSizeMiB !== undefined ? clampInt(Number(input.packSizeMiB), 16, 128, 64) : clampInt(config.gdrive.packSizeMiB, 16, 128, 64)
+			const enabled = input.enabled !== undefined ? input.enabled === true : true
+			const opts = cleanOptions(input)
+			Object.assign(config, opts)
+			config.gdrive = {...config.gdrive, enabled, mode, folderName, folderId, packSizeMiB, quotaPausedUntil: 0}
+			if (enabled) {
+				await ensureEngine()
+				if (resetSince()) throw new RpcError('PRECONDITION_FAILED', 'Backups were reset')
+				if (!(await hasKey())) {
+					const key = recoveryKey()
+					await writePrivate(keyFile, `${key}\n`)
+					newKey = true
+					config.keySaved = false
+					out.recoveryKey = key
+				}
+				if (isDirectDrive()) {
+					const idx = await gdrive.reindex(folderId, {prefix: 'server', create: false})
+					if (!idx.files['server/config']) {
+						await withServerRepo(
+							async (repoUrl) => {
+								await restic(['init'], {repo: repoUrl})
+							},
+							{forceDirect: true},
+						)
+					} else if (newKey) {
+						throw new RpcError('PRECONDITION_FAILED', 'That Google Drive folder already holds an encrypted backup. Use “Restore from Google Drive” with your recovery key, or pick a new folder name.')
+					}
+				} else {
+					const idx = await gdrive.reindex(folderId, {prefix: 'server', create: false})
+					const localReal = await repoReal({create: false}).catch(() => null)
+					const hasLocal = !!(localReal && (await exists(join(localReal, 'server', 'config'))))
+					if (idx.files['server/config'] && !hasLocal) {
+						throw new RpcError('PRECONDITION_FAILED', 'That Google Drive folder already has Direct-to-Drive backups and no matching local copy. Keep Direct mode, or choose a new folder name for 3-2-1 Mirror mode.')
+					}
+					await ensureRepo()
+				}
+			}
+			if (resetSince()) throw new RpcError('PRECONDITION_FAILED', 'Backups were reset')
+			if (!before.gdrive?.enabled && enabled) config.scheduleSince = now()
+			await saveConfig()
+			return {...(await status()), ...out}
+		} catch (e) {
+			if (!resetSince()) config = before
+			if (newKey) await rm(keyFile, {force: true}).catch(() => {})
+			if (e instanceof RpcError) throw e
+			throw new RpcError('PRECONDITION_FAILED', e.message)
+		}
+	}
+
+	async function gdriveTest() {
+		await ready
+		if (!config.gdrive?.folderId || !secrets.gdriveRefreshToken) {
+			throw new RpcError('PRECONDITION_FAILED', 'Connect Google Drive first')
+		}
+		const info = await gdrive.probe(config.gdrive.folderId)
+		config.gdrive = {...config.gdrive, email: info.email, displayName: info.displayName, quota: info.quota}
+		await saveConfig().catch(() => {})
+		return {ok: true, email: info.email, displayName: info.displayName, quota: info.quota}
+	}
+
+	async function gdriveConnectExisting(input = {}) {
+		await ready
+		refuseDamaged(configFile)
+		refuseDamaged(secretFile)
+		refuseDamaged(historyFile)
+		const started = epoch
+		const resetSince = () => started !== epoch
+		if (job) throw new RpcError('CONFLICT', 'Wait for the running backup to finish')
+		if (await hasKey()) throw new RpcError('CONFLICT', 'Backups are already set up on this server')
+		if (!config.gdrive?.folderId || !secrets.gdriveRefreshToken) {
+			throw new RpcError('PRECONDITION_FAILED', 'Connect Google Drive first')
+		}
+		const key = String(input.recoveryKey ?? '').trim().toLowerCase()
+		if (!/^[a-z0-9]{4}(?:-[a-z0-9]{4}){7}$/.test(key)) throw new RpcError('BAD_REQUEST', 'Enter the recovery key, like abcd-efgh-…')
+		const folderName = input.folderName ? cleanFolderName(input.folderName) : config.gdrive.folderName
+		const before = structuredClone(config)
+		job = {step: 'Checking encrypted backup on Google Drive', progress: 0.2, startedAt: now()}
+		try {
+			const existing = await gdrive.findRootFolder(folderName)
+			if (!existing?.id) throw new RpcError('NOT_FOUND', `Couldn’t find the Google Drive folder “${folderName}”. Make sure you signed in with the same Google OAuth Client ID that created it.`)
+			const folderId = existing.id
+			const idx = await gdrive.reindex(folderId, {prefix: 'server', create: false})
+			if (!idx.files['server/config']) throw new RpcError('NOT_FOUND', 'There’s no My Own Data Center backup in that Google Drive folder')
+			await ensureEngine()
+			if (resetSince()) throw new RpcError('PRECONDITION_FAILED', 'Backups were reset')
+			await writePrivate(keyFile, `${key}\n`)
+			config.gdrive = {...config.gdrive, enabled: true, mode: 'direct', folderName, folderId, quotaPausedUntil: 0}
+			try {
+				await withServerRepo(
+					async (repoUrl) => {
+						await restic(['cat', 'config'], {repo: repoUrl, timeout: 60_000})
+					},
+					{forceDirect: true},
+				)
+			} catch (e) {
+				await rm(keyFile, {force: true}).catch(() => {})
+				const out = `${e?.stderr ?? ''}\n${e?.message ?? ''}`
+				if (/wrong password|no key found/i.test(out)) {
+					throw new RpcError('FORBIDDEN', 'That recovery key doesn’t open this Google Drive backup')
+				}
+				if (e instanceof RpcError) throw e
+				throw new RpcError('PRECONDITION_FAILED', `Couldn’t open the Google Drive backup: ${e?.message || 'restic failed'}`)
+			}
+			if (resetSince()) throw new RpcError('PRECONDITION_FAILED', 'Backups were reset')
+			Object.assign(config, cleanOptions(input))
+			config.keySaved = true
+			config.scheduleSince = now()
+			await saveConfig()
+			return status()
+		} catch (e) {
+			if (!resetSince()) config = before
+			await rm(keyFile, {force: true}).catch(() => {})
+			throw e
+		} finally {
+			job = null
+		}
+	}
+
+	async function gdriveDisconnect() {
+		await ready
+		if (job) throw new RpcError('CONFLICT', 'Wait for the running backup to finish')
+		const oldRefresh = secrets.gdriveRefreshToken
+		config.gdrive = null
+		delete secrets.gdriveRefreshToken
+		delete secrets.gdriveClientSecret
+		delete secrets.gdriveClientId
+		pendingOAuth.clear()
+		await gdrive.revokeToken(oldRefresh).catch(() => {})
+		await gdrive.clearLocalState()
+		await saveSecrets()
+		await saveConfig()
+		return status()
+	}
+
 	async function runNow() {
 		const {id} = await runBackup('manual')
 		return {id}
 	}
 
-	// Factory reset: NAS address, password and recovery key are forgotten. A missing file is the
-	// default on the next start, and the copy in memory must match so a later save cannot put them back.
+	// Factory reset: NAS address, password, Google Drive tokens and recovery key are forgotten.
 	async function clearSettings() {
 		await ready
 		epoch++
 		config = structuredClone(DEFAULTS)
 		secrets = {}
+		pendingOAuth.clear()
 		history = []
 		damagedFiles.delete(configFile)
 		damagedFiles.delete(secretFile)
 		damagedFiles.delete(historyFile)
 		const pending = [...passwordWrites.keys()]
+		await gdrive.clearLocalState()
 		await removeAtomic(configFile)
 		await removeAtomic(secretFile)
 		await removeAtomic(historyFile)
@@ -1559,6 +2068,7 @@ export function createBackups({dataDir, home = os.homedir(), serverDataDir = joi
 		runComputer,
 		handleUpload,
 		mirror,
+		gdrive,
 		close() {
 			if (timer) clearInterval(timer)
 		},
@@ -1579,6 +2089,13 @@ export function createBackups({dataDir, home = os.homedir(), serverDataDir = joi
 			'backups.runComputer': {kind: 'mutation', run: async (input) => ({id: (await runComputer(String(input?.id ?? ''), 'manual')).id})},
 			'backups.computerSnapshots': {kind: 'query', run: computerSnapshots},
 			'backups.restoreComputer': {kind: 'mutation', run: async (input) => ({started: (await restoreComputer(input)).started})},
+			'backups.gdrive.status': {kind: 'query', run: (input) => gdriveStatus({refreshQuota: input?.refresh === true})},
+			'backups.gdrive.authStart': {kind: 'mutation', run: gdriveAuthStart},
+			'backups.gdrive.authFinish': {kind: 'mutation', run: gdriveAuthFinish},
+			'backups.gdrive.configure': {kind: 'mutation', run: gdriveConfigure},
+			'backups.gdrive.test': {kind: 'mutation', run: gdriveTest},
+			'backups.gdrive.connectExisting': {kind: 'mutation', run: gdriveConnectExisting},
+			'backups.gdrive.disconnect': {kind: 'mutation', run: gdriveDisconnect},
 		},
 	}
 }

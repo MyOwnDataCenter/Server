@@ -9,12 +9,15 @@ import {useState, type CSSProperties, type ReactNode} from 'react'
 import {useQuery, useQueryClient} from '@tanstack/react-query'
 
 import {mutate, query} from '../api'
+import {poweredOnText} from '../plural'
 import {queryProblem, useBrowserOnline} from '../connection'
 import {Icon} from '../icons'
 import {poolCheckText, storageDrivesView, storageStatusMessage} from '../storageList'
 import {ZFS_INSTALL_COMMAND, poolCreatedToast, poolImportedToast} from './storageCopy'
 import {canFormat, canMount, canUnmount, formatConfirmToken, formatPhraseMatches, type FormatKind} from '../storageTools'
 import {MachineShell} from '../fleet/MachineTabs'
+import {useStatView} from '../fleet/StatRegion'
+import {formatTemp} from '../fleet/temperatures'
 import {Card, Field, KV, Segmented, Sheet, SheetHeader, bytes, haptic, useConfirm, useToast} from '../ui'
 
 type Health = {passed: boolean | null; temperature: number | null; powerOnHours: number | null; lifetimeUsed: number | null; reallocated: number | null; pending: number | null}
@@ -96,7 +99,8 @@ function Section({title, children, footer, right}: {title: string; children: Rea
 	)
 }
 
-function DriveRow({d, onClick, trailing}: {d: Drive; onClick?: () => void; trailing?: ReactNode}) {
+function DriveRow({d, onClick, trailing, checked}: {d: Drive; onClick?: () => void; trailing?: ReactNode; checked?: boolean}) {
+	const {tempUnit} = useStatView()
 	const issues = driveIssues(d)
 	const color = issues.length ? 'var(--peach)' : d.role === 'system' ? '#8e8e93' : d.role === 'pool' ? 'var(--teal)' : 'var(--blue)'
 	const role = d.role === 'system' ? 'System drive' : d.role === 'pool' ? `In pool “${d.pool}”` : d.role === 'blank' ? 'Blank, ready to use' : d.btrfs ? 'Btrfs, can be imported' : d.zfs ? `ZFS pool “${d.zfs.pool ?? '?'}”, can be imported` : 'Has data'
@@ -107,14 +111,14 @@ function DriveRow({d, onClick, trailing}: {d: Drive; onClick?: () => void; trail
 			</span>
 			<span className="main">
 				<b style={{fontWeight: 580}}>{d.model ?? d.name}</b>
-				<span>{[KIND[d.kind], tb(d.size), d.health?.temperature != null ? `${d.health.temperature}°C` : null, role].filter(Boolean).join(' · ')}</span>
+				<span>{[KIND[d.kind], tb(d.size), d.health?.temperature != null ? formatTemp(d.health.temperature, tempUnit) : null, role].filter(Boolean).join(' · ')}</span>
 				{issues.length > 0 && <span className="drive-warn">{issues.join(' · ')}</span>}
 			</span>
 			{trailing ?? (onClick ? <Icon name="chevron" size={18} className="chev" /> : null)}
 		</>
 	)
 	return onClick ? (
-		<button className="row drive-row" onClick={onClick}>
+		<button className="row drive-row" onClick={onClick} role={checked === undefined ? undefined : 'checkbox'} aria-checked={checked}>
 			{inner}
 		</button>
 	) : (
@@ -134,7 +138,7 @@ export function StoragePanel({bare, target = 'host', onClose}: {bare?: boolean; 
 	)
 }
 
-export function StoragePage({onBack, target = 'host'}: {onBack: () => void; target?: StorageTarget}) {
+export function StoragePage({onBack, target = 'host'}: {onBack?: () => void; target?: StorageTarget}) {
 	const qc = useQueryClient()
 	const toast = useToast()
 	const confirm = useConfirm()
@@ -197,9 +201,11 @@ export function StoragePage({onBack, target = 'host'}: {onBack: () => void; targ
 	return (
 		<div className="stagger">
 			<div className="page-head" style={{margin: '6px 0 14px'}}>
-				<button className="round-btn" aria-label="Back" onClick={onBack}>
-					<Icon name="back" size={20} />
-				</button>
+				{onBack && (
+					<button className="round-btn" aria-label="Back" onClick={onBack}>
+						<Icon name="back" size={20} />
+					</button>
+				)}
 				<h1 className="title" style={{flex: 1}}>
 					{swarm ? `Storage · ${target.name}` : 'Storage'}
 				</h1>
@@ -368,6 +374,7 @@ const SLEEP = [
 type StorageCall = {rpc: (name: string) => string; args: (extra?: object) => object}
 
 function DriveSheet({d, onClose, onChanged, rpc, args}: {d: Drive | null; onClose: () => void; onChanged: () => void} & StorageCall) {
+	const {tempUnit} = useStatView()
 	const toast = useToast()
 	const [sleep, setSleep] = useState<string | null>(null)
 	const [formatting, setFormatting] = useState(false)
@@ -442,7 +449,7 @@ function DriveSheet({d, onClose, onChanged, rpc, args}: {d: Drive | null; onClos
 				<>
 					<SheetHeader title={d.model ?? d.name} subtitle={`${KIND[d.kind]} · ${tb(d.size)} · ${d.path}`} onClose={close} />
 					{issues.length > 0 && (
-						<div className="error" style={{marginBottom: 14}}>
+						<div className="error" role="alert" style={{marginBottom: 14}}>
 							<Icon name="alert" size={18} />
 							{issues.join(' · ')}. Back up what’s on it.
 						</div>
@@ -450,8 +457,8 @@ function DriveSheet({d, onClose, onChanged, rpc, args}: {d: Drive | null; onClos
 					<KV
 						rows={[
 							['Health', h ? (h.passed === false ? 'Failed' : issues.length ? 'Needs attention' : h.passed ? 'Good' : 'Unknown') : 'Not available'],
-							...(h?.temperature != null ? ([['Temperature', `${h.temperature}°C`]] as [string, ReactNode][]) : []),
-							...(h?.powerOnHours != null ? ([['Powered on', `${Math.round(h.powerOnHours / 24).toLocaleString()} days`]] as [string, ReactNode][]) : []),
+							...(h?.temperature != null ? ([['Temperature', formatTemp(h.temperature, tempUnit)]] as [string, ReactNode][]) : []),
+							...(h?.powerOnHours != null ? ([['Powered on', poweredOnText(h.powerOnHours)]] as [string, ReactNode][]) : []),
 							...(h?.lifetimeUsed != null ? ([['Life used', `${h.lifetimeUsed}%`]] as [string, ReactNode][]) : []),
 							['Serial', d.serial ?? '–'],
 							['Used for', d.role === 'system' ? 'Omarchy (system)' : d.role === 'pool' ? `Pool “${d.pool}”` : d.role === 'blank' ? 'Nothing yet' : d.btrfs ? 'A Btrfs filesystem' : 'Existing data'],
@@ -616,6 +623,7 @@ function NewPool({drives, zfs, taken, swarm, onClose, onDone, rpc, args}: {drive
 						key={d.path}
 						d={d}
 						onClick={() => setPicked((p) => (p.includes(d.path) ? p.filter((x) => x !== d.path) : [...p, d.path]))}
+						checked={picked.includes(d.path)}
 						trailing={<Icon name={picked.includes(d.path) ? 'checked' : 'unchecked'} size={22} />}
 					/>
 				))}

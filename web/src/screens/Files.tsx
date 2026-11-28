@@ -24,20 +24,23 @@ import {
   diskAll,
 } from "../api";
 import { useBootstrap, useDisk, useMachines, useUser } from "../data";
+import { isOwner } from "../isOwner";
 import { ComputerFolder } from "../fleet/ComputerFolder";
 import { FittingCrumbs } from "../fleet/FittingCrumbs";
 import { computerPlacePath, filePlaces, filesParent, parseComputerPlace, parseGuestPlace, scopeRoot, SERVER_FILES, withinScope, type FilesScope } from "../fleet/filePlaces";
+import { fileClipInput } from "../clips/view";
 import { NuEntries, type NuItem } from "../fleet/NuEntries";
 import { queryProblem, useBrowserOnline } from "../connection";
 import { Icon, type IconName } from "../icons";
 import { Card, CardHead, Sheet, SheetHeader, bytes, haptic, scrollPhoneToTop, useConfirm, usePortalRoot, useToast } from "../ui";
 import { SearchField } from "./Apps";
 import { useDesktop } from "../desktop/Desktop";
+import { canQuickTransfer, QuickTransferSheet, type TransferTarget } from "./QuickTransfer";
 import { openTerminalWith } from "../terminalEvent";
 import { safeLocal, safeSession } from "../safeStorage";
 import { MachineTrees, TreeChildren, type TreeActions, type TreeMachine } from "../fleet/FileTree";
 import { actionsForItems, asFileSearch, batchToast, copyTextOrToast, FILES_LIST_PAGE, filesListMoreLeft, filesPathToStore, nice, offersDownload, readStoredFilesPath, searchMatchNote, selectionAfterQuery, viewerAfterPathChange, type BatchKind } from "./filesRules";
-import { canSubmitNamePrompt, collectUploadDirs, type DirectoryHandleLike, emptyFolderUploadHint, type FavoriteItem, favoritePath, fileKindLabel, filesSearching, filterUnsyncedPhotos, folderPickerRoots, handleFileDragEnter, handleFileDragOver, handleFileDrop, isServedFilePlace, pickDirectoryFromWindow, readDirectoryHandle, readDroppedEntries, reduceUploadMkdir, sharePasswordAction, sharePasswordLabel, shouldActivateRowOnKey, showFolderEmpty, UPLOAD_REFRESH_KEYS, uploadRelBlocked, type UploadBatch, type UploadMkdirState } from "../filesHelpers";
+import { canSubmitNamePrompt, collectUploadDirs, type DirectoryHandleLike, emptyFolderUploadHint, type FavoriteItem, favoritePath, fileKindLabel, filesSearching, filterUnsyncedPhotos, photosAlreadyThere, folderPickerRoots, handleFileDragEnter, handleFileDragOver, handleFileDrop, isServedFilePlace, pickDirectoryFromWindow, readDirectoryHandle, readDroppedEntries, reduceUploadMkdir, sharePasswordAction, sharePasswordLabel, shouldActivateRowOnKey, showFolderEmpty, UPLOAD_REFRESH_KEYS, uploadRelBlocked, type UploadBatch, type UploadMkdirState } from "../filesHelpers";
 
 const FileViewer = lazy(() =>
   import("./viewer/FileViewer").then((m) => ({ default: m.FileViewer })),
@@ -367,7 +370,7 @@ async function uploadInPieces(file: File, target: string, onProgress: (loaded: n
   }
 }
 
-function uploadOne(
+export function uploadOne(
   item: UploadItem,
   dir: string,
   onProgress: (loaded: number) => void,
@@ -530,6 +533,10 @@ export function Files({ initialPath, windowId, scope }: { initialPath?: string; 
   } | null>(null);
   // The folder whose network sharing is open (share it, or see and change how it's shared).
   const [shareFor, setShareFor] = useState<{ path: string; name: string } | null>(null);
+  // Quick transfer (desktop layout): a QR code for a phone, and the right-click menu on empty space.
+  const deskMode = !!useDesktop();
+  const [transfer, setTransfer] = useState<TransferTarget | null>(null);
+  const [blankMenu, setBlankMenu] = useState<{ x: number; y: number } | null>(null);
   const fileInput = useRef<HTMLInputElement>(null);
   const folderInput = useRef<HTMLInputElement>(null);
   const photoInput = useRef<HTMLInputElement>(null);
@@ -586,7 +593,7 @@ export function Files({ initialPath, windowId, scope }: { initialPath?: string; 
     path && (path === "/Home" || path === "/Trash" || path.startsWith("/Home/") || path.startsWith("/Trash/"))
       ? path
       : "/Home";
-  const owner = user.data != null && user.data.role !== "member";
+  const owner = isOwner(user.data);
   const recents = useQuery({
     queryKey: ["files.recents"],
     queryFn: () => query<FileEntry[]>("files.recents"),
@@ -1202,9 +1209,50 @@ export function Files({ initialPath, windowId, scope }: { initialPath?: string; 
     const batch = await droppedItems(e.dataTransfer).catch((): UploadBatch => ({ files: [], dirs: [] }));
     if (batch.files.length || batch.dirs.length) upload(batch, uploadDir);
   };
+  // Ordinary Copy fills the book. The destination picker still opens from the Copy action.
+  // A keyboard copy only fills the book. Success stays quiet; a refusal is the toast.
+  const rememberClip = (paths: string[], cut = false) => {
+    const places = paths.map((item) => parseComputerPlace(item));
+    const head = places[0];
+    const sameComputer = !!head && places.every((item) => item && item.rel && item.id === head.id);
+    const input = sameComputer
+      ? fileClipInput("swarm", head.id, places.map((item) => item!.rel), cut)
+      : places.some(Boolean)
+        ? null
+        : fileClipInput("server", undefined, paths, cut);
+    if (!input) return false;
+    mutate("clips.addFile", input)
+      .then(() => qc.invalidateQueries({ queryKey: ["clips.list"] }))
+      .catch((err: Error) => toast(err.message, true));
+    return true;
+  };
+  const onClipKey = (e: React.KeyboardEvent) => {
+    if (e.altKey || e.repeat || !(e.ctrlKey || e.metaKey)) return;
+    const key = e.key.toLowerCase();
+    if (key !== "c" && key !== "x") return;
+    const target = e.target;
+    if (target instanceof HTMLElement && target.closest("input, textarea, [contenteditable=true]")) return;
+    const paths = selected.size ? [...selected] : open ? [open.path] : [];
+    if (!paths.length || !rememberClip(paths, key === "x")) return;
+    e.preventDefault();
+  };
 
   return (
-    <div className={`stagger files-root nu${scope ? " nu-embedded" : ""}`} onDragEnter={onDragEnter} onDragOver={onDragOver} onDragLeave={onDragLeave} onDrop={onDrop}>
+    <div
+      className={`stagger files-root nu${scope ? " nu-embedded" : ""}`}
+      onKeyDown={onClipKey}
+      onDragEnter={onDragEnter}
+      onDragOver={onDragOver}
+      onDragLeave={onDragLeave}
+      onDrop={onDrop}
+      onContextMenu={(e) => {
+        // A row's own right-click has already been handled; this is empty space in the folder.
+        if (e.defaultPrevented || !deskMode || inTrash || !path || !canQuickTransfer(path)) return;
+        if ((e.target as HTMLElement).closest("input, textarea, [contenteditable=true]")) return;
+        e.preventDefault();
+        setBlankMenu({ x: e.clientX, y: e.clientY });
+      }}
+    >
       <input
         ref={fileInput}
         type="file"
@@ -1221,12 +1269,19 @@ export function Files({ initialPath, windowId, scope }: { initialPath?: string; 
         accept="image/*,video/*"
         multiple
         hidden
-        onChange={(e) => {
+        onChange={async (e) => {
           const picked = e.target.files ? [...e.target.files] : [];
           e.target.value = "";
           if (!picked.length) return;
           // Sync: upload only what isn't in Photos yet (same name or keep-both copy, and size).
-          const fresh = filterUnsyncedPhotos(picked, listing.data?.files ?? []);
+          // The listing on screen is one page, so a big Photos folder is read in full first.
+          let existing: FileEntry[];
+          try {
+            existing = await photosAlreadyThere(listing.data, () => query<Listing>("files.list", { path: PHOTOS, sortBy: "name", sortOrder: "ascending" }));
+          } catch (err) {
+            return toast(nice((err as Error).message), true);
+          }
+          const fresh = filterUnsyncedPhotos(picked, existing);
           const skipped = picked.length - fresh.length;
           if (!fresh.length) return toast(`All ${picked.length} already synced`);
           if (skipped) toast(`${fresh.length} new · ${skipped} already synced`);
@@ -1438,14 +1493,11 @@ export function Files({ initialPath, windowId, scope }: { initialPath?: string; 
           onCopy={(rel) => {
             const next = computerPlacePath(computerHere.id, rel);
             if (next) setPicker({mode: "copy", paths: [next]});
-          }}
-          onClip={(rel) => {
-            mutate("clips.addFile", {scope: "swarm", id: computerHere.id, path: rel})
-              .then(() => {
-                toast("Saved to the clip book");
-                qc.invalidateQueries({queryKey: ["clips.list"]});
-              })
-              .catch((e: Error) => toast(e.message, true));
+            const input = fileClipInput("swarm", computerHere.id, [rel]);
+            if (!input) return;
+            mutate("clips.addFile", input)
+              .then(() => qc.invalidateQueries({ queryKey: ["clips.list"] }))
+              .catch((err: Error) => toast(err.message, true));
           }}
         />
       )}
@@ -1469,7 +1521,7 @@ export function Files({ initialPath, windowId, scope }: { initialPath?: string; 
             </div>
           )}
           {loading ? (
-            <div className="glass group">
+            <div className="glass group screen-list">
               {Array.from({ length: 6 }, (_, i) => (
                 <div key={i} className="row static">
                   <div
@@ -1521,12 +1573,12 @@ export function Files({ initialPath, windowId, scope }: { initialPath?: string; 
               {uploadHint && <span>{uploadHint}</span>}
             </div>
           ) : items.length === 0 ? null : grid && !searching ? (
-            <div className="file-grid">
+            <div className="file-grid screen-list glass">
               {items.map((f) => renderRow(f))}
             </div>
           ) : (
             <div
-              className="glass group"
+              className="glass group screen-list"
               style={
                 { "--inset": selecting ? "110px" : "74px" } as CSSProperties
               }
@@ -1561,9 +1613,10 @@ export function Files({ initialPath, windowId, scope }: { initialPath?: string; 
 
           {/* Selection bar */}
           {selecting && (
-            <div className="select-bar">
+            <div className="select-bar" onKeyDown={onClipKey}>
               <button
                 className="sb-cancel"
+                aria-label={`Cancel selection, ${selected.size} selected`}
                 onClick={() => setSelected(new Set())}
               >
                 <Icon name="close" size={18} stroke={2.2} />
@@ -1605,9 +1658,11 @@ export function Files({ initialPath, windowId, scope }: { initialPath?: string; 
                     Move
                   </button>
                   <button
-                    onClick={() =>
-                      setPicker({ mode: "copy", paths: [...selected] })
-                    }
+                    onClick={() => {
+                      const paths = [...selected];
+                      setPicker({ mode: "copy", paths });
+                      rememberClip(paths);
+                    }}
                   >
                     <Icon name="copy" size={21} />
                     Copy
@@ -1636,7 +1691,7 @@ export function Files({ initialPath, windowId, scope }: { initialPath?: string; 
         <Suspense
           fallback={
             <main className="screen center">
-              <span className="spinner" aria-label="Loading" />
+              <span className="spinner" role="status" aria-label="Loading" />
             </main>
           }
         >
@@ -1670,10 +1725,16 @@ export function Files({ initialPath, windowId, scope }: { initialPath?: string; 
           onDownload={() => download([open.path])}
           onRename={() => setPrompt({ kind: "rename", entry: open })}
           onMove={() => setPicker({ mode: "move", paths: [open.path] })}
-          onCopy={() => setPicker({ mode: "copy", paths: [open.path] })}
+          onCopy={() => {
+            setPicker({ mode: "copy", paths: [open.path] });
+            rememberClip([open.path]);
+          }}
           onFavorite={() => toggleFavorite(open.path)}
           onShare={() => toggleShare(open)}
           onShareInfo={(s) => (setOpen(null), setShareFor({ path: s.path, name: s.name }))}
+          quickTransfer={deskMode && canQuickTransfer(open.path)}
+          onQrShare={() => (setOpen(null), setTransfer({ kind: "download", path: open.path, name: open.name, size: open.size }))}
+          onQrUpload={() => (setOpen(null), setTransfer({ kind: "upload", path: open.path, name: open.name }))}
           onTrash={() => trashItems([open.path])}
           onRestore={() => restore([open.path])}
           onDelete={() => deleteForever([open.path])}
@@ -1751,6 +1812,24 @@ export function Files({ initialPath, windowId, scope }: { initialPath?: string; 
         />
       )}
 
+      {transfer && <QuickTransferSheet target={transfer} onClose={() => setTransfer(null)} />}
+      {blankMenu && (
+        <>
+          <div className="qt-menu-scrim" onPointerDown={() => setBlankMenu(null)} onContextMenu={(e) => (e.preventDefault(), setBlankMenu(null))} />
+          <div className="qt-menu glass" role="menu" style={{ left: Math.min(blankMenu.x, window.innerWidth - 240), top: Math.min(blankMenu.y, window.innerHeight - 60) }}>
+            <button
+              role="menuitem"
+              onClick={() => {
+                setBlankMenu(null);
+                if (path) setTransfer({ kind: "upload", path, name: path.split("/").pop() || "Home" });
+              }}
+            >
+              <Icon name="upload" size={18} />
+              Upload here from a phone (QR code)
+            </button>
+          </div>
+        </>
+      )}
       {shareFor && (
         <ShareSheet
           path={shareFor.path}
@@ -1873,7 +1952,11 @@ const FileRow = memo(function FileRow({
         tabIndex={0}
         aria-pressed={selecting ? selected : undefined}
         onClick={() => activate(f)}
-        onKeyDown={(e) => shouldActivateRowOnKey(e) && activate(f)}
+        onKeyDown={(e) => {
+          if (!shouldActivateRowOnKey(e)) return;
+          e.preventDefault();
+          activate(f);
+        }}
         {...press(f)}
       >
         <span className="tile-art">
@@ -1892,7 +1975,11 @@ const FileRow = memo(function FileRow({
       tabIndex={0}
       aria-pressed={selecting ? selected : undefined}
       onClick={() => activate(f)}
-      onKeyDown={(e) => shouldActivateRowOnKey(e) && activate(f)}
+      onKeyDown={(e) => {
+          if (!shouldActivateRowOnKey(e)) return;
+          e.preventDefault();
+          activate(f);
+        }}
       {...press(f)}
     >
       {selecting && <Icon name={selected ? "checked" : "unchecked"} size={24} className={`check${selected ? " on" : ""}`} />}
@@ -1989,11 +2076,13 @@ function ItemSheet(p: {
   onTrash: () => void;
   onRestore: () => void;
   onDelete: () => void;
+  quickTransfer?: boolean;
+  onQrShare?: () => void;
+  onQrUpload?: () => void;
 }) {
   const desk = useDesktop();
   const { f } = p;
   const toast = useToast();
-  const qc = useQueryClient();
   const k = kindOf(f);
   const can = (op: FileEntry["operations"][number]) =>
     f.operations.includes(op);
@@ -2067,18 +2156,18 @@ function ItemSheet(p: {
           show: offersFile(f),
         },
         {
-          id: "clip",
-          label: "Clip book",
-          icon: "clipboard",
-          onClick: () => {
-            mutate("clips.addFile", { scope: "server", path: f.path })
-              .then(() => {
-                toast("Saved to the clip book");
-                qc.invalidateQueries({ queryKey: ["clips.list"] });
-              })
-              .catch((e: Error) => toast(e.message, true));
-          },
-          show: offersFile(f) && !f.path.startsWith("/Trash/"),
+          id: "qr-share",
+          label: "Share via QR code",
+          icon: "share",
+          onClick: () => p.onQrShare?.(),
+          show: !!p.quickTransfer && !isDir(f) && offersFile(f),
+        },
+        {
+          id: "qr-upload",
+          label: "Upload from phone",
+          icon: "upload",
+          onClick: () => p.onQrUpload?.(),
+          show: !!p.quickTransfer && isDir(f) && can("writable"),
         },
         {
           id: "select",
@@ -2419,6 +2508,7 @@ function FolderPicker({
           <button
             key={r.path}
             className={`chip${dir === r.path || dir.startsWith(`${r.path}/`) ? " on" : ""}`}
+            aria-pressed={dir === r.path || dir.startsWith(`${r.path}/`)}
             onClick={() => setDir(r.path)}
           >
             {r.name}

@@ -15,6 +15,7 @@ import {readFile, stat} from 'node:fs/promises'
 import {join} from 'node:path'
 
 import {RpcError} from './rpc.mjs'
+import {stoppedMessage} from './exec-error.mjs'
 
 export const REPO_RAW = 'https://raw.githubusercontent.com/MyOwnDataCenter/server'
 export const INSTALL_COMMAND = 'curl -fsSL https://raw.githubusercontent.com/MyOwnDataCenter/server/main/install.sh | bash'
@@ -66,7 +67,7 @@ function execP(cmd, args, {cwd, env, timeout = 15 * 60_000} = {}) {
 	return new Promise((resolve, reject) => {
 		execFile(cmd, args, {cwd, env, timeout, maxBuffer: 32 * 1024 * 1024}, (error, stdout, stderr) => {
 			if (error) {
-				error.message = `${cmd} ${args[0] ?? ''}: ${(stderr || error.message).toString().trim().split('\n').slice(-3).join(' ')}`
+				error.message = stoppedMessage(`${cmd} ${args[0] ?? ''}`.trim(), error, timeout) ?? `${cmd} ${args[0] ?? ''}: ${(stderr || error.message).toString().trim().split('\n').slice(-3).join(' ')}`
 				return reject(error)
 			}
 			resolve(stdout.toString())
@@ -74,10 +75,24 @@ function execP(cmd, args, {cwd, env, timeout = 15 * 60_000} = {}) {
 	})
 }
 
+// Each part is a number with an optional letter after it: 0.9.93 < 0.9.93A < 0.9.93B < 0.9.94.
+// (Comparing the numbers alone made 0.9.93B look the same as 0.9.93A, so it was never offered.)
+const versionParts = (v) =>
+	String(v)
+		.split(/[.-]/)
+		.map((x) => {
+			const m = /^(\d*)([A-Za-z]*)/.exec(x) ?? []
+			return [Number.parseInt(m[1], 10) || 0, (m[2] ?? '').toUpperCase()]
+		})
 export function compareVersions(a, b) {
-	const pa = String(a).split(/[.-]/).map((x) => Number.parseInt(x, 10) || 0)
-	const pb = String(b).split(/[.-]/).map((x) => Number.parseInt(x, 10) || 0)
-	for (let i = 0; i < Math.max(pa.length, pb.length); i++) if ((pa[i] ?? 0) !== (pb[i] ?? 0)) return (pa[i] ?? 0) > (pb[i] ?? 0) ? 1 : -1
+	const pa = versionParts(a)
+	const pb = versionParts(b)
+	for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+		const [na, la] = pa[i] ?? [0, '']
+		const [nb, lb] = pb[i] ?? [0, '']
+		if (na !== nb) return na > nb ? 1 : -1
+		if (la !== lb) return la.length !== lb.length ? (la.length > lb.length ? 1 : -1) : la > lb ? 1 : -1
+	}
 	return 0
 }
 
@@ -256,6 +271,10 @@ export function createUpdater({
 		await ready
 		if (await held()) return {available: false, held: true, version: currentVersion, name: `MODC ${currentVersion}`, releaseNotes: HELD}
 		if (!force && cache && Date.now() - cache.at < 10_000) return cache.value
+		// A remote without a raw URL is read from a fetched copy. Fetch it again for each check,
+		// or a version published after the first check is never seen.
+		originTree = null
+		originFetch = null
 		let pkg
 		try {
 			pkg = JSON.parse(await get('package.json'))

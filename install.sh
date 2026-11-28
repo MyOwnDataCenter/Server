@@ -48,7 +48,7 @@ done
 
 # Raise this when a change needs the installer run again (packages, the storage helper, services,
 # firewall rules). While My Own Data Center is in beta, the app asks the owner to run it at their next sign-in.
-INSTALLER_REVISION=4
+INSTALLER_REVISION=6
 # Started from the app's "run the installer" prompt, in its own terminal: that terminal runs inside
 # omarchyd, so restarting omarchyd here would stop this script partway. Restart once it's done instead.
 FROM_APP="${OMARCHY_SERVER_FROM_APP:-0}"
@@ -98,6 +98,18 @@ if [ -z "${OMARCHY_SERVER_REPO-}" ] && [ -n "$SOURCE" ]; then
 	REPO="$SOURCE"
 fi
 require_repo "$REPO"
+# The port goes into the web service's unit file and the firewall rule. Check it before anything is installed,
+# so a typo is an error now and not a half-finished install later (the firewall step would be the one to fail).
+check_port() {
+	case "$PORT" in
+		'' | *[!0-9]*) die "OMARCHY_SERVER_PORT is \"$PORT\" but must be a number from 1 to 65535." ;;
+	esac
+	if [ "${#PORT}" -gt 5 ] || [ "$((10#$PORT))" -lt 1 ] || [ "$((10#$PORT))" -gt 65535 ]; then
+		die "OMARCHY_SERVER_PORT is \"$PORT\" but must be a number from 1 to 65535."
+	fi
+	PORT=$((10#$PORT))
+}
+check_port
 
 [ "$(id -u)" -ne 0 ] || die "Run this as your normal user, not with sudo. It asks for sudo only to install packages."
 if ! command -v pacman >/dev/null; then
@@ -325,6 +337,7 @@ mkdir -p "$HOME/Pools"
 mkdir -p "$HOME/.local/bin" "${XDG_DATA_HOME:-$HOME/.local/share}/applications"
 chmod +x "$APP/bin/omarchy-server"
 ln -sf "$APP/bin/omarchy-server" "$HOME/.local/bin/omarchy-server"
+ln -sf "$APP/bin/machines-add-lxc" "$HOME/.local/bin/machines-add-lxc"
 APPS="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
 cat >"$APPS/omarchy-server.desktop" <<EOF
 [Desktop Entry]
@@ -400,6 +413,8 @@ cat >"$UNITS/omarchyd.service" <<EOF
 [Unit]
 Description=MODC backend (localhost only)
 After=network-online.target
+# Never stop retrying: on a server with no screen nobody is there to start it by hand after a boot.
+StartLimitIntervalSec=0
 
 [Service]
 $SOURCE_ENV
@@ -407,6 +422,8 @@ ExecStart=$NODE $APP/omarchyd/cli.mjs serve --port 2021 --web-port $PORT --data 
 Restart=on-failure
 RestartSec=3
 TimeoutStopSec=10
+# virsh/qemu/passt stay in this cgroup; kill only node so guests survive a restart.
+KillMode=process
 
 [Install]
 WantedBy=default.target
@@ -416,6 +433,7 @@ cat >"$UNITS/omarchy-server-web.service" <<EOF
 Description=MODC web app
 After=omarchyd.service
 Wants=omarchyd.service
+StartLimitIntervalSec=0
 
 [Service]
 ExecStart=$NODE $APP/server/cli.mjs --port $PORT --data $BASE/web --backend http://127.0.0.1:2021
@@ -468,11 +486,108 @@ if command -v ufw >/dev/null 2>&1; then
 	sudo ufw allow 7800:7899/tcp comment 'MODC app windows' >/dev/null
 fi
 
-# Keep the services running when you're not logged in (needs sudo once).
+# Start at boot and keep running when nobody is signed in ("linger"). A server with no screen depends
+# on this to come back after a restart or a power cut. Your own linger usually needs no sudo; ask for
+# sudo only if that's refused (and never wait on a password prompt during an in-app update).
 if [ "$(loginctl show-user "$USER" -p Linger --value 2>/dev/null)" != "yes" ]; then
-	say "Letting this server run while you're logged out (sudo needed)"
-	sudo loginctl enable-linger "$USER" || say "Couldn't enable that; the server will run only while you're logged in."
+	say "Letting this server start at boot and run while you're logged out"
+	loginctl enable-linger "$USER" 2>/dev/null ||
+		{ if [ "$FROM_APP" = 1 ]; then sudo -n loginctl enable-linger "$USER" 2>/dev/null; else sudo loginctl enable-linger "$USER"; fi; } ||
+		true
+	if [ "$(loginctl show-user "$USER" -p Linger --value 2>/dev/null)" != "yes" ]; then
+		say "Couldn't turn that on: after a restart this server stays off until you sign in. To fix it, run: sudo loginctl enable-linger $USER"
+	fi
 fi
+
+# --- Unattended boot -------------------------------------------------------------------------------
+# Omarchy encrypts the system disk, so after a restart or power cut the computer waits at the disk
+# password screen and nothing (this server included) can start. If the owner agrees, add a second
+# key to the disk as a file inside the boot image: Omarchy's `encrypt` hook uses /crypto_keyfile.bin
+# automatically, so the disk unlocks itself. The original disk password keeps working. Desktop
+# auto-login is turned off at the same time, so the screen asks for the Linux password instead.
+# Only new zz-modc-* files are written; nothing Omarchy owns is edited, so snapshot booting keeps working.
+MODC_KEYFILE=/crypto_keyfile.bin
+MODC_INITCPIO_CONF=/etc/mkinitcpio.conf.d/zz-modc-unattended.conf
+MODC_SDDM_CONF=/etc/sddm.conf.d/zz-modc-login.conf
+
+# Prints the LUKS partition under / (e.g. /dev/sdb2), or nothing when / isn't encrypted.
+modc_root_luks() {
+	local src
+	src=$(findmnt -no SOURCE / 2>/dev/null | sed 's/\[.*//') || return 0
+	case "$src" in /dev/*) ;; *) return 0 ;; esac
+	lsblk -s -rno PATH,FSTYPE "$src" 2>/dev/null | awk '$2 == "crypto_LUKS" { print $1; exit }' || true
+}
+
+# True when the disk already unlocks without anyone typing (TPM, FIDO key, Clevis, or our key file).
+modc_unlocks_itself() {
+	grep -qE 'tpm2-device|fido2-device' /proc/cmdline /etc/crypttab /etc/crypttab.initramfs 2>/dev/null && return 0
+	[ -e /usr/lib/initcpio/install/clevis ] && return 0
+	[ -f "$MODC_INITCPIO_CONF" ] && return 0
+	return 1
+}
+
+modc_rebuild_boot_image() {
+	if command -v limine-mkinitcpio >/dev/null 2>&1; then sudo limine-mkinitcpio; else sudo mkinitcpio -P; fi
+}
+
+modc_enable_unattended_boot() {
+	local luks="$1"
+	if sudo test -e "$MODC_KEYFILE"; then
+		say "Skipping: $MODC_KEYFILE already exists but isn't set up by My Own Data Center. Leaving it alone."
+		return 0
+	fi
+	say "Creating a disk key for unattended boot"
+	sudo sh -c "umask 077 && dd if=/dev/random of='$MODC_KEYFILE' bs=512 count=4 iflag=fullblock status=none" || {
+		say "Couldn't create the key file. Unattended boot was not turned on."
+		return 0
+	}
+	say "Type your disk password (the one you enter at boot) to add the new key"
+	if ! sudo cryptsetup luksAddKey "$luks" "$MODC_KEYFILE"; then
+		sudo rm -f "$MODC_KEYFILE"
+		say "The disk password wasn't accepted. Unattended boot was not turned on; nothing changed."
+		return 0
+	fi
+	echo "FILES+=($MODC_KEYFILE)" | sudo tee "$MODC_INITCPIO_CONF" >/dev/null
+	say "Rebuilding the boot image (this can take a minute)"
+	if ! modc_rebuild_boot_image; then
+		say "Rebuilding the boot image failed. Undoing the change."
+		sudo rm -f "$MODC_INITCPIO_CONF"
+		sudo cryptsetup luksRemoveKey "$luks" "$MODC_KEYFILE" || true
+		sudo rm -f "$MODC_KEYFILE"
+		if ! modc_rebuild_boot_image; then
+			say "WARNING: the boot image could not be rebuilt. Do not restart this computer. Run 'sudo limine-mkinitcpio' and fix the errors it shows first."
+		fi
+		return 0
+	fi
+	if [ -d /etc/sddm.conf.d ]; then
+		printf '[Autologin]\nUser=\nSession=\n' | sudo tee "$MODC_SDDM_CONF" >/dev/null
+	fi
+	say "Unattended boot is on: after a restart or power cut this server starts by itself."
+	say "The screen now asks for your Linux password. Your disk password still works if the key is ever missing."
+	say "One more step only you can do: in the BIOS, set 'Restore on AC power loss' to 'Power On'."
+}
+
+MODC_LUKS="$(modc_root_luks)"
+if [ -n "$MODC_LUKS" ] && ! modc_unlocks_itself; then
+	if [ "$FROM_APP" = 1 ]; then
+		: # No terminal during in-app updates; the owner turns this on by running the installer.
+	elif ! grep -q 'cryptdevice=' /proc/cmdline; then
+		say "Your disk is encrypted with a boot setup this installer doesn't handle yet, so it will keep asking for the disk password at boot."
+	else
+		printf '\n'
+		say "Your disk is encrypted, so after a restart or power cut this server waits until someone types the disk password at the computer."
+		printf '    Turn on unattended boot? The disk unlocks by itself and the server starts on its own.\n'
+		printf '    The screen will ask for your Linux password instead of logging in automatically.\n'
+		printf '    Trade-off: anyone who takes the computer or its drive could read the data.\n'
+		MODC_ANSWER=""
+		read -r -p "    Turn it on? [y/N] " MODC_ANSWER || MODC_ANSWER=""
+		case "$MODC_ANSWER" in
+			[yY] | [yY][eE][sS]) modc_enable_unattended_boot "$MODC_LUKS" ;;
+			*) say "Left as is. Run the installer again any time to turn this on." ;;
+		esac
+	fi
+fi
+# --- end unattended boot ---------------------------------------------------------------------------
 
 # Everything above succeeded (the script stops at the first error): note which installer ran, so the
 # app knows it's up to date.

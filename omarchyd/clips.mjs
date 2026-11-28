@@ -10,6 +10,7 @@ import {join} from 'node:path'
 
 import {readJsonState, writeAtomic, plainObject} from './atomic.mjs'
 import {RpcError, sendError, sendJson} from './rpc.mjs'
+import {FOLDER_FROM_COMPUTER, FOLDER_TO_COMPUTER, MISSING_FILE} from './transferRules.mjs'
 
 export const CLIP_LIMITS = {
 	text: 256 * 1024,
@@ -43,10 +44,20 @@ function cleanLabel(input, fallback) {
 }
 
 function fileName(label, ext) {
-	const base = cleanLabel(label, 'clip').slice(0, 80)
+	// A name Files can save: no slash, and not hidden (a copied path or ".env" would be refused).
+	const base = cleanLabel(label, 'clip').replace(/[/\\]/g, '_').replace(/^\.+/, '').trim().slice(0, 80) || 'clip'
 	const lower = base.toLowerCase()
 	const named = ext && !lower.endsWith(ext) ? `${base}${ext}` : base
 	return named.slice(0, 120)
+}
+
+function itemOk(item, scope) {
+	if (!plainObject(item)) return false
+	if (typeof item.path !== 'string' || item.path.length < 1 || item.path.length > 1024 || /[\u0000-\u001f\u007f]/.test(item.path)) return false
+	if (scope === 'server' && !item.path.startsWith('/')) return false
+	if (item.dir != null && item.dir !== true) return false
+	if (item.dir === true) return Number.isSafeInteger(item.mtime)
+	return Number.isSafeInteger(item.size) && item.size >= 0 && Number.isSafeInteger(item.mtime)
 }
 
 function refOk(ref, kind) {
@@ -56,6 +67,11 @@ function refOk(ref, kind) {
 	if (typeof ref.path !== 'string' || ref.path.length < 1 || ref.path.length > 1024 || /[\u0000-\u001f\u007f]/.test(ref.path)) return false
 	if (ref.scope === 'server' && !ref.path.startsWith('/')) return false
 	if (ref.scope !== 'server' && (typeof ref.id !== 'string' || !USER_ID.test(ref.id))) return false
+	if (ref.dir != null && ref.dir !== true) return false
+	if (ref.items != null) {
+		if (!Array.isArray(ref.items) || ref.items.length < 2 || ref.items.length > 40) return false
+		if (!ref.items.every((item) => itemOk(item, ref.scope))) return false
+	}
 	if (ref.scope === 'machine') return ref.size == null && ref.mtime == null
 	return Number.isSafeInteger(ref.size) && ref.size >= 0 && Number.isSafeInteger(ref.mtime)
 }
@@ -208,7 +224,21 @@ export function createClips({dataDir, files, fleet, readers = {}, roleOf = () =>
 		const row = {id: clip.id, kind: clip.kind, at: clip.at, label: clip.label, where: clip.where, name: clip.name, preview: clip.preview}
 		if (clip.cut) row.cut = true
 		if (clip.bytes != null) row.bytes = clip.bytes
-		if (clip.ref) row.ref = {scope: clip.ref.scope, path: clip.ref.path, ...(clip.ref.id ? {id: clip.ref.id} : {}), size: clip.ref.size ?? null, mtime: clip.ref.mtime ?? null}
+		if (clip.ref) {
+			row.ref = {scope: clip.ref.scope, path: clip.ref.path, ...(clip.ref.id ? {id: clip.ref.id} : {}), size: clip.ref.size ?? null, mtime: clip.ref.mtime ?? null}
+			if (clip.ref.dir) {
+				row.dir = true
+				row.ref.dir = true
+			}
+			if (Array.isArray(clip.ref.items)) {
+				row.ref.items = clip.ref.items.map((item) => ({
+					path: item.path,
+					size: item.size ?? null,
+					mtime: item.mtime ?? null,
+					...(item.dir ? {dir: true} : {}),
+				}))
+			}
+		}
 		return row
 	}
 	const usedBytes = (clips) => clips.reduce((n, clip) => n + (Number.isSafeInteger(clip.bytes) ? clip.bytes : 0), 0)
@@ -293,21 +323,68 @@ export function createClips({dataDir, files, fleet, readers = {}, roleOf = () =>
 		if (!text || text.length > 1024 || /[\u0000-\u001f\u007f]/.test(text)) return null
 		return text
 	}
+	function cutOf(input) {
+		return input?.cut === true || input?.cut === '1' ? {cut: true} : {}
+	}
+	async function addFiles(who, input, paths) {
+		const scope = input?.scope
+		if (scope !== 'server' && scope !== 'swarm') throw new RpcError('BAD_REQUEST', 'Choose a file on this server or a computer')
+		if (paths.length > 40) throw new RpcError('BAD_REQUEST', 'Choose fewer files')
+		if (scope === 'swarm') requireOwner(who)
+		const id = String(input?.id ?? '')
+		const items = []
+		for (const path of paths) {
+			if (scope === 'server') {
+				const info = await files.inspect(path)
+				items.push({path: info.path, size: info.dir ? 0 : info.size, mtime: info.mtimeMs, ...(info.dir ? {dir: true} : {})})
+			} else {
+				const info = await fleet.stat(id, path)
+				if (!info) throw new RpcError('NOT_FOUND', 'That file isn’t in your home folder')
+				const dir = !!info.dir
+				if (!dir && (!Number.isSafeInteger(info.size) || info.size < 0)) throw new RpcError('BAD_GATEWAY', 'That computer didn’t say how big the file is')
+				items.push({path, size: dir ? 0 : info.size, mtime: Number.isSafeInteger(info.mtime) ? info.mtime : 0, ...(dir ? {dir: true} : {})})
+			}
+		}
+		const names = items.map((item) => item.path.split('/').filter(Boolean).at(-1) || 'file')
+		const label = cleanLabel(input?.label, `${items.length} files`)
+		const row = {
+			id: randomBytes(8).toString('hex'),
+			kind: 'file',
+			at: now(),
+			label,
+			...cutOf(input),
+			where: scope,
+			name: fileName(names[0] || label),
+			preview: oneLine(`${items.length} files · ${names.join(', ')}`),
+			ref: {
+				scope,
+				path: items[0].path,
+				...(scope === 'swarm' ? {id} : {}),
+				size: items.reduce((sum, item) => sum + (Number.isSafeInteger(item.size) ? item.size : 0), 0),
+				mtime: items[0].mtime,
+				items,
+			},
+		}
+		return addRow(who, row, null)
+	}
 	async function addFile(input, ctx) {
 		const who = actor(ctx.auth)
 		const scope = input?.scope
+		const many = Array.isArray(input?.paths) ? input.paths.map((path) => String(path)).filter((path) => path) : null
+		if (many && many.length >= 2) return addFiles(who, input, many)
 		if (scope === 'server') {
-			const info = await files.describe(String(input?.path ?? ''))
+			const info = await files.inspect(String(input?.path ?? ''))
 			const label = cleanLabel(input?.label, info.name)
 			const row = {
 				id: randomBytes(8).toString('hex'),
 				kind: 'file',
 				at: now(),
 				label,
+				...cutOf(input),
 				where: 'server',
 				name: fileName(info.name),
-				preview: oneLine(`${info.name} · ${info.size} bytes`),
-				ref: {scope: 'server', path: info.path, size: info.size, mtime: info.mtimeMs},
+				preview: info.dir ? oneLine(`${info.name} · folder`) : oneLine(`${info.name} · ${info.size} bytes`),
+				ref: {scope: 'server', path: info.path, size: info.dir ? 0 : info.size, mtime: info.mtimeMs, ...(info.dir ? {dir: true} : {})},
 			}
 			return addRow(who, row, null)
 		}
@@ -316,18 +393,19 @@ export function createClips({dataDir, files, fleet, readers = {}, roleOf = () =>
 			const id = String(input?.id ?? '')
 			const path = String(input?.path ?? '')
 			const info = await fleet.stat(id, path)
-			if (info?.dir) throw new RpcError('BAD_REQUEST', 'Choose a file')
-			if (!Number.isSafeInteger(info?.size) || info.size < 0) throw new RpcError('BAD_GATEWAY', 'That computer didn’t say how big the file is')
+			const dir = !!info?.dir
+			if (!dir && (!Number.isSafeInteger(info?.size) || info.size < 0)) throw new RpcError('BAD_GATEWAY', 'That computer didn’t say how big the file is')
 			const label = cleanLabel(input?.label, info.name || 'file')
 			const row = {
 				id: randomBytes(8).toString('hex'),
 				kind: 'file',
 				at: now(),
 				label,
+				...cutOf(input),
 				where: 'swarm',
 				name: fileName(info.name || label),
-				preview: oneLine(`${label} on that computer · ${info.size} bytes`),
-				ref: {scope: 'swarm', path, id, size: info.size, mtime: Number.isSafeInteger(info.mtime) ? info.mtime : 0},
+				preview: dir ? oneLine(`${label} · folder`) : oneLine(`${label} on that computer · ${info.size} bytes`),
+				ref: {scope: 'swarm', path, id, size: dir ? 0 : info.size, mtime: Number.isSafeInteger(info.mtime) ? info.mtime : 0, ...(dir ? {dir: true} : {})},
 			}
 			return addRow(who, row, null)
 		}
@@ -355,11 +433,78 @@ export function createClips({dataDir, files, fleet, readers = {}, roleOf = () =>
 		throw new RpcError('BAD_REQUEST', 'Choose a file on this server, a computer, or a machine')
 	}
 
+	function fileFailure(error) {
+		const code = error?.code
+		const msg = String(error?.message ?? '')
+		if (code === 'PRECONDITION_FAILED' || /offline/i.test(msg)) return 'offline'
+		if (code === 'NOT_FOUND' && /swarm|isn’t on this server/i.test(msg)) return 'offline'
+		if (code === 'NOT_FOUND' || MISSING_FILE.test(msg)) return 'missing'
+		return 'offline'
+	}
+	async function blobThere(who, clip) {
+		try {
+			await blob(who, clip)
+			return true
+		} catch {
+			return false
+		}
+	}
+	function storedMachine(clip) {
+		if (typeof clip.machine === 'string' && clip.machine) return clip.machine
+		if (clip.kind === 'stats') {
+			const name = String(clip.preview || '').split('·')[0].trim()
+			return name || 'This server'
+		}
+		if (clip.where === 'desktop') return 'Desktop'
+		return 'Terminal'
+	}
+	async function placeOf(who, clip) {
+		if (clip.kind !== 'file') {
+			const there = await blobThere(who, clip)
+			return {machine: storedMachine(clip), availability: there ? 'available' : 'missing'}
+		}
+		const ref = clip.ref
+		if (ref.scope === 'server') {
+			try {
+				const info = await files.inspect(ref.path)
+				return {machine: 'This server', availability: 'available', dir: !!info.dir}
+			} catch (error) {
+				return {machine: 'This server', availability: fileFailure(error), dir: !!ref.dir}
+			}
+		}
+		if (ref.scope === 'swarm') {
+			let name = 'Another computer'
+			const found = await readers.swarm?.(ref.id).catch(() => null)
+			if (found?.name) name = found.name
+			if (!found?.name || found.online === false) return {machine: name, availability: 'offline', dir: !!ref.dir}
+			try {
+				const info = await fleet.stat(ref.id, ref.path)
+				if (!info) return {machine: name, availability: 'missing', dir: !!ref.dir}
+				const dir = !!info.dir || !!ref.dir || !!ref.items?.some((item) => item.dir)
+				return {machine: name, availability: 'available', dir}
+			} catch (error) {
+				return {machine: name, availability: fileFailure(error), dir: !!ref.dir}
+			}
+		}
+		const found = await readers.machine?.(ref.id).catch(() => null)
+		return {machine: found?.name || 'A virtual machine', availability: 'offline', dir: !!ref.dir}
+	}
+	async function annotate(who, clip) {
+		const row = pub(clip)
+		const place = await placeOf(who, clip)
+		row.machine = place.machine
+		row.availability = place.availability
+		if (place.dir) row.dir = true
+		return row
+	}
 	async function list(_input, ctx) {
 		const who = actor(ctx.auth)
 		const book = await load(who.userId)
 		if (book.damaged) return {clips: [], damaged: true}
-		return {clips: book.clips.map(pub), damaged: false}
+		const rows = []
+		for (let i = book.clips.length - 1; i >= 0; i--) rows.push(await annotate(who, book.clips[i]))
+		rows.sort((a, b) => b.at - a.at)
+		return {clips: rows, damaged: false}
 	}
 	async function remove(input, ctx) {
 		const who = actor(ctx.auth)
@@ -396,16 +541,38 @@ export function createClips({dataDir, files, fleet, readers = {}, roleOf = () =>
 		return decodeText(await readFile(await blob(who, clip)))
 	}
 
+	// Several paths are one clip. Another computer receives the first file. The rest stay put.
+	function firstFile(ref) {
+		if (!Array.isArray(ref?.items) || !ref.items.length) return ref
+		const item = ref.items[0]
+		return {scope: ref.scope, path: item.path, id: ref.id, size: item.size, mtime: item.mtime, dir: !!item.dir}
+	}
 	async function freshServer(ref) {
-		const info = await files.describe(ref.path)
+		if (Array.isArray(ref.items) && ref.items.length) {
+			const infos = []
+			for (const item of ref.items) infos.push(await freshServer({path: item.path, size: item.size, mtime: item.mtime, dir: item.dir}))
+			return infos
+		}
+		const info = await files.inspect(ref.path)
+		if (!!info.dir !== !!ref.dir) throw new RpcError('CONFLICT', CHANGED)
+		if (info.dir) {
+			if (info.mtimeMs !== ref.mtime) throw new RpcError('CONFLICT', CHANGED)
+			return info
+		}
 		if (info.size !== ref.size || info.mtimeMs !== ref.mtime) throw new RpcError('CONFLICT', CHANGED)
 		return info
 	}
 	async function freshSwarm(ref) {
 		requireOwner({role: 'owner'})
-		const info = await fleet.stat(ref.id, ref.path)
+		const lead = firstFile(ref)
+		const info = await fleet.stat(ref.id, lead.path)
 		const mtime = Number.isSafeInteger(info?.mtime) ? info.mtime : 0
-		if (info?.dir || info?.size !== ref.size || mtime !== ref.mtime) throw new RpcError('CONFLICT', CHANGED)
+		if (!!info?.dir !== !!lead.dir) throw new RpcError('CONFLICT', CHANGED)
+		if (info?.dir) {
+			if (mtime !== lead.mtime) throw new RpcError('CONFLICT', CHANGED)
+			return info
+		}
+		if (info?.size !== lead.size || mtime !== lead.mtime) throw new RpcError('CONFLICT', CHANGED)
 		return info
 	}
 	async function transferFile() {
@@ -417,15 +584,16 @@ export function createClips({dataDir, files, fleet, readers = {}, roleOf = () =>
 		return join(dir, randomBytes(8).toString('hex'))
 	}
 	async function pullToTemp(ref) {
+		const lead = firstFile(ref)
 		const tmp = await transferFile()
 		const out = createWriteStream(tmp, {flags: 'wx', mode: 0o600})
 		try {
-			const meta = await fleet.pull(ref.id, ref.path, async (buf) => {
+			const meta = await fleet.pull(ref.id, lead.path, async (buf) => {
 				if (!out.write(buf)) await once(out, 'drain')
 			})
 			out.end()
 			await finished(out)
-			if (meta?.size !== ref.size) throw new RpcError('CONFLICT', CHANGED)
+			if (meta?.size !== lead.size) throw new RpcError('CONFLICT', CHANGED)
 			return tmp
 		} catch (error) {
 			out.destroy()
@@ -434,28 +602,71 @@ export function createClips({dataDir, files, fleet, readers = {}, roleOf = () =>
 		}
 	}
 
+	async function placeServer(path, folder, cut) {
+		const op = cut ? files.move : files.copy
+		return op({path, toDirectory: folder, collision: 'keep-both'})
+	}
+	// A cut leaves the source until the new copy is in place. A failed removal keeps the paste.
+	async function dropCutSource(clip) {
+		if (!clip?.cut || clip.kind !== 'file' || !clip.ref) return false
+		const ref = clip.ref
+		const paths = Array.isArray(ref.items) && ref.items.length ? ref.items.map((item) => item.path) : [ref.path]
+		try {
+			if (ref.scope === 'server') {
+				if (typeof files.trash !== 'function') return true
+				for (const path of paths) await files.trash({path})
+				return false
+			}
+			if (ref.scope === 'swarm') {
+				if (typeof fleet.remove !== 'function') return true
+				for (const path of paths) await fleet.remove(ref.id, path)
+				return false
+			}
+			return true
+		} catch {
+			return true
+		}
+	}
 	async function intoFolder(who, clip, folder) {
 		if (typeof folder !== 'string' || !folder.startsWith('/')) throw new RpcError('BAD_REQUEST', 'Choose a folder')
 		if (clip.kind === 'file' && clip.ref.scope === 'machine') throw new RpcError('PRECONDITION_FAILED', STILL)
 		if (clip.kind === 'file' && clip.ref.scope === 'server') {
 			await freshServer(clip.ref)
-			return files.copy({path: clip.ref.path, toDirectory: folder, collision: 'keep-both'})
+			if (Array.isArray(clip.ref.items) && clip.ref.items.length) {
+				let saved = null
+				for (const item of clip.ref.items) saved = await placeServer(item.path, folder, false)
+				return {path: saved, kept: clip.cut ? await dropCutSource(clip) : false}
+			}
+			return {path: await placeServer(clip.ref.path, folder, !!clip.cut), kept: false}
 		}
 		if (clip.kind === 'file' && clip.ref.scope === 'swarm') {
 			requireOwner(who)
+			if (clip.ref.dir || clip.ref.items?.some((item) => item.dir)) throw new RpcError('PRECONDITION_FAILED', FOLDER_FROM_COMPUTER)
 			await freshSwarm(clip.ref)
 			const tmp = await pullToTemp(clip.ref)
 			try {
-				return await files.saveNew(folder, clip.name, createReadStream(tmp), 'keep-both')
+				const path = await files.saveNew(folder, clip.name, createReadStream(tmp), 'keep-both')
+				// Several paths are one clip, and this paste writes one file. Leave the rest in place.
+				const many = Array.isArray(clip.ref.items) && clip.ref.items.length > 1
+				const kept = !clip.cut ? false : many ? true : await dropCutSource(clip)
+				return {path, kept}
 			} finally {
 				await rm(tmp, {force: true}).catch(() => {})
 			}
 		}
 		const path = await blob(who, clip)
-		return files.saveNew(folder, clip.name, createReadStream(path), 'keep-both')
+		return {path: await files.saveNew(folder, clip.name, createReadStream(path), 'keep-both'), kept: false}
+	}
+	function joinComputer(folder, name) {
+		const dir = String(folder ?? '').replace(/^\/+|\/+$/g, '')
+		const base = String(name || 'clip').replace(/[/\\]/g, '_').replace(/^\.+/, '') || 'clip'
+		return dir ? `${dir}/${base}` : base
 	}
 	async function ontoComputer(who, clip, computer, path) {
 		requireOwner(who)
+		if (clip.kind === 'file' && (clip.ref.dir || clip.ref.items?.some((item) => item.dir))) {
+			throw new RpcError('PRECONDITION_FAILED', FOLDER_TO_COMPUTER)
+		}
 		if (clip.kind === 'file' && clip.ref.scope === 'machine') throw new RpcError('PRECONDITION_FAILED', STILL)
 		const dest = String(path ?? '')
 		if (!dest) throw new RpcError('BAD_REQUEST', 'Name a file on that computer')
@@ -464,13 +675,15 @@ export function createClips({dataDir, files, fleet, readers = {}, roleOf = () =>
 			let size
 			let source
 			if (clip.kind === 'file' && clip.ref.scope === 'server') {
-				const info = await freshServer(clip.ref)
+				const lead = firstFile(clip.ref)
+				const info = await freshServer(lead)
 				size = info.size
-				source = (await files.openRead(clip.ref.path)).stream
+				source = (await files.openRead(lead.path)).stream
 			} else if (clip.kind === 'file' && clip.ref.scope === 'swarm') {
-				await freshSwarm(clip.ref)
-				tmp = await pullToTemp(clip.ref)
-				size = clip.ref.size
+				const lead = firstFile(clip.ref)
+				await freshSwarm(lead)
+				tmp = await pullToTemp(lead)
+				size = lead.size
 				source = createReadStream(tmp)
 			} else {
 				const file = await blob(who, clip)
@@ -482,19 +695,44 @@ export function createClips({dataDir, files, fleet, readers = {}, roleOf = () =>
 			} finally {
 				source.destroy()
 			}
-			return dest
+			const samePlace = clip.kind === 'file' && clip.ref?.scope === 'swarm' && clip.ref.id === computer && (clip.ref.path === dest || clip.ref.items?.some((item) => item.path === dest))
+			const many = clip.kind === 'file' && Array.isArray(clip.ref?.items) && clip.ref.items.length > 1
+			const kept = !clip.cut || samePlace ? false : many ? true : await dropCutSource(clip)
+			return {path: dest, kept}
 		} finally {
 			if (tmp) await rm(tmp, {force: true}).catch(() => {})
 		}
 	}
 
+	async function pasteMany(who, ids, dest) {
+		if (dest?.clipboard !== 'server') throw new RpcError('BAD_REQUEST', 'Choose where to paste it')
+		const parts = []
+		for (const id of ids) {
+			const clip = await take(who, id)
+			if (clip.kind !== 'text' && clip.kind !== 'stats') throw new RpcError('PRECONDITION_FAILED', 'Text and files go to different places.')
+			parts.push((await textOf(who, clip)).trim())
+		}
+		const text = parts.filter((part) => part.length > 0).join('\n\n')
+		if (typeof readers.writeClipboard !== 'function') throw new RpcError('PRECONDITION_FAILED', 'This server can’t take clipboard text right now')
+		await readers.writeClipboard(text)
+		return {text, count: ids.length}
+	}
 	async function paste(input, ctx) {
 		const who = actor(ctx.auth)
-		const clip = await take(who, input?.id)
 		const dest = input?.dest
+		const ids = Array.isArray(input?.ids) ? input.ids.map((id) => String(id)).filter(Boolean) : null
+		if (ids && ids.length > 1) return pasteMany(who, ids, dest)
+		const clip = await take(who, ids?.length === 1 ? ids[0] : input?.id)
 		if (dest === 'text' || dest?.text === true) return {text: await textOf(who, clip)}
-		if (typeof dest?.folder === 'string') return {path: await intoFolder(who, clip, dest.folder)}
-		if (typeof dest?.computer === 'string') return {path: await ontoComputer(who, clip, dest.computer, dest.path)}
+		if (dest?.clipboard === 'server') {
+			const text = await textOf(who, clip)
+			if (typeof readers.writeClipboard !== 'function') throw new RpcError('PRECONDITION_FAILED', 'This server can’t take clipboard text right now')
+			await readers.writeClipboard(text)
+			return {text}
+		}
+		if (typeof dest?.computer === 'string' && typeof dest?.folder === 'string') return ontoComputer(who, clip, dest.computer, joinComputer(dest.folder, clip.name))
+		if (typeof dest?.folder === 'string') return intoFolder(who, clip, dest.folder)
+		if (typeof dest?.computer === 'string') return ontoComputer(who, clip, dest.computer, dest.path)
 		throw new RpcError('BAD_REQUEST', 'Choose where to paste it')
 	}
 	async function fleetList(input, ctx) {
@@ -553,9 +791,10 @@ export function createClips({dataDir, files, fleet, readers = {}, roleOf = () =>
 				if (!res.writableFinished) clientLeft = true
 			})
 			if (clip.kind === 'file' && clip.ref.scope === 'server') {
-				const info = await freshServer(clip.ref)
+				const lead = firstFile(clip.ref)
+				const info = await freshServer(lead)
 				res.writeHead(200, {'content-type': 'application/octet-stream', 'content-length': String(info.size), 'content-disposition': disposition(clip.name, false)})
-				const opened = await files.openRead(clip.ref.path)
+				const opened = await files.openRead(lead.path)
 				res.on('close', () => {
 					if (!res.writableFinished) opened.stream.destroy()
 				})
@@ -564,10 +803,11 @@ export function createClips({dataDir, files, fleet, readers = {}, roleOf = () =>
 			}
 			if (clip.kind === 'file' && clip.ref.scope === 'swarm') {
 				requireOwner(who)
-				const info = await freshSwarm(clip.ref)
+				const lead = firstFile(clip.ref)
+				const info = await freshSwarm(lead)
 				res.writeHead(200, {'content-type': 'application/octet-stream', 'content-length': String(info.size), 'content-disposition': disposition(clip.name, false)})
 				let failed = false
-				await fleet.pull(clip.ref.id, clip.ref.path, async (buf) => {
+				await fleet.pull(clip.ref.id, lead.path, async (buf) => {
 					if (clientLeft || res.destroyed || req.destroyed) {
 						failed = true
 						throw new Error('closed')

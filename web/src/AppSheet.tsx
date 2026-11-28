@@ -1,15 +1,29 @@
-import {useEffect, useRef, useState} from 'react'
+import {useEffect, useRef, useState, type CSSProperties} from 'react'
 import {NEEDS_APP_ADDRESSES, useAppTab} from './appTab'
-import {useQuery} from '@tanstack/react-query'
+import {useMutation, useQuery, useQueryClient} from '@tanstack/react-query'
 
 import {askApp, explainProbe, openApp, webStatus} from './openApp'
-import {query, type UserApp} from './api'
-import {appUrl, useAction, useBootstrap} from './data'
+import {mutate, query, type UserApp} from './api'
+import {appUrl, useAction, useBootstrap, useUser} from './data'
 import {useDesktop} from './desktop/Desktop'
+import {isOwner} from './isOwner'
 import {Icon, type IconName} from './icons'
-import {AppIcon, KV, Sheet, SheetHeader, StatusPill, appStatus, haptic, isAppBusy, useConfirm, useToast} from './ui'
+import {rovingKeyDown, TAB_SELECTOR} from './roving'
+import {AppIcon, Group, KV, Row, Sheet, SheetHeader, StatusPill, Switch, appStatus, haptic, isAppBusy, useConfirm, useToast} from './ui'
 import {nearBottom} from './logFollow'
 import {DevicesPanel} from './usb'
+
+type AppOidcStatus = {
+	supported: boolean
+	mode?: 'auto' | 'assisted'
+	enabled: boolean
+	note?: string
+	issuerUrl?: string
+	discoveryUrl?: string
+	clientId?: string | null
+	clientSecret?: string | null
+	redirectUris?: string[]
+}
 
 type Props = {app: UserApp | null; update?: {version: string}; onClose: () => void; onOpenApp?: (app: UserApp) => void; onTerminal?: (app: {id: string; name?: string; icon?: string}) => void}
 type A = {id: string; label: string; icon: IconName; onClick: () => void; disabled?: boolean}
@@ -17,14 +31,22 @@ type A = {id: string; label: string; icon: IconName; onClick: () => void; disabl
 export function AppSheet({app, update, onClose, onTerminal}: Props) {
 	const desk = useDesktop()
 	const boot = useBootstrap()
+	const user = useUser()
+	const qc = useQueryClient()
 	const action = useAction()
 	const confirm = useConfirm()
 	const toast = useToast()
 	const appTab = useAppTab()
+	const owner = isOwner(user.data)
 	const [logsOpen, setLogsOpen] = useState(false)
 	const [tab, setTab] = useState<'overview' | 'usb'>('overview')
 	const [waiting, setWaiting] = useState<number | null>(null)
 	const [problem, setProblem] = useState<string | null>(null)
+	const [showOidcCreds, setShowOidcCreds] = useState(false)
+	const [revealedSecret, setRevealedSecret] = useState<string | null>(null)
+	useEffect(() => {
+		setRevealedSecret(null)
+	}, [app?.id])
 	const waitCtrl = useRef<AbortController | null>(null)
 	useEffect(() => () => waitCtrl.current?.abort(), [])
 	useEffect(() => (waitCtrl.current?.abort(), setWaiting(null), setProblem(null)), [app?.id, app?.state])
@@ -36,8 +58,41 @@ export function AppSheet({app, update, onClose, onTerminal}: Props) {
 		refetchInterval: (q) => (q.state.data?.readiness === 'ready' ? 30_000 : 4000),
 		retry: false,
 	})
+	const oidcStatus = useQuery({
+		queryKey: ['apps.oidcStatus', app?.id],
+		queryFn: () => query<AppOidcStatus>('apps.oidcStatus', {appId: app!.id}),
+		enabled: !!app && owner && !app.system && app.state !== 'installing',
+		retry: false,
+	})
+	const setOidc = useMutation({
+		mutationFn: (enabled: boolean) =>
+			mutate<AppOidcStatus>('apps.setOidc', {
+				appId: app!.id,
+				enabled,
+				...(enabled && !oidcStatus.data?.issuerUrl ? {issuerUrl: location.origin} : {}),
+			}),
+		onSuccess: (res) => {
+			toast(res.enabled ? 'Sign in with My Own Data Center enabled' : 'Sign in with My Own Data Center disabled')
+			setRevealedSecret(res.enabled ? (res.clientSecret ?? null) : null)
+			if (res.enabled && res.mode === 'assisted') setShowOidcCreds(true)
+			qc.invalidateQueries({queryKey: ['apps.oidcStatus', app?.id]})
+			qc.invalidateQueries({queryKey: ['apps.list']})
+			qc.invalidateQueries({queryKey: ['oidc.clients']})
+			qc.invalidateQueries({queryKey: ['oidc.status']})
+		},
+		onError: (e: Error) => toast(e.message, true),
+	})
 	useEffect(() => setLogsOpen(false), [app?.id])
 	useEffect(() => setTab('overview'), [app?.id])
+	useEffect(() => setShowOidcCreds(false), [app?.id])
+	const copyOidc = async (text: string, label: string) => {
+		try {
+			await navigator.clipboard.writeText(text)
+			toast(`${label} copied`)
+		} catch {
+			toast(`Couldn’t copy ${label.toLowerCase()}`, true)
+		}
+	}
 
 	if (!app) return null
 	const status = appStatus(app.state, !!update)
@@ -171,11 +226,11 @@ export function AppSheet({app, update, onClose, onTerminal}: Props) {
 					}
 					onClose={onClose}
 				/>
-				<div className="mx-tabs" role="tablist" aria-label={`${name} sections`}>
-					<button type="button" role="tab" aria-selected={tab === 'overview'} className={`chip${tab === 'overview' ? ' on' : ''}`} onClick={() => (haptic(5), setTab('overview'))}>
+				<div className="mx-tabs" role="tablist" aria-label={`${name} sections`} onKeyDown={(e) => rovingKeyDown(e, TAB_SELECTOR, 'horizontal')}>
+					<button type="button" role="tab" aria-selected={tab === 'overview'} tabIndex={tab === 'overview' ? 0 : -1} className={`chip${tab === 'overview' ? ' on' : ''}`} onClick={() => (haptic(5), setTab('overview'))}>
 						Overview
 					</button>
-					<button type="button" role="tab" aria-selected={tab === 'usb'} className={`chip${tab === 'usb' ? ' on' : ''}`} onClick={() => (haptic(5), setTab('usb'))}>
+					<button type="button" role="tab" aria-selected={tab === 'usb'} tabIndex={tab === 'usb' ? 0 : -1} className={`chip${tab === 'usb' ? ' on' : ''}`} onClick={() => (haptic(5), setTab('usb'))}>
 						<Icon name="usb" size={15} />
 						Devices
 					</button>
@@ -185,7 +240,7 @@ export function AppSheet({app, update, onClose, onTerminal}: Props) {
 				) : (
 				<>
 				{app.error && (
-					<div className="error" style={{marginBottom: 14, display: 'block'}}>
+					<div className="error" role="alert" style={{marginBottom: 14, display: 'block'}}>
 						<div style={{display: 'flex', gap: 8, alignItems: 'flex-start'}}>
 							<Icon name="alert" size={18} />
 							<span style={{wordBreak: 'break-word'}}>{app.error}</span>
@@ -215,6 +270,113 @@ export function AppSheet({app, update, onClose, onTerminal}: Props) {
 					))}
 				</div>
 				<KV rows={rows} />
+				{owner && oidcStatus.data?.supported && (
+					<Group
+						title="Single Sign-On (OIDC)"
+						footer={oidcStatus.data.enabled && oidcStatus.data.note ? oidcStatus.data.note : undefined}
+					>
+						<Row
+							icon="key"
+							color="var(--accent)"
+							label="Sign in with My Own Data Center"
+							sub={
+								oidcStatus.data.enabled
+									? oidcStatus.data.mode === 'auto'
+										? 'Active · configured automatically'
+										: 'Active · paste credentials into app settings'
+									: oidcStatus.data.mode === 'auto'
+										? 'Automatically configure OIDC SSO'
+										: 'Pre-register an OIDC client for this app'
+							}
+							trailing={
+								<Switch
+									on={oidcStatus.data.enabled}
+									disabled={busy || setOidc.isPending}
+									label="Sign in with My Own Data Center"
+									onChange={(on) => {
+										void (async () => {
+											if (on) {
+												const ok = await confirm({
+													title: `Let ${name} use your accounts?`,
+													body: 'People will sign into this app with accounts on this server, including two-factor. Only turn this on for an app you trust with those sign-ins.',
+													confirm: 'Share sign-in',
+													danger: true,
+													icon: 'key',
+												})
+												if (!ok) return
+											}
+											setOidc.mutate(on)
+										})()
+									}}
+								/>
+							}
+						/>
+						{oidcStatus.data.enabled && oidcStatus.data.clientId && (
+							<>
+								{oidcStatus.data.mode === 'auto' && !showOidcCreds ? (
+									<div className="row static">
+										<button type="button" className="btn small" onClick={() => setShowOidcCreds(true)}>
+											Show OIDC details
+										</button>
+									</div>
+								) : (
+									<>
+										{oidcStatus.data.issuerUrl && (
+											<Row
+												icon="link"
+												color="var(--blue)"
+												label="Issuer URL"
+												sub={oidcStatus.data.issuerUrl}
+												trailing={
+													<button type="button" className="btn small" onClick={() => copyOidc(oidcStatus.data!.issuerUrl!, 'Issuer URL')}>
+														Copy
+													</button>
+												}
+											/>
+										)}
+										{oidcStatus.data.discoveryUrl && (
+											<Row
+												icon="networking"
+												color="var(--teal)"
+												label="Discovery URL"
+												sub={oidcStatus.data.discoveryUrl}
+												trailing={
+													<button type="button" className="btn small" onClick={() => copyOidc(oidcStatus.data!.discoveryUrl!, 'Discovery URL')}>
+														Copy
+													</button>
+												}
+											/>
+										)}
+										<Row
+											icon="key"
+											color="var(--green)"
+											label="Client ID"
+											sub={oidcStatus.data.clientId}
+											trailing={
+												<button type="button" className="btn small" onClick={() => copyOidc(oidcStatus.data!.clientId!, 'Client ID')}>
+													Copy
+												</button>
+											}
+										/>
+										{revealedSecret && (
+											<Row
+												icon="shield"
+												color={'var(--orange, #f59e0b)' as CSSProperties['color']}
+												label="Client Secret (shown once)"
+												sub={revealedSecret}
+												trailing={
+													<button type="button" className="btn small" onClick={() => copyOidc(revealedSecret, 'Client secret')}>
+														Copy
+													</button>
+												}
+											/>
+										)}
+									</>
+								)}
+							</>
+						)}
+					</Group>
+				)}
 				<button className="btn danger block" onClick={uninstall} disabled={busy}>
 					<Icon name="trash" size={19} />
 					Uninstall

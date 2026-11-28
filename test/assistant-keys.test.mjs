@@ -86,16 +86,29 @@ test('openai-compatible adds /v1 when the base URL has no path', async () => {
 	}
 })
 
-test('a member cannot use or list a key until it is shared or default', async () => {
+test('a member cannot use or list a key another person added', async () => {
 	const dataDir = await tmp()
 	try {
 		const keys = createKeyStore({dataDir})
 		const row = await keys.add({userId: 'owner', role: 'owner'}, {name: 'k', provider: 'spacexai', apiKey: 'secret-key-1', model: 'grok-4.7'})
 		assert.deepEqual(await keys.listPublic('sam'), [])
 		await assert.rejects(() => keys.resolveForUser('sam', row.id), /isn.t/)
-		await keys.update({userId: 'owner', role: 'owner'}, {id: row.id, sharedWith: ['sam']})
-		assert.equal((await keys.listPublic('sam'))[0].id, row.id)
-		assert.equal((await keys.resolveForUser('sam', row.id)).apiKey, 'secret-key-1')
+		await assert.rejects(() => keys.update({userId: 'owner', role: 'owner'}, {id: row.id, sharedWith: ['sam']}), /Offer/)
+		assert.deepEqual(await keys.listPublic('sam'), [])
+		await assert.rejects(() => keys.resolveForUser('sam', row.id), /isn.t/)
+	} finally {
+		await rm(dataDir, {recursive: true, force: true})
+	}
+})
+
+test('a person who is not the owner can add only the loopback model address', async () => {
+	const dataDir = await tmp()
+	try {
+		const keys = createKeyStore({dataDir})
+		await assert.rejects(() => keys.add({userId: 'sam', role: 'member'}, {name: 'b', provider: 'openai-compatible', apiKey: '', model: 'llama', baseUrl: 'http://127.0.0.1:2021/v1'}), /Only the server’s owner can add a custom endpoint/)
+		const here = await keys.add({userId: 'sam', role: 'member'}, {name: 'Here', provider: 'openai-compatible', apiKey: '', model: 'llama', baseUrl: 'http://127.0.0.1:11434/v1'})
+		assert.equal(here.baseUrl, 'http://127.0.0.1:11434/v1')
+		assert.equal((await keys.listPublic('owner')).some((k) => k.id === here.id), false)
 	} finally {
 		await rm(dataDir, {recursive: true, force: true})
 	}
@@ -315,7 +328,7 @@ test('valid keys.json drops non-object rows and normalizes sharedWith to an arra
 		await captureErrors(async (lines) => {
 			const keys = createKeyStore({dataDir})
 			const ownerList = await keys.listPublic('owner')
-			assert.deepEqual(ownerList.map((k) => k.id), ['k1', 'k2'])
+			assert.deepEqual(ownerList.map((k) => k.id), ['k2', 'k1'])
 			assert.deepEqual(ownerList.map((k) => k.sharedWith), [[], []])
 			assert.deepEqual(await keys.listPublic('sam'), [])
 			assert.equal((await keys.resolveForUser('owner')).id, 'k2')

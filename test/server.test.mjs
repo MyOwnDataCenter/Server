@@ -212,7 +212,7 @@ describe('Omarchy Server server against an omarchyd stand-in', () => {
 		assert.match(appSession, /HttpOnly/)
 		assert.match(appSession, /SameSite=Lax/)
 		const login = fake.calls.findLast((c) => c.path === 'user.loginNative')
-		assert.deepEqual(login.input.client, {id: 'omarchy-server', platform: 'ios', deviceClass: 'phone', appVersion: '0.9.76', appBuild: '1', osVersion: 'web'})
+		assert.deepEqual(login.input.client, {id: 'omarchy-server', platform: 'ios', deviceClass: 'phone', appVersion: '0.9.108', appBuild: '1', osVersion: 'web'})
 		const saved = await readFile(join(touch.dir, 'sessions.json'), 'utf8')
 		assert.ok(!saved.includes(touch.getCookie().split('=')[1]), 'cookie value must not be stored in plain form')
 		assert.equal((await stat(join(touch.dir, 'sessions.json'))).mode & 0o777, 0o600)
@@ -364,7 +364,51 @@ describe('Omarchy Server server against an omarchyd stand-in', () => {
 		r = await touch.req('POST', '/api/prefs', {solidColor: null})
 		assert.equal(r.body.prefs.solidColor, null)
 		assert.equal(r.body.prefs.theme, 'tokyo', 'the rest is untouched')
+		// The account's stat drawing. A bad value is refused and does not wipe the theme.
+		r = await touch.req('POST', '/api/prefs', {statView: 'gauges'})
+		assert.equal(r.status, 200)
+		assert.equal(r.body.prefs.statView, 'gauges')
+		assert.equal(r.body.prefs.theme, 'tokyo')
+		assert.equal((await touch.req('POST', '/api/prefs', {statView: 'dials'})).status, 400)
+		r = await touch.req('GET', '/api/prefs')
+		assert.equal(r.body.prefs.statView, 'gauges')
+		r = await touch.req('POST', '/api/prefs', {statView: 'line'})
+		assert.equal(r.body.prefs.statView, 'line')
+		// Which readings this account shows. A bad id is refused and does not clear a saved choice.
+		r = await touch.req('POST', '/api/prefs', {statPicks: {on: [], off: ['CPU', 'Memory']}})
+		assert.equal(r.status, 200)
+		assert.deepEqual(r.body.prefs.statPicks, {on: [], off: ['CPU', 'Memory']})
+		assert.equal(r.body.prefs.theme, 'tokyo')
+		assert.equal((await touch.req('POST', '/api/prefs', {statPicks: {on: ['../x'], off: []}})).status, 400)
+		r = await touch.req('GET', '/api/prefs')
+		assert.deepEqual(r.body.prefs.statPicks, {on: [], off: ['CPU', 'Memory']})
+		r = await touch.req('POST', '/api/prefs', {statPicks: null})
+		assert.equal(r.body.prefs.statPicks, null)
+		assert.equal(r.body.prefs.theme, 'tokyo')
+		r = await touch.req('POST', '/api/prefs', {machinesCompact: true})
+		assert.equal(r.body.prefs.machinesCompact, true)
+		assert.equal(r.body.prefs.theme, 'tokyo')
+		assert.equal((await touch.req('POST', '/api/prefs', {machinesCompact: 'yes'})).status, 400)
+		r = await touch.req('GET', '/api/prefs')
+		assert.equal(r.body.prefs.machinesCompact, true)
+		r = await touch.req('POST', '/api/prefs', {machinesCompact: false})
+		assert.equal(r.body.prefs.machinesCompact, false)
+		r = await touch.req('POST', '/api/prefs', {dismissedTutorials: ['machines-filters']})
+		assert.equal(r.status, 200)
+		assert.deepEqual(r.body.prefs.dismissedTutorials, ['machines-filters'])
+		assert.equal(r.body.prefs.theme, 'tokyo')
+		assert.equal((await touch.req('POST', '/api/prefs', {dismissedTutorials: ['other']})).status, 400)
+		r = await touch.req('POST', '/api/prefs', {dismissedTutorials: []})
+		assert.deepEqual(r.body.prefs.dismissedTutorials, [])
 		assert.equal((await touch.req('POST', '/api/prefs', {theme: '<script>'})).status, 400)
+		r = await touch.req('POST', '/api/prefs', {theme: 'linen', lightTheme: 'sky', darkTheme: 'gruvbox', pictureTheme: 'horizon'})
+		assert.equal(r.status, 200)
+		assert.deepEqual([r.body.prefs.theme, r.body.prefs.lightTheme, r.body.prefs.darkTheme, r.body.prefs.pictureTheme], ['linen', 'sky', 'gruvbox', 'horizon'])
+		assert.equal((await touch.req('POST', '/api/prefs', {theme: 'sky'})).status, 200)
+		assert.equal((await touch.req('POST', '/api/prefs', {lightTheme: 'mocha'})).status, 400)
+		assert.equal((await touch.req('POST', '/api/prefs', {darkTheme: 'latte'})).status, 400)
+		assert.equal((await touch.req('POST', '/api/prefs', {pictureTheme: 'linen'})).status, 400)
+		assert.equal((await touch.req('GET', '/api/prefs')).body.prefs.theme, 'sky')
 		assert.equal((await touch.req('POST', '/api/prefs', {customBrandHsl: 'red; x'})).status, 400)
 		// Only plain strings are stored: an array or object is a 400, not a stored array or a 500.
 		for (const bad of [['24 90% 50%'], {toString: 1}, 5]) {
@@ -556,6 +600,10 @@ describe('Omarchy Server server against an omarchyd stand-in', () => {
 		assert.equal(fake.terminals.at(-1).fresh, undefined)
 		assert.equal((await open('appId=../x&cols=80&rows=24')).status, 400)
 		assert.equal((await open('cols=5000&rows=24')).status, 400)
+		// An LXC container's console reaches omarchyd as that container's, not as the server's own shell.
+		assert.ok((await open('containerId=ubuntu-1&containerMode=console&cols=80&rows=24')).ok)
+		assert.deepEqual(fake.terminals.at(-1), {appId: null, cols: 80, rows: 24, containerId: 'ubuntu-1', containerMode: 'console'})
+		assert.equal((await open('containerId=../x&cols=80&rows=24')).status, 400)
 	})
 
 	test('a member cannot open the host terminal or a swarm computer through the web server', async () => {
@@ -613,6 +661,60 @@ describe('Omarchy Server server against an omarchyd stand-in', () => {
 		assert.ok(fake.fsTree.has('/Home/Downloads/hello.txt'))
 	})
 
+
+	test('/mcp is passed to omarchyd for a Hermes elsewhere: POST only, no session, nothing answered without its token', async () => {
+		assert.equal((await fetch(`${touch.base}/mcp`)).status, 405)
+		const r = await fetch(`${touch.base}/mcp`, {method: 'POST', headers: {'content-type': 'application/json'}, body: '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'})
+		assert.notEqual(r.status, 200)
+	})
+
+	test('quick transfer: a QR link downloads one file or uploads into one folder, no sign-in, for 10 minutes', async () => {
+		const make = (body) => touch.req('POST', '/api/transfer', body)
+		// Signed-in only, this server's own files only.
+		assert.equal((await fetch(`${touch.base}/api/transfer`, {method: 'POST', headers: {'x-omarchy-server': '1', 'content-type': 'application/json'}, body: '{}'})).status, 401)
+		for (const path of ['/Trash/x', '/etc/passwd', '/Home/../etc', 'Home/Documents']) assert.equal((await make({kind: 'download', path})).status, 400, path)
+		assert.equal((await make({kind: 'upload', path: '/Home/Documents/Notes.txt'})).status, 400, 'upload needs a folder')
+
+		const d = await make({kind: 'download', path: '/Home/Documents/Notes.txt', name: 'Notes.txt', size: 5, theme: {'--accent': '#ff8800', '--bg': 'url(javascript:x)'}, background: '/api/wallpaper/1'})
+		assert.equal(d.status, 200)
+		assert.match(d.body.path, /^\/t\/[A-Za-z0-9_-]{32}$/)
+		const page = await fetch(touch.base + d.body.path)
+		assert.equal(page.status, 200)
+		assert.equal(page.headers.get('cache-control'), 'no-store')
+		assert.equal(page.headers.get('referrer-policy'), 'no-referrer')
+		const info = await (await fetch(`${touch.base}${d.body.path}/info`)).json()
+		assert.equal(info.kind, 'download')
+		assert.equal(info.name, 'Notes.txt')
+		assert.ok(info.remainingMs > 9 * 60_000 && info.remainingMs <= 10 * 60_000)
+		assert.deepEqual(info.theme, {'--accent': '#ff8800'}, 'only plain colours are copied')
+		const file = await fetch(`${touch.base}${d.body.path}/file`)
+		assert.equal(file.status, 200)
+		assert.ok((await file.text()).length > 0)
+		// The link is exactly one file: no other path, no uploads.
+		assert.equal((await fetch(`${touch.base}${d.body.path}/file?path=%2FHome%2FDocuments%2Fhello.txt`)).status, 200)
+		assert.equal((await fetch(`${touch.base}${d.body.path}/upload?name=x.txt`, {method: 'POST', headers: {'x-modc-transfer': '1'}, body: 'x'})).status, 404)
+
+		const u = await make({kind: 'upload', path: '/Home/Documents', name: 'Documents'})
+		assert.equal(u.status, 200)
+		const send = (name, body, headers = {'x-modc-transfer': '1'}) => fetch(`${touch.base}${u.body.path}/upload?name=${encodeURIComponent(name)}`, {method: 'POST', headers: {'content-type': 'application/octet-stream', ...headers}, body})
+		const ok = await send('from-phone.txt', 'hello from the phone')
+		assert.equal(ok.status, 200)
+		assert.equal((await ok.json()).path, '/Home/Documents/from-phone.txt')
+		const again = await send('from-phone.txt', 'second copy')
+		assert.equal(again.status, 200)
+		assert.notEqual((await again.json()).path, '/Home/Documents/from-phone.txt', 'never replaces a file')
+		for (const bad of ['../escape.txt', '..', '.hidden', '']) assert.equal((await send(bad, 'x')).status, 400, JSON.stringify(bad))
+		const nested = await (await send('sub/dir.txt', 'x')).json()
+		assert.equal(nested.path, '/Home/Documents/sub_dir.txt', 'a slash becomes part of one plain name')
+		assert.equal((await send('x.txt', 'x', {})).status, 403, 'only the portal page may upload')
+		assert.equal((await fetch(`${touch.base}${u.body.path}/file`)).status, 404, 'an upload link downloads nothing')
+
+		// Stopped: gone. Unknown or malformed links: the same 404.
+		assert.equal((await touch.req('DELETE', `/api/transfer/${u.body.token}`)).body.ok, true)
+		assert.equal((await send('late.txt', 'x')).status, 404)
+		assert.equal((await fetch(`${touch.base}/t/${'A'.repeat(32)}/info`)).status, 404)
+		assert.equal((await fetch(`${touch.base}/t/short/info`)).status, 404)
+	})
 	test('community app stores can be listed, added and removed', async () => {
 		const url = 'https://github.com/MyOwnDataCenter/app-store'
 		const add = await touch.req('POST', '/api/rpc/appStore.addRepository', {input: {url}})
@@ -1025,5 +1127,14 @@ describe('normalizeBackendUrl (#655)', () => {
 		assert.equal(normalizeBackendUrl('10.0.0.5:2021'), 'http://10.0.0.5:2021')
 		assert.equal(normalizeBackendUrl('nas.local'), 'http://nas.local')
 		assert.equal(normalizeBackendUrl('HTTPS://nas.local'), 'https://nas.local')
+	})
+	test('a mistyped address gets a sentence, not Node’s "Invalid URL" (#446)', () => {
+		for (const input of ['my server', 'http://', '[::1', '@', 'http://a b']) {
+			assert.throws(() => normalizeBackendUrl(input), /That doesn’t look like an address\. Try something like 192\.168\.1\.50 or omarchy\.local/, input)
+		}
+		for (const input of ['192.168.1.5:abc', '192.168.1.5:99999', 'http://nas.local:abc/', '[fe80::1]:70000']) {
+			assert.throws(() => normalizeBackendUrl(input), /The port in that address isn’t right/, input)
+		}
+		assert.equal(normalizeBackendUrl('192.168.1.5:7780'), 'http://192.168.1.5:7780')
 	})
 })

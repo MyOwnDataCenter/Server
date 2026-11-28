@@ -9,11 +9,12 @@ import {applyPrefsUpdate, prefsAfterPhotoUpload} from '../photoPrefs'
 import {Appearance} from '../screens/More'
 import {Row, Segmented, Sheet, SheetHeader, SolidColors, Switch, customBackgroundUrl, haptic, preparePhoto, setLayoutPref, useLayout, useOmarchyThemes, useToast, wallpaperUrl, type Prefs} from '../ui'
 import {takeAppearanceFocus} from './settingsPage'
-import {solidOf, SYSTEM_DOCK, WALLPAPERS, useDeskConfig, wallpaperSrc, type DeskConfig, type DeskShell, type DockHover, type DockPos, DOCK_ICON_MAX, DOCK_ICON_MIN} from './config'
+import {solidOf, SYSTEM_DOCK, useDeskConfig, withTerminals, type DeskConfig, type DeskShell, type DockHover, type DockPos, DOCK_ICON_MAX, DOCK_ICON_MIN} from './config'
 import {DesktopStyleCards, ScreenLayoutCards} from '../LayoutPicker'
 import {CAPTURE_KEY, canUseKeyboardLock, coerceMode, keyboardLockApi, type CaptureMode} from './hyprland/grab'
 import {SnippetBlock} from './hyprland/Snippet'
 import {DESKTOP_KEY, useDesktop, useItems, type ItemInfo} from './Desktop'
+import {placeableKeys} from './places'
 
 const FOCUS: Record<string, string> = {layout: 'appearance-layout', dock: 'appearance-dock', desktop: 'appearance-desktop', themes: 'appearance-themes', background: 'appearance-background'}
 
@@ -22,6 +23,8 @@ export function Personalize({tab: initial, prefs, setPrefs, embedded, onOpenThem
 	const root = useRef<HTMLDivElement>(null)
 	const omarchyTheme = useOmarchyThemes(!!onOpenThemes)
 	const [cfg, setCfg] = useDeskConfig()
+	// The dock and desktop icons only exist in the desktop layout; on a phone they were confusing.
+	const desktop = useLayout().desktop
 	useEffect(() => {
 		let focus = initial ?? ''
 		try {
@@ -51,8 +54,8 @@ export function Personalize({tab: initial, prefs, setPrefs, embedded, onOpenThem
 						setPrefs={setPrefs}
 						wallpaper={user.data?.wallpaper}
 						onTheme={(id) => {
-							if (id !== 'custom') return
-							setCfg((c) => ({...c, preset: null, wallpaper: 'photo'}))
+							if (id === 'custom') setCfg((c) => ({...c, preset: null, wallpaper: 'photo'}))
+							if (id === 'omarchy') setCfg((c) => ({...c, preset: null, wallpaper: 'omarchy'}))
 						}}
 					/>
 					{onOpenThemes && (
@@ -72,21 +75,27 @@ export function Personalize({tab: initial, prefs, setPrefs, embedded, onOpenThem
 			<div id="appearance-background">
 				<Background cfg={cfg} setCfg={setCfg} prefs={prefs} setPrefs={setPrefs} />
 			</div>
-			<div id="appearance-dock">
-				<DockSettings cfg={cfg} setCfg={setCfg} />
-			</div>
-			<div id="appearance-desktop">
-				<DesktopSettings cfg={cfg} setCfg={setCfg} />
-			</div>
+			{desktop ? (
+				<>
+					<div id="appearance-dock">
+						<DockSettings cfg={cfg} setCfg={setCfg} />
+					</div>
+					<div id="appearance-desktop">
+						<DesktopSettings cfg={cfg} setCfg={setCfg} />
+					</div>
+				</>
+			) : (
+				<p className="footer-note pz-note">Dock and desktop icon settings are in the desktop layout. Choose Desktop under Layout above, or open My Own Data Center on a computer.</p>
+			)}
 		</div>
 	)
 }
 
 type P = {cfg: DeskConfig; setCfg: (fn: (c: DeskConfig) => DeskConfig) => void}
 
-function Section({title, note, children}: {title: string; note?: ReactNode; children: ReactNode}) {
+function Section({title, note, children, tight}: {title: string; note?: ReactNode; children: ReactNode; tight?: boolean}) {
 	return (
-		<section className="pz-section">
+		<section className={`pz-section${tight ? ' pz-tight' : ''}`}>
 			<div className="section-head">
 				<h2>{title}</h2>
 			</div>
@@ -123,16 +132,17 @@ function LayoutSettings({cfg, setCfg}: P) {
 	}
 	return (
 		<>
-			<Section title="Layout" note="Phone, desktop, or automatic. Automatic uses the desktop on a big screen with a pointer.">
-				<ScreenLayoutCards value={layout.pref} detected={layout.detected} onPick={setLayoutPref} />
+			<Section title="Layout" note="How this device shows the app." tight>
+				<ScreenLayoutCards value={layout.pref} detected={layout.detected} onPick={setLayoutPref} compact />
 			</Section>
-			<Section title="Shape" note="Round and Square change the corners on every screen. On the desktop, Round floats windows over a dock. Square tiles windows over a dock, with workspaces 1–9.">
+			<Section title="Shape" note="Corners on every screen. On the desktop, windows float or tile." tight>
 				<DesktopStyleCards<DeskShell>
 					value={cfg.shell ?? 'gnome'}
 					floating="gnome"
 					tiling="hyprland"
 					onPick={(v) => setCfg((c) => ({...c, shell: v}))}
 					onSquareReadme={() => setReadme(true)}
+					compact
 				/>
 			</Section>
 			<Sheet open={readme} onClose={() => setReadme(false)} label="Square">
@@ -221,7 +231,7 @@ function Background({cfg, setCfg, prefs, setPrefs}: P & {prefs: Prefs; setPrefs:
 	}
 	const on = (id: string) => !solid && cfg.wallpaper === id
 	return (
-		<Section title="Background" note="Pictures and solid colours behind the app and the desktop. Omarchy pictures are the ones from the Omarchy theme. The other photos are from the elementary OS collection (CC0, Unsplash and Pexels; credits in wallpapers/CREDITS.md).">
+		<Section title="Background" note="Pictures and solid colours behind the app and the desktop. Omarchy pictures are the ones from the Omarchy theme; you can also use the server wallpaper or upload your own photo.">
 			<OmarchyBackgrounds
 				bare
 				selected={on('omarchy') ? (prefs.omarchyBackground ?? null) : undefined}
@@ -231,14 +241,6 @@ function Background({cfg, setCfg, prefs, setPrefs}: P & {prefs: Prefs; setPrefs:
 				}}
 			/>
 			<div className="pz-grid walls">
-				{WALLPAPERS.map((w) => (
-					<button key={w.id} className={`pz-card wall-card${on(w.id) ? ' on' : ''}`} onClick={() => pick(w.id)} title={`${w.name} · ${w.by}`}>
-						<span className="pz-thumb" style={{backgroundImage: `url(${wallpaperSrc(w.id, true)})`}}>
-							{on(w.id) && <Icon name="check" size={16} stroke={3} className="pz-check" />}
-						</span>
-						<b>{w.name}</b>
-					</button>
-				))}
 				<button className={`pz-card wall-card${on('server') ? ' on' : ''}`} onClick={() => pick('server')}>
 					<span className="pz-thumb" style={{backgroundImage: serverWall ? `url(${serverWall})` : undefined}}>
 						{on('server') && <Icon name="check" size={16} stroke={3} className="pz-check" />}
@@ -288,7 +290,7 @@ function DockSettings({cfg, setCfg}: P) {
 		;[items[i], items[j]] = [items[j], items[i]]
 		set({items})
 	}
-	const candidates = allKeys(appList, machineList, owner).filter((k) => !d.items.includes(k))
+	const candidates = withTerminals(placeableKeys(appList, machineList, owner), owner).filter((k) => !withTerminals(d.items, owner).includes(k))
 	return (
 		<>
 			<Section title="Position">
@@ -379,9 +381,11 @@ function DockSettings({cfg, setCfg}: P) {
 								<button className="icon-btn" aria-label={`Move ${it.label} down`} disabled={i === d.items.length - 1} onClick={() => move(k, 1)}>
 									<Icon name="chevron-down" size={16} />
 								</button>
-								<button className="icon-btn danger-x" aria-label={`Remove ${it.label} from the dock`} onClick={() => set({items: d.items.filter((x) => x !== k)})}>
-									<Icon name="close" size={15} stroke={2.4} />
-								</button>
+								{k !== 'terminals' && (
+									<button className="icon-btn danger-x" aria-label={`Remove ${it.label} from the dock`} onClick={() => set({items: d.items.filter((x) => x !== k)})}>
+										<Icon name="close" size={15} stroke={2.4} />
+									</button>
+								)}
 							</div>
 						)
 					})}
@@ -446,7 +450,7 @@ function DesktopSettings({cfg, setCfg}: P) {
 			</Section>
 			<Section title="Choose icons" note="Double-click an icon to open it. Drag icons to arrange them, drag across the desktop to select several, and press Delete to remove the selected icons (only the shortcut is removed). A stopped machine starts when you open it.">
 				<ItemPicker
-					keys={allKeys(appList, machineList, owner, true)}
+					keys={withTerminals(placeableKeys(appList, machineList, owner, true), owner)}
 					info={info}
 					selected={onDesk}
 					onPick={(k) => (onDesk.has(k) ? desk?.removeIcon(k) : desk?.addIcon(k))}
@@ -454,18 +458,6 @@ function DesktopSettings({cfg, setCfg}: P) {
 			</Section>
 		</>
 	)
-}
-
-function allKeys(appList: {id: string; name?: string}[], machineList: {id: string}[], owner: boolean, folders = false) {
-	return [
-		...(folders ? ['folder:/Home', 'folder:/Trash'] : []),
-		...SYSTEM_DOCK.filter((k) => k !== 'terminal' || owner),
-		'assistant',
-		'personalize',
-		...[...appList].sort((a, b) => (a.name ?? a.id).localeCompare(b.name ?? b.id)).map((a) => `app:${a.id}`),
-		...(owner ? [DESKTOP_KEY] : []),
-		...machineList.map((m) => `machine:${m.id}`),
-	]
 }
 
 function ItemPicker({keys, info, selected, onPick, actionLabel}: {keys: string[]; info: (k: string) => ItemInfo; selected?: Set<string>; onPick: (k: string) => void; actionLabel?: string}) {

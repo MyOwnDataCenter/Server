@@ -62,6 +62,7 @@ test('#607: --help and -h after any command print help to stdout, exit 0, and ru
 		['logs', '--help'],
 		['uninstall', '--help'],
 		['uninstall', '--purge', '--help'],
+		['reset-password', '--help'],
 	]
 	for (const args of cases) {
 		const r = runCli(box, args)
@@ -119,14 +120,14 @@ test('#607: logs handles -f, --follow, -n, --lines, and --since', async () => {
 
 	const lines = (await readLog(box)).trim().split('\n')
 	assert.deepEqual(lines, [
-		'journalctl --user -u omarchyd -u omarchy-server-web -n 80 --no-pager',
-		'journalctl --user -u omarchyd -u omarchy-server-web -f',
-		'journalctl --user -u omarchyd -u omarchy-server-web -f',
-		'journalctl --user -u omarchyd -u omarchy-server-web -n 200 --no-pager',
-		'journalctl --user -u omarchyd -u omarchy-server-web -n 200 --no-pager',
-		'journalctl --user -u omarchyd -u omarchy-server-web -n 200 --no-pager',
-		'journalctl --user -u omarchyd -u omarchy-server-web --since today --no-pager',
-		'journalctl --user -u omarchyd -u omarchy-server-web -n 50 -f',
+		'journalctl --user -u omarchyd -u omarchy-server-web -u omarchy-server-desktop -u omarchy-server-desktop-now -n 80 --no-pager',
+		'journalctl --user -u omarchyd -u omarchy-server-web -u omarchy-server-desktop -u omarchy-server-desktop-now -f',
+		'journalctl --user -u omarchyd -u omarchy-server-web -u omarchy-server-desktop -u omarchy-server-desktop-now -f',
+		'journalctl --user -u omarchyd -u omarchy-server-web -u omarchy-server-desktop -u omarchy-server-desktop-now -n 200 --no-pager',
+		'journalctl --user -u omarchyd -u omarchy-server-web -u omarchy-server-desktop -u omarchy-server-desktop-now -n 200 --no-pager',
+		'journalctl --user -u omarchyd -u omarchy-server-web -u omarchy-server-desktop -u omarchy-server-desktop-now -n 200 --no-pager',
+		'journalctl --user -u omarchyd -u omarchy-server-web -u omarchy-server-desktop -u omarchy-server-desktop-now --since today --no-pager',
+		'journalctl --user -u omarchyd -u omarchy-server-web -u omarchy-server-desktop -u omarchy-server-desktop-now -n 50 -f',
 	])
 })
 
@@ -218,4 +219,40 @@ test('#556: widget on and off keep a symlinked top-bar file as a symlink', async
 	assert.equal((await lstat(link)).isSymbolicLink(), true, 'widget off must not replace the symlink')
 	assert.equal(await readlink(link), dots)
 	assert.doesNotMatch(await readFile(dots, 'utf8'), /omarchy-server/)
+})
+
+test('#565: logs include the desktop screen-sharing (wayvnc) units the failed-desktop message sends people to', async () => {
+	const box = await makeSandbox('logs-desktop')
+	assert.equal(runCli(box, ['logs']).status, 0)
+	const line = (await readLog(box)).trim()
+	assert.match(line, /-u omarchy-server-desktop /)
+	assert.match(line, /-u omarchy-server-desktop-now /)
+})
+
+test('#919: reset-password stops omarchyd, runs the backend’s reset with the unit’s node and data, and starts it again', async () => {
+	const box = await makeSandbox('reset-password', {systemctl: 'echo "systemctl $*" >>"$FAKE_LOG"\n[ "$2" = is-active ] && exit 0\nexit 0'})
+	const units = join(box.home, '.config', 'systemd', 'user')
+	await mkdir(units, {recursive: true})
+	const fakeNode = join(box.bin, 'unit-node')
+	await writeFile(fakeNode, '#!/bin/sh\necho "node $*" >>"$FAKE_LOG"\nexit 3\n')
+	await chmod(fakeNode, 0o755)
+	await writeFile(join(units, 'omarchyd.service'), `[Service]\nExecStart=${fakeNode} /app/omarchyd/cli.mjs serve --port 2021 --web-port 7780 --data /data/omarchyd\n`)
+	const r = runCli(box, ['reset-password', '--name', 'Ada'])
+	const log = await readLog(box)
+	assert.notEqual(r.status, 0, 'a failed reset is not reported as success')
+	const stop = log.indexOf('systemctl --user stop omarchyd.service')
+	const start = log.indexOf('systemctl --user start omarchyd.service')
+	assert.ok(stop >= 0 && start > stop, `stops first and starts again even after a failure:\n${log}`)
+	// Without a terminal the reset itself cannot run (it reads from /dev/tty); with one it gets these arguments.
+	if (log.includes('node ')) assert.match(log, /node \/app\/omarchyd\/cli\.mjs reset-password --name Ada --data \/data\/omarchyd/)
+})
+
+test('#919: reset-password without an installed backend, or with an unknown option, runs nothing', async () => {
+	const box = await makeSandbox('reset-password-missing')
+	const missing = runCli(box, ['reset-password'])
+	assert.equal(missing.status, 1)
+	assert.match(missing.stderr, /Can't find the MODC backend service/)
+	const bad = runCli(box, ['reset-password', '--bogus'])
+	assert.equal(bad.status, 2)
+	assert.equal(await readLog(box), '')
 })

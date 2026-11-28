@@ -88,3 +88,43 @@ test('uninstall on a Mac removes the LaunchAgent and the connector without sudo'
 	await assert.rejects(access(join(home, 'Library/LaunchAgents/org.myowndatacenter.connector.plist')))
 	await assert.rejects(access(join(home, '.local/share/omarchy-connector')))
 })
+
+test('on a Mac it skips LibreSSL 2.8 python3 on PATH and uses Homebrew OpenSSL Python for enroll and LaunchAgent', {skip}, async () => {
+	const home = join(root, 'mac-libressl')
+	const brewPrefix = join(root, 'fake-brew')
+	await mkdir(home)
+	await mkdir(join(brewPrefix, 'bin'), {recursive: true})
+	const bin = await stubs()
+	// Replace PATH python3 with one that mimics Apple's LibreSSL 2.8.3 /usr/bin/python3.
+	await writeFile(
+		join(bin, 'python3'),
+		`#!/bin/bash
+if [[ "$*" == *"OPENSSL_VERSION"* ]]; then
+  exec /usr/bin/python3 -c 'import ssl, sys; ssl.OPENSSL_VERSION = "LibreSSL 2.8.3"; exec(sys.argv[1])' "$2"
+fi
+echo "wrong-python3 $*" >>"$FAKE_LOG"
+exit 1
+`,
+	)
+	await chmod(join(bin, 'python3'), 0o755)
+	// Fake brew pointing at a Homebrew OpenSSL Python (python3.14, not shadowing python3).
+	await writeFile(join(bin, 'brew'), `#!/bin/bash\n[ "$1" = "--prefix" ] && { echo "${brewPrefix}"; exit 0; }\nexit 0\n`)
+	await chmod(join(bin, 'brew'), 0o755)
+	const brewPy = join(brewPrefix, 'bin', 'python3.14')
+	await writeFile(
+		brewPy,
+		`#!/bin/bash
+if [ "$2" = enroll ]; then echo "brew-enroll $*" >>"$FAKE_LOG"; echo "Nate's Mac Studio"; exit 0; fi
+exec /usr/bin/python3 "$@"
+`,
+	)
+	await chmod(brewPy, 0o755)
+
+	const r = install(home, bin, ['--server', 'https://100.68.115.94:7780', '--ca', CA, '--token', 'abc123', '--allow', 'terminal,files'])
+	assert.equal(r.status, 0, r.out)
+	const log = await readFile(r.log, 'utf8')
+	assert.doesNotMatch(log, /wrong-python3/)
+	assert.match(log, /brew-enroll .* enroll https:\/\/100\.68\.115\.94:7780 abc123 terminal,files$/m)
+	const plist = await readFile(join(home, 'Library/LaunchAgents/org.myowndatacenter.connector.plist'), 'utf8')
+	assert.ok(plist.includes(`<string>${brewPy}</string>`), plist)
+})

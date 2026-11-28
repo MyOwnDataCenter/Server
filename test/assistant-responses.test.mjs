@@ -121,7 +121,7 @@ test('a Responses key streams its turn through /responses and saves the reply', 
 		const events = []
 		const out = await asst.runTurn({userId: 'owner', role: 'owner', message: 'hi', emit: (e) => events.push(e)})
 		assert.deepEqual(urls, ['https://api.openai.com/v1/responses'])
-		assert.deepEqual(events.map((e) => e.event), ['text', 'done'])
+		assert.deepEqual(events.map((e) => e.event), ['speaker', 'text', 'done'])
 		const saved = JSON.parse(await readFile(join(dataDir, 'assistant', 'conversations', `${out.conversationId}.json`), 'utf8'))
 		assert.equal(saved.messages.at(-1).content, 'Hello')
 	} finally {

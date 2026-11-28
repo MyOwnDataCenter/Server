@@ -1,6 +1,6 @@
 import {createChatGpt} from './assistant/chatgpt.mjs'
 import {createConversations} from './assistant/conversations.mjs'
-import {createKeyStore, normalizeBaseUrl, presetBaseUrl} from './assistant/keys.mjs'
+import {createKeyStore, customBasePermitted, normalizeBaseUrl, presetBaseUrl} from './assistant/keys.mjs'
 import {createLoop, publicAction} from './assistant/loop.mjs'
 import {callMcpTool} from './assistant/mcp.mjs'
 import {verifyKey} from './assistant/providers.mjs'
@@ -326,6 +326,14 @@ export function createAssistant({dataDir, accounts, now, runProcedure, fetchImpl
 				keyId: body.keyId ? String(body.keyId) : undefined,
 				signal: ac.signal,
 				emit,
+				// A new chat has no id until its first message is saved. From then on the chat is taken.
+				onConversation: (id) => {
+					if (lock) return
+					const key = `${who.userId}\u0000${id}`
+					if (turning.has(key)) return
+					turning.set(key, ac)
+					lock = key
+				},
 			})
 			if (timedOut) emit({event: 'error', data: {message: 'The assistant stopped answering, so this reply was cut off. Try again.', ...(out?.conversationId ? {conversationId: out.conversationId} : {})}})
 		} finally {
@@ -351,7 +359,7 @@ export function createAssistant({dataDir, accounts, now, runProcedure, fetchImpl
 			// and a custom address follows the same owner-only rule as adding one. The check isn't recorded.
 			const newKey = typeof input.apiKey === 'string' && input.apiKey.trim() ? input.apiKey.trim() : null
 			const newUrl = typeof input.baseUrl === 'string' && input.baseUrl.trim() ? input.baseUrl.trim() : null
-			if (!newKey && !newUrl) return {id: k.id, provider: k.provider, baseUrl: k.baseUrl, apiKey: k.apiKey, model: k.model, updatedAt: k.updatedAt}
+			if (!newKey && !newUrl) return {id: k.id, ownerUserId: k.ownerUserId, provider: k.provider, baseUrl: k.baseUrl, apiKey: k.apiKey, model: k.model, updatedAt: k.updatedAt}
 			if (k.ownerUserId !== who.userId) throw new RpcError('FORBIDDEN', 'Only the person who added this key can change it')
 			if (newKey && newKey.length > 512) throw new RpcError('BAD_REQUEST', 'Enter an API key')
 			let baseUrl = k.baseUrl
@@ -360,14 +368,14 @@ export function createAssistant({dataDir, accounts, now, runProcedure, fetchImpl
 				baseUrl = normalizeBaseUrl(newUrl)
 				if (!/^https?:\/\/[^\s]+$/i.test(baseUrl) || baseUrl.length > 200) throw new RpcError('BAD_REQUEST', 'Enter the API base URL')
 			}
-			return {id: null, provider: k.provider, baseUrl, apiKey: newKey ?? k.apiKey, model: k.model}
+			return {id: null, ownerUserId: k.ownerUserId, provider: k.provider, baseUrl, apiKey: newKey ?? k.apiKey, model: k.model}
 		}
 		const provider = String(input?.provider ?? '')
 		let baseUrl = presetBaseUrl(provider)
 		if (!baseUrl) {
 			if (provider !== 'openai-compatible') throw new RpcError('BAD_REQUEST', 'Choose a provider')
 			// Same rule as adding one: a typed address can point anywhere the server reaches.
-			if (who.role !== 'owner') throw new RpcError('FORBIDDEN', 'Only the server’s owner can add a custom endpoint')
+			if (!customBasePermitted(who.role, input?.baseUrl)) throw new RpcError('FORBIDDEN', 'Only the server’s owner can add a custom endpoint')
 			baseUrl = normalizeBaseUrl(input?.baseUrl)
 			if (!/^https?:\/\/[^\s]+$/i.test(baseUrl) || baseUrl.length > 200) throw new RpcError('BAD_REQUEST', 'Enter the API base URL')
 		}
@@ -377,11 +385,15 @@ export function createAssistant({dataDir, accounts, now, runProcedure, fetchImpl
 	}
 	// Live check: is the endpoint there, does it take the key, which models does it serve.
 	async function verify(input, {auth}) {
+		const who = actor(auth)
 		const ep = await endpointFor(input, auth)
 		const result = await verifyKey({...ep, fetchImpl})
 		const check = {ok: result.ok, status: result.status, message: result.message}
 		if (ep.id) await keys.recordCheck(ep.id, check, {updatedAt: ep.updatedAt, apiKey: ep.apiKey, model: ep.model, baseUrl: ep.baseUrl})
-		return {...check, modelFound: result.modelFound, models: result.models, at: stamp()}
+		const own = !ep.ownerUserId || ep.ownerUserId === who.userId
+		// The stored check can name the address for the person who added it. Someone else only hears that it failed.
+		const shown = own || check.ok ? check : {ok: false, status: check.status, message: check.status === 'rejected' ? check.message : 'That provider did not answer.'}
+		return {...shown, modelFound: own ? result.modelFound : null, models: own ? result.models : [], at: stamp()}
 	}
 	return {
 		keys,
@@ -394,6 +406,9 @@ export function createAssistant({dataDir, accounts, now, runProcedure, fetchImpl
 			'assistant.keys': {kind: 'query', run: (_i, {auth}) => keys.listPublic(auth.userId)},
 			'assistant.addKey': {kind: 'mutation', run: (input, {auth}) => keys.add(actor(auth), input)},
 			'assistant.updateKey': {kind: 'mutation', run: (input, {auth}) => keys.update(actor(auth), input)},
+			'assistant.reorderKeys': {kind: 'mutation', run: (input, {auth}) => keys.reorder(actor(auth), input?.ids)},
+			'assistant.clearDefault': {kind: 'mutation', run: (_i, {auth}) => keys.clearDefault(actor(auth))},
+			'assistant.useServerDefault': {kind: 'mutation', run: (input, {auth}) => keys.useServerDefault(actor(auth), input?.use !== false)},
 			'assistant.verifyKey': {kind: 'mutation', run: verify},
 			'assistant.removeKey': {
 				kind: 'mutation',

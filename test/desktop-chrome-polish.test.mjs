@@ -6,7 +6,8 @@ import {test} from 'node:test'
 const CSS = readFileSync(new URL('../web/src/styles.css', import.meta.url), 'utf8')
 const UI = readFileSync(new URL('../web/src/ui.tsx', import.meta.url), 'utf8')
 const DESKTOP = readFileSync(new URL('../web/src/desktop/Desktop.tsx', import.meta.url), 'utf8')
-const CLIPS = readFileSync(new URL('../web/src/screens/Clips.tsx', import.meta.url), 'utf8')
+// Delete lives on the shared book. screens/Clips.tsx only mounts that book.
+const CLIP_BOOK = readFileSync(new URL('../web/src/clips/ClipBook.tsx', import.meta.url), 'utf8')
 
 test('top-bar button rules are scoped to bar triggers and do not clobber popover controls or workspace pills', () => {
 	assert.doesNotMatch(CSS, /\n\.desk-top button \{/)
@@ -62,5 +63,5 @@ test('row hover targets actionable rows and preserves :active press state', () =
 
 test('field textareas are styled and Clips buttons are spaced cleanly', () => {
 	assert.match(CSS, /\.field input,\n\.field textarea \{/)
-	assert.match(CLIPS, /btn block danger/)
+	assert.match(CLIP_BOOK, /btn block danger/)
 })

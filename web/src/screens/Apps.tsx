@@ -9,6 +9,7 @@ import {machineCountLabel} from '../fleet/installTargets'
 import {PinButton} from '../fleet/PinButton'
 import {Icon} from '../icons'
 import {AppIcon, Segmented, StatusPill, StoreIcon, appStatus, haptic, isAppBusy, useConfirm} from '../ui'
+import {plural} from '../plural'
 
 type Filter = 'all' | 'running' | 'stopped' | 'updates'
 
@@ -100,7 +101,7 @@ export function Apps({onOpenApp, onStore}: {onOpenApp: (app: UserApp) => void; o
 					</button>
 				</div>
 			)}
-			<SearchField value={q} onChange={setQ} placeholder={`Search ${list.length} apps`} />
+			<SearchField value={q} onChange={setQ} placeholder={`Search ${plural(list.length, 'app')}`} />
 			<Segmented value={filter} options={segments} onChange={setFilter} label="Filter apps" />
 			{filter === 'updates' && counts.updates > 1 && (
 				<button className="btn primary block" style={{marginBottom: 14}} onClick={updateAll} disabled={action.isPending}>
@@ -109,7 +110,7 @@ export function Apps({onOpenApp, onStore}: {onOpenApp: (app: UserApp) => void; o
 				</button>
 			)}
 			{apps.isLoading ? (
-				<div className="glass group">
+				<div className="glass group screen-list">
 					{Array.from({length: 6}, (_, i) => (
 						<div key={i} className="row static">
 							<div className="skeleton" style={{width: 46, height: 46, borderRadius: 12}} />
@@ -128,13 +129,29 @@ export function Apps({onOpenApp, onStore}: {onOpenApp: (app: UserApp) => void; o
 			) : shown.length === 0 ? (
 				<div className="glass empty">
 					<span className="big">
-						<Icon name={q ? 'search' : 'check'} size={30} />
+						<Icon name={needle ? 'search' : filter === 'updates' ? 'check' : 'store'} size={30} />
 					</span>
-					<b>{needle ? 'No matches' : filter === 'updates' ? 'All up to date' : 'Nothing here'}</b>
+					<b>{needle ? 'No matches' : filter === 'updates' ? 'All up to date' : list.length === 0 ? 'No apps yet' : 'Nothing here'}</b>
 					{needle && <span>No apps match “{q.trim()}”.</span>}
+					{!needle && filter === 'all' && list.length === 0 && onStore && (
+						<>
+							<span>Find something to run on your machines.</span>
+							<button
+								type="button"
+								className="btn primary"
+								style={{marginTop: 12}}
+								onClick={() => {
+									haptic(6)
+									onStore()
+								}}
+							>
+								Find apps
+							</button>
+						</>
+					)}
 				</div>
 			) : (
-				<div className="glass group" style={{'--inset': '74px'} as CSSProperties}>
+				<div className="glass group screen-list" style={{'--inset': '74px'} as CSSProperties}>
 					{groups.map((group) => {
 						const app = list.find((a) => a.id === group.appId)
 						if (!app) return null
@@ -158,7 +175,7 @@ export function Apps({onOpenApp, onStore}: {onOpenApp: (app: UserApp) => void; o
 										<b>
 											{app.name ?? app.id}
 											{count && (
-												<span className="muted" style={{marginLeft: 6, fontSize: 12, fontWeight: 650}} aria-label={`On ${count} machines`}>
+												<span className="count-machines" style={{marginLeft: 6, fontSize: 12}} aria-label={`On ${count} machines`}>
 													{count}
 												</span>
 											)}

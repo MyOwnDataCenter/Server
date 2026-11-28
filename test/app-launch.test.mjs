@@ -87,7 +87,9 @@ describe('apps.probe', () => {
 			const s = secure ? https.createServer(secure, handler) : http.createServer(handler)
 			s.listen(internalPort, '127.0.0.1', () => resolve(s))
 		})
-	const GRACE = 600
+	// Longer than the list's own web check (800 ms). A firewall that drops a closed port, instead of
+	// refusing it, makes that check use the whole 800 ms. A shorter grace would already call the app stopped.
+	const GRACE = 3_000
 
 	before(async () => {
 		root = await mkdtemp(join(os.tmpdir(), 'omarchyd-launch-'))

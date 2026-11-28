@@ -25,7 +25,11 @@ body:
     id: where
     attributes:
       label: Where
-      options: [Phone or tablet layout, Desktop layout, The server itself (install, services), Not sure]
+      options:
+        - Phone or tablet layout
+        - Desktop layout
+        - The server itself (install, services)
+        - Not sure
   - type: input
     id: machine
     attributes:

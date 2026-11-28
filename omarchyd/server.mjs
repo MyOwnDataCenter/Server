@@ -1,7 +1,7 @@
 // omarchyd: the My Own Data Center backend. It listens on localhost only; the Touch web server in front
 // of it is the one thing that faces the network. Runs as the owner's own user, not root.
 import {execFile} from 'node:child_process'
-import {mkdir, readFile, readdir, realpath, rm, stat, writeFile} from 'node:fs/promises'
+import {lstat, mkdir, readFile, readdir, readlink, realpath, rm, stat, symlink, unlink, writeFile} from 'node:fs/promises'
 import {randomBytes} from 'node:crypto'
 import http from 'node:http'
 import {fileURLToPath} from 'node:url'
@@ -15,15 +15,18 @@ import {createAssistant} from './assistant.mjs'
 import {createBackups} from './backups.mjs'
 import {createUnraid} from './unraid.mjs'
 import {APP_COOKIE, createApps} from './apps.mjs'
-import {createFiles} from './files.mjs'
+import {contentDisposition, createFiles} from './files.mjs'
 import {createFileTransfer} from './file-transfer.mjs'
 import {installTargetId} from './install-target.mjs'
 import {fileUrl, localGitDir} from './local-source.mjs'
 import {createMachines} from './machines.mjs'
+import {createContainers} from './containers.mjs'
 import {createOmarchyTheme} from './omarchy-theme.mjs'
 import {createOmarchyPlugins} from './omarchy-plugins.mjs'
 import {createClips} from './clips.mjs'
-import {createConnector} from './connector.mjs'
+import {createToasts} from './toasts.mjs'
+import {createTransfers} from './transfers.mjs'
+import {closeReason, createConnector} from './connector.mjs'
 import {createStorage} from './storage.mjs'
 import {createUsb, listHostUsb} from './usb.mjs'
 import {createTerminalSessions, createTmux} from './terminal.mjs'
@@ -35,13 +38,18 @@ import {createOidc} from './oidc.mjs'
 import {createHyprland} from './hyprland.mjs'
 import {authorityInfo, readPolicy, rotateAuthority, tlsContext, writePolicy} from './tls.mjs'
 import {RpcError, handleRpc, sendError, sendJson} from './rpc.mjs'
+import {createHermes} from './hermes.mjs'
 import * as system from './system.mjs'
 import {createSampler} from './stats.mjs'
+import {createOsInfo} from './os-info.mjs'
 import {WebSocketServer} from 'ws'
+import {viewerBackpressure} from './backpressure.mjs'
 
-export const OMARCHYD_VERSION = '0.9.76'
+export const OMARCHYD_VERSION = '0.9.108'
+// Written by install.sh when the owner turns on unattended boot: the disk then unlocks itself at boot.
+export const UNATTENDED_BOOT_CONF = '/etc/mkinitcpio.conf.d/zz-modc-unattended.conf'
 
-export async function startOmarchyd({port = 2021, host = '127.0.0.1', dataDir, tlsDir: sharedTlsDir = null, home = os.homedir(), webPort = 7780, machineOptions = {}, appOptions = {}, storageOptions = {}, updaterOptions = {}, pluginOptions = {}, themeOptions = {}, assistantOptions = {}, usbOptions = {}, backupOptions = {}, unraidOptions = {}, tailscaleOptions = {}, oidcOptions = {}, connectOptions = {}, hyprlandOptions = {}, terminalTmux = process.env.NODE_TEST_CONTEXT ? null : undefined, desktopVncPort = 5900, desktopVncSocket = join(process.env.XDG_RUNTIME_DIR || `/run/user/${process.getuid?.() ?? ''}`, 'omarchy-server', 'desktop-vnc.sock')}) {
+export async function startOmarchyd({port = 2021, host = '127.0.0.1', dataDir, tlsDir: sharedTlsDir = null, home = os.homedir(), webPort = 7780, machineOptions = {}, containerOptions = {}, appOptions = {}, storageOptions = {}, updaterOptions = {}, pluginOptions = {}, themeOptions = {}, assistantOptions = {}, usbOptions = {}, backupOptions = {}, unraidOptions = {}, tailscaleOptions = {}, oidcOptions = {}, connectOptions = {}, hyprlandOptions = {}, terminalTmux = process.env.NODE_TEST_CONTEXT ? null : undefined, desktopVncPort = 5900, viewerStallMs = undefined, desktopVncSocket = join(process.env.XDG_RUNTIME_DIR || `/run/user/${process.getuid?.() ?? ''}`, 'omarchy-server', 'desktop-vnc.sock')}) {
 	const sourceDir = localGitDir('OMARCHY_SERVER_SOURCE', process.env.OMARCHY_SERVER_SOURCE)
 	const storeDir = localGitDir('OMARCHY_SERVER_APP_STORE', process.env.OMARCHY_SERVER_APP_STORE)
 	const appDir = fileURLToPath(new URL('..', import.meta.url))
@@ -76,7 +84,36 @@ export async function startOmarchyd({port = 2021, host = '127.0.0.1', dataDir, t
 	const files = createFiles({home, dataDir})
 	const defaultStores = storeDir ? [{url: fileUrl(storeDir)}] : undefined
 	const catalogUrl = storeDir ? fileUrl(join(storeDir, 'machines', 'catalog.json')) : undefined
-	const machines = createMachines({dataDir, files, ...(catalogUrl ? {catalogUrl} : {}), ...machineOptions})
+	let connector
+	// Filled in once usb exists: removing an app or machine takes its attached sticks' udev rules out.
+	let usbReleased = async () => {}
+	const machines = createMachines({
+		dataDir,
+		files,
+		usbReleased: (devices) => usbReleased(devices),
+		...(catalogUrl ? {catalogUrl} : {}),
+		isOwner: (ctx) => accounts.getUser(ctx?.auth?.userId)?.role !== 'member',
+		connector: {
+			pair: (input) => connector.procedures['swarm.pair'].run(input),
+			list: () => connector.procedures['swarm.list'].run(),
+			call: (id, name, args, timeout) => connector.call(id, name, args, timeout),
+			progress: (id) => connector.progress(id),
+		},
+		...machineOptions,
+	})
+	// Containers (LXC through per-user Incus): list/status for everyone; Incus mutations owner-only.
+	// Connector install uses the local swarm (bound below once createConnector runs).
+	const containers = createContainers({
+		reservedPorts: [port, webPort],
+		backupsDir: join(dataDir, 'container-backups'),
+		files,
+		connector: {
+			pair: (input) => connector.procedures['swarm.pair'].run(input),
+			list: () => connector.procedures['swarm.list'].run(),
+			caCertificate: () => connector.caCertificate(),
+		},
+		...containerOptions,
+	})
 	const storage = createStorage({dataDir, home, files, ...storageOptions})
 	const updater = createUpdater({appDir, dataDir, currentVersion: OMARCHYD_VERSION, webPort, ...(sourceDir ? {sourceDir} : {}), ...(storeDir ? {appStoreDir: storeDir} : {}), ...updaterOptions})
 	// One certificate context for the app gateways and the Security settings. On a server this is
@@ -88,6 +125,8 @@ export async function startOmarchyd({port = 2021, host = '127.0.0.1', dataDir, t
 	const secure = appOptions.secure ?? tlsContext({dir: tlsDir, lazy: true})
 	// Apps that are part of the server itself (Tailscale), installed through the root helper.
 	const systemApps = appOptions.systemApps !== undefined ? appOptions.systemApps || null : createSystemApps({helper: storage.helper})
+	const oidc = createOidc({dataDir, accounts, ...oidcOptions})
+	const tailscale = createTailscale({...tailscaleOptions})
 	// The connector is created later. These bindings are filled in once it exists, so an install
 	// aimed at another machine is forwarded there instead of running on this server.
 	let forwardInstall = async () => {
@@ -104,16 +143,17 @@ export async function startOmarchyd({port = 2021, host = '127.0.0.1', dataDir, t
 		systemApps,
 		tlsDir,
 		secure,
+		usbReleased: (devices) => usbReleased(devices),
 		forwardInstall: (...args) => forwardInstall(...args),
 		remoteApps: () => remoteApps(),
+		oidc,
+		getTailscaleStatus: () => tailscale.procedures['tailscale.status'].run().catch(() => null),
 	})
 	// Backups need apps: to pause them while their files are saved, and to know where those files are.
 	// …and the local swarm's connector (created further down), for computers that back up here.
 	const backups = createBackups({dataDir, home, files, apps, swarm: {agents: () => connector.backup.agents(), call: (...a) => connector.backup.call(...a), progress: (id) => connector.backup.progress(id)}, ...backupOptions})
 	// Move from Unraid: its shares, containers and VMs, brought over SSH.
 	const unraid = createUnraid({dataDir, files, apps, machines, storage, ...unraidOptions})
-	const tailscale = createTailscale({...tailscaleOptions})
-	const oidc = createOidc({dataDir, accounts, ...oidcOptions})
 	// MODC Connect: this installation paired with the owner's myowndatacenter.com account. Only check-ins
 	// for now; it opens nothing. Tests never reach the website unless they pass their own fetch.
 	const connect = createConnect({dataDir, accounts, version: OMARCHYD_VERSION, ...(process.env.NODE_TEST_CONTEXT ? {autoStart: false, fetchImpl: async () => Promise.reject(Object.assign(new Error('offline in tests'), {code: 'ENOTFOUND'})), tunnelOptions: {unitDir: join(dataDir, 'test-units'), systemPaths: [], sh: async () => ({ok: false, code: 1, out: '', err: ''})}, ssoOptions: {post: async () => Promise.reject(new Error('offline in tests'))}} : {}), ...connectOptions})
@@ -128,6 +168,7 @@ export async function startOmarchyd({port = 2021, host = '127.0.0.1', dataDir, t
 		},
 		helper: (verb, args) => storage.helper(verb, args),
 	})
+	usbReleased = usb.release
 	// Console tickets: single-use, 30 seconds, for the WebSocket bridge (same contract as before).
 	const tickets = new Map()
 	const hyprSocketsBySession = new Map() // sessionId -> Set<WebSocket>
@@ -182,6 +223,7 @@ export async function startOmarchyd({port = 2021, host = '127.0.0.1', dataDir, t
 		hyprSseBySession.clear()
 	}
 	const release = await system.osRelease()
+	const osInfo = createOsInfo({release})
 	const settings = {hostname: os.hostname()}
 
 	// Live gauges: hardware is sampled on its own interval while a screen is reading.
@@ -209,6 +251,8 @@ export async function startOmarchyd({port = 2021, host = '127.0.0.1', dataDir, t
 
 	// Assigned after the connector exists. Factory reset closes over this binding.
 	let clips
+	let toasts
+	let transfers
 	const ownerOnly = (auth, what = 'change the desktop’s theme') => {
 		if (accounts.getUser(auth.userId)?.role === 'member') throw new RpcError('FORBIDDEN', `Only the server’s owner can ${what}`)
 	}
@@ -263,9 +307,9 @@ export async function startOmarchyd({port = 2021, host = '127.0.0.1', dataDir, t
 		'omarchy.plugins': {kind: 'query', run: (input) => themeCall(() => omarchyPlugins.list(input ?? {}))},
 		// Local swarm (connector.mjs): owner only.
 		...Object.fromEntries(
-			['swarm.list', 'swarm.history', 'swarm.alerts', 'swarm.wake', 'swarm.pair', 'swarm.reauthorize', 'swarm.updateConnector', 'swarm.updateAllConnectors', 'swarm.remove', 'swarm.rename', 'swarm.setAbilities', 'swarm.action', 'swarm.desktopCheck', 'swarm.storage.status', 'swarm.storage.disks', 'swarm.storage.pools', 'swarm.storage.importable', 'swarm.storage.unmount', 'swarm.storage.mount', 'swarm.storage.format', 'swarm.storage.createPool', 'swarm.storage.addToPool', 'swarm.storage.importPool', 'swarm.storage.forgetPool', 'swarm.storage.scrub', 'swarm.storage.setSleep', 'swarm.services.list', 'swarm.services.logs', 'swarm.services.control', 'swarm.files.list', 'swarm.files.recents', 'swarm.files.mkdir', 'swarm.files.rename', 'swarm.files.trash', 'swarm.files.copyToServer', 'swarm.files.copyFromServer'].map((name) => [
+			['swarm.list', 'swarm.history', 'swarm.alerts', 'swarm.wake', 'swarm.pair', 'swarm.reauthorize', 'swarm.updateConnector', 'swarm.updateAllConnectors', 'swarm.remove', 'swarm.rename', 'swarm.setAbilities', 'swarm.action', 'swarm.desktopCheck', 'swarm.storage.status', 'swarm.vms.status', 'swarm.storage.disks', 'swarm.storage.pools', 'swarm.storage.importable', 'swarm.storage.unmount', 'swarm.storage.mount', 'swarm.storage.format', 'swarm.storage.createPool', 'swarm.storage.addToPool', 'swarm.storage.importPool', 'swarm.storage.forgetPool', 'swarm.storage.scrub', 'swarm.storage.setSleep', 'swarm.services.list', 'swarm.services.logs', 'swarm.services.control', 'swarm.files.list', 'swarm.files.recents', 'swarm.files.mkdir', 'swarm.files.rename', 'swarm.files.trash', 'swarm.files.copyToServer', 'swarm.files.copyFromServer'].map((name) => [
 				name,
-				{kind: ['swarm.list', 'swarm.history', 'swarm.alerts', 'swarm.desktopCheck', 'swarm.storage.status', 'swarm.storage.disks', 'swarm.storage.pools', 'swarm.storage.importable', 'swarm.services.list', 'swarm.services.logs', 'swarm.files.list', 'swarm.files.recents'].includes(name) ? 'query' : 'mutation', run: (input, {auth}) => (ownerOnly(auth, 'manage the local swarm'), connector.procedures[name].run(input))},
+				{kind: ['swarm.list', 'swarm.history', 'swarm.alerts', 'swarm.desktopCheck', 'swarm.storage.status', 'swarm.vms.status', 'swarm.storage.disks', 'swarm.storage.pools', 'swarm.storage.importable', 'swarm.services.list', 'swarm.services.logs', 'swarm.files.list', 'swarm.files.recents'].includes(name) ? 'query' : 'mutation', run: (input, {auth}) => (ownerOnly(auth, 'manage the local swarm'), connector.procedures[name].run(input))},
 			]),
 		),
 		'omarchy.installPlugin': {kind: 'mutation', run: (input, {auth}) => (ownerOnly(auth, 'install Omarchy plugins'), themeCall(() => omarchyPlugins.install(input)))},
@@ -277,7 +321,7 @@ export async function startOmarchyd({port = 2021, host = '127.0.0.1', dataDir, t
 		'user.createWebSocketTicket': {
 			kind: 'mutation',
 			run: (input, {auth}) => {
-				if (input?.target !== 'machines' && input?.target !== 'terminal' && input?.target !== 'hyprland') throw new RpcError('BAD_REQUEST', 'Unknown console')
+				if (input?.target !== 'machines' && input?.target !== 'terminal' && input?.target !== 'hyprland') throw new RpcError('BAD_REQUEST', 'Unknown target')
 				if (input.target === 'hyprland' && factoryResetInProgress) {
 					throw new RpcError('CONFLICT', 'Factory reset is in progress')
 				}
@@ -290,6 +334,23 @@ export async function startOmarchyd({port = 2021, host = '127.0.0.1', dataDir, t
 		},
 
 		// ---- system ---------------------------------------------------------------------------
+		// Starting after a restart with nobody signed in (headless servers): systemd's "linger".
+		'system.bootStart': {
+			kind: 'query',
+			run: async (_i, {auth}) => {
+				ownerOnly(auth)
+				const [startsAtBoot, diskLock] = await Promise.all([bootStart.state(), bootStart.diskLock().catch(() => null)])
+				return {startsAtBoot, diskLock}
+			},
+		},
+		'system.enableBootStart': {
+			kind: 'mutation',
+			run: async (_i, {auth}) => {
+				ownerOnly(auth)
+				if (await bootStart.enable()) return {startsAtBoot: true}
+				throw new RpcError('PRECONDITION_FAILED', `This server can’t turn that on by itself here. On the server, run: sudo loginctl enable-linger ${os.userInfo().username}`)
+			},
+		},
 		'system.stats': {kind: 'query', run: () => sampler.get()},
 		'system.uptime': {kind: 'query', run: async () => (await sampler.get()).uptime},
 		'system.cpuUsage': {kind: 'query', run: async () => (await sampler.get()).cpu},
@@ -301,10 +362,11 @@ export async function startOmarchyd({port = 2021, host = '127.0.0.1', dataDir, t
 		'system.getHostname': {kind: 'query', run: () => settings.hostname},
 		'system.getIpAddresses': {kind: 'query', run: () => system.ipAddresses()},
 		'system.device': {kind: 'query', run: async () => ({device: await system.deviceName(), os: release.pretty})},
+		'system.osInfo': {kind: 'query', run: () => osInfo.get()},
 
 		// ---- Settings: power, logs, device name, two-factor, sessions, reset ----------------------
-		'system.restart': {kind: 'mutation', run: (_i, {auth}) => (ownerOnly(auth, 'restart the server'), power('reboot'))},
-		'system.shutdown': {kind: 'mutation', run: (_i, {auth}) => (ownerOnly(auth, 'shut down the server'), power('poweroff'))},
+		'system.restart': {kind: 'mutation', run: async (input, {auth}) => (ownerOnly(auth, 'restart the server'), await bootGuard(input, 'restart'), power('reboot'))},
+		'system.shutdown': {kind: 'mutation', run: async (input, {auth}) => (ownerOnly(auth, 'shut down the server'), await bootGuard(input, 'shutdown'), power('poweroff'))},
 		'system.logs': {
 			kind: 'query',
 			run: async (input, {auth}) => {
@@ -365,6 +427,8 @@ export async function startOmarchyd({port = 2021, host = '127.0.0.1', dataDir, t
 						await assistant.conversations.reset().catch((e) => console.error('[omarchyd] reset assistant', e.message))
 						// A clip can be a password or a key. Drop every book even when an app or a machine stays.
 						await clips?.resetAll().catch((e) => console.error('[omarchyd] reset clips', e.message))
+						await toasts?.resetAll().catch((e) => console.error('[omarchyd] reset toasts', e.message))
+						await transfers?.resetAll().catch((e) => console.error('[omarchyd] reset transfers', e.message))
 						const agents = await connector.procedures['swarm.list'].run().catch((e) => {
 							console.error('[omarchyd] reset swarm', e.message)
 							return []
@@ -373,8 +437,13 @@ export async function startOmarchyd({port = 2021, host = '127.0.0.1', dataDir, t
 						await backups.clearSettings().catch((e) => console.error('[omarchyd] reset backups', e.message))
 						await storage.clearShares().catch((e) => console.error('[omarchyd] reset shares', e.message))
 						await oidc.reset().catch((e) => console.error('[omarchyd] reset oidc', e.message))
+						let profilesResetOk = true
+						await hyprland.resetProfiles().catch((e) => {
+							profilesResetOk = false
+							console.error('[omarchyd] reset hyprland profiles', e.message)
+						})
 						revokeAllHyprStreams()
-						if (appsRemain || machinesRemain) return
+						if (appsRemain || machinesRemain || !profilesResetOk) return
 						await accounts.reset()
 						revokeAllHyprStreams()
 						console.log('[omarchyd] factory reset done')
@@ -499,24 +568,57 @@ export async function startOmarchyd({port = 2021, host = '127.0.0.1', dataDir, t
 						: [name, p],
 			),
 		),
-		...machines.procedures,
+		...Object.fromEntries(
+			Object.entries(containers.procedures).map(([name, p]) =>
+				name === 'containers.list' || name === 'containers.status'
+					? [name, p]
+					: [name, {kind: p.kind, run: (input, {auth}) => (ownerOnly(auth, 'manage containers'), p.run(input))}],
+			),
+		),
+		...Object.fromEntries(
+			Object.entries(machines.procedures).map(([name, p]) =>
+				name === 'machines.installConnector'
+					? [name, {kind: p.kind, run: (input, {auth}) => (ownerOnly(auth, 'install a guest connector'), p.run(input))}]
+					: name === 'machines.downloadIso' || name === 'machines.isoDownloads'
+						? [name, {kind: p.kind, run: (input, {auth}) => (ownerOnly(auth, 'download ISOs to this server'), p.run(input))}]
+						: [name, p],
+			),
+		),
 		...Object.fromEntries(
 			Object.entries(apps.procedures).map(([name, p]) =>
 				name === 'appStore.addRepository' || name === 'appStore.removeRepository'
 					? [name, {kind: p.kind, run: (input, {auth}) => (ownerOnly(auth, 'change app stores'), p.run(input))}]
-					: name === 'apps.install'
-						? [
-								name,
-								{
-									kind: p.kind,
-									run: (input, {auth}) => {
-										// This server’s own install stays as open as it is today. Another machine is owner-only.
-										if (installTargetId(input?.target)) ownerOnly(auth, 'install an app on another computer')
-										return p.run(input)
+					: name === 'apps.oidcStatus' || name === 'apps.setOidc'
+						? [name, {kind: p.kind, run: (input, {auth}) => (ownerOnly(auth, 'manage single sign-on'), p.run(input))}]
+						: name === 'apps.install'
+							? [
+									name,
+									{
+										kind: p.kind,
+										run: (input, ctx) => {
+											// This server’s own install stays as open as it is today. Another machine or OIDC wiring is owner-only.
+											if (installTargetId(input?.target)) ownerOnly(ctx.auth, 'install an app on another computer')
+											if (input?.oidc || input?.oidcIssuerUrl) ownerOnly(ctx.auth, 'manage single sign-on')
+											return p.run(input, ctx)
+										},
 									},
-								},
-							]
-						: [name, p],
+								]
+							: name === 'apps.installReview'
+								? [
+										name,
+										{
+											kind: p.kind,
+											run: async (input, ctx) => {
+												const res = await p.run(input, ctx)
+												if (accounts.getUser(ctx.auth?.userId)?.role === 'member' && res?.oidc) {
+													const {oidc: _drop, ...rest} = res
+													return rest
+												}
+												return res
+											},
+										},
+									]
+								: [name, p],
 			),
 		),
 		...Object.fromEntries(
@@ -528,7 +630,20 @@ export async function startOmarchyd({port = 2021, host = '127.0.0.1', dataDir, t
 		...Object.fromEntries(Object.entries(unraid.procedures).map(([name, p]) => [name, {kind: p.kind, run: (input, {auth}) => (ownerOnly(auth, 'move from Unraid'), p.run(input))}])),
 		...Object.fromEntries(Object.entries(tailscale.procedures).map(([name, p]) => [name, {kind: p.kind, run: (input, {auth}) => (ownerOnly(auth, 'manage Tailscale'), p.run(input))}])),
 		...Object.fromEntries(Object.entries(connect.procedures).map(([name, p]) => [name, {kind: p.kind, run: (input, {auth}) => (ownerOnly(auth, 'manage MODC Connect'), p.run(input))}])),
-		...Object.fromEntries(Object.entries(oidc.procedures).map(([name, p]) => [name, {kind: p.kind, run: (input, {auth}) => (ownerOnly(auth, 'manage single sign-on'), p.run(input))}])),
+		...Object.fromEntries(
+			Object.entries(oidc.procedures).map(([name, p]) => [
+				name,
+				{
+					kind: p.kind,
+					run: async (input, {auth}) => {
+						ownerOnly(auth, 'manage single sign-on')
+						const res = await p.run(input)
+						if (name === 'oidc.setConfig') await apps.resyncOidcClients?.().catch(() => {})
+						return res
+					},
+				},
+			]),
+		),
 		...Object.fromEntries(
 			Object.entries(updater.procedures).map(([name, p]) =>
 				name === 'system.update' || name === 'system.setReleaseChannel' ? [name, {kind: p.kind, run: (input, {auth}) => (ownerOnly(auth, 'update this server'), p.run(input))}] : [name, p],
@@ -554,16 +669,39 @@ export async function startOmarchyd({port = 2021, host = '127.0.0.1', dataDir, t
 		},
 	})
 	Object.assign(procedures, assistant.procedures)
+	// Hermes Agent, for people who already run it: chat through it, and let it look after this server.
+	const hermes = createHermes({
+		dataDir,
+		home,
+		omarchydPort: port,
+		keys: assistant.keys,
+		accounts,
+		fetchImpl: assistantOptions.fetchImpl,
+		sh: (cmd, args, timeout) => sh(cmd, args, timeout),
+		log: (m) => console.log(m),
+		runProcedure: (name, input, auth) => {
+			const p = procedures[name]
+			if (!p) throw new RpcError('NOT_FOUND', 'Unknown tool')
+			return p.run(input, {auth})
+		},
+	})
+	Object.assign(procedures, hermes.procedures)
 
 	const omarchyTheme = createOmarchyTheme({home, ...themeOptions})
 	const omarchyPlugins = createOmarchyPlugins({home, theme: omarchyTheme, ...pluginOptions})
 	// Local swarm: other Linux computers joined through the connector (see connector.mjs).
-	const connector = createConnector({dataDir, tlsDir, connectorDir: join(appDir, 'connector'), plugins: omarchyPlugins, files, source: () => updater.source(), webPort})
+	connector = createConnector({dataDir, tlsDir, connectorDir: join(appDir, 'connector'), plugins: omarchyPlugins, files, source: () => updater.source(), webPort, onOnline: (id) => machines.bootRemote(id)})
+	const clipboardWrite = {
+		async run(text) {
+			throw new RpcError('PRECONDITION_FAILED', 'This server can’t take clipboard text right now')
+		},
+	}
 	clips = createClips({
 		dataDir,
 		files,
 		fleet: connector.files,
 		readers: {
+			writeClipboard: (text) => clipboardWrite.run(text),
 			server: () => sampler.get(),
 			machine: async (id) => {
 				try {
@@ -592,6 +730,24 @@ export async function startOmarchyd({port = 2021, host = '127.0.0.1', dataDir, t
 		urlUser: (token, req) => accounts.checkUrlToken(token, req),
 	})
 	Object.assign(procedures, clips.procedures)
+	toasts = createToasts({dataDir})
+	Object.assign(procedures, toasts.procedures)
+	transfers = createTransfers({
+		dataDir,
+		toasts,
+		paste: (auth, clipId, dest) => clips.procedures['clips.paste'].run({id: clipId, dest}, {auth}),
+		stat: async (path) => {
+			try {
+				const info = await files.inspect(path)
+				if (!info || info.dir) return null
+				return {size: info.size}
+			} catch {
+				return null
+			}
+		},
+	})
+	Object.assign(procedures, transfers.procedures)
+	void transfers.kick()
 	forwardInstall = (target, payload) => connector.forwardAppInstall(target, payload)
 	remoteApps = () => connector.remoteApps()
 	const transfer = createFileTransfer({files, fleet: connector.files})
@@ -646,9 +802,24 @@ export async function startOmarchyd({port = 2021, host = '127.0.0.1', dataDir, t
 		onRemoteUnlock: markRemoteSignIn,
 		...hyprlandOptions,
 	})
+	clipboardWrite.run = (text) => hyprland.procedures['hyprland.clipboardWrite'].run({text})
 	Object.assign(
 		procedures,
-		Object.fromEntries(Object.entries(hyprland.procedures).map(([name, p]) => [name, {kind: p.kind, run: (input, {auth}) => (ownerOnly(auth, 'render the Hyprland desktop'), p.run(input))}])),
+		Object.fromEntries(
+			Object.entries(hyprland.procedures).map(([name, p]) => [
+				name,
+				{
+					kind: p.kind,
+					run: (input, {auth}) => {
+						ownerOnly(auth, 'render the Hyprland desktop')
+						if (factoryResetInProgress && p.kind === 'mutation') {
+							throw new RpcError('CONFLICT', 'Factory reset is in progress')
+						}
+						return p.run(input)
+					},
+				},
+			]),
+		),
 	)
 	async function lockDesktop() {
 		if (machineOptions.lockDesktop) return machineOptions.lockDesktop()
@@ -685,6 +856,79 @@ export async function startOmarchyd({port = 2021, host = '127.0.0.1', dataDir, t
 		const {execFile} = await import('node:child_process')
 		return new Promise((resolve) => execFile(cmd, args, {timeout}, (err, out, errOut) => resolve({ok: !err, out: String(out ?? ''), err: String(errOut ?? err?.message ?? '')})))
 	}
+	// Start at boot without a sign-in. MODC runs as your user's services, which systemd starts at boot
+	// only when "linger" is on for you. The installer turns it on with sudo; when that didn't happen
+	// (no sudo, an in-app update, an older install), a headless server stayed down after a power cut
+	// until someone signed in. Your own linger can usually be turned on without sudo (logind allows it
+	// for yourself), so try that once at startup and keep showing the state in Settings.
+	const bootStart = {
+		async state() {
+			const r = await sh('loginctl', ['show-user', os.userInfo().username, '-p', 'Linger', '--value'], 5_000)
+			return r.ok ? r.out.trim() === 'yes' : null
+		},
+		async enable() {
+			await sh('loginctl', ['enable-linger', os.userInfo().username], 15_000)
+			return (await bootStart.state()) === true
+		},
+		// Linger only matters once the system has booted. An encrypted system disk (Omarchy's default)
+		// asks for its password before anything on it runs, this server included, so after a restart the
+		// computer waits at that screen. It boots by itself only when the disk unlocks itself (a TPM,
+		// a FIDO key, a Tang server through Clevis, or the key file install.sh adds to the boot image when
+		// the owner turns on unattended boot).
+		async diskLock() {
+			if (machineOptions.diskLock !== undefined) return machineOptions.diskLock
+			const src = await sh('findmnt', ['-no', 'SOURCE', '/'], 5_000)
+			if (!src.ok) return null
+			const dev = src.out.trim().split('[')[0]
+			if (!dev.startsWith('/dev/')) return {encrypted: false, unlocksItself: false}
+			const stack = await sh('lsblk', ['-s', '-no', 'TYPE', dev], 5_000)
+			if (!stack.ok) return null
+			if (!stack.out.split(/\s+/).includes('crypt')) return {encrypted: false, unlocksItself: false}
+			const text = (await Promise.all(['/proc/cmdline', '/etc/crypttab.initramfs', '/etc/crypttab'].map((f) => readFile(f, 'utf8').catch(() => '')))).join('\n')
+			const exists = (f) => stat(f).then(() => true, () => false)
+			const [clevis, unattended] = await Promise.all([exists('/usr/lib/initcpio/install/clevis'), exists(UNATTENDED_BOOT_CONF)])
+			return {encrypted: true, unlocksItself: clevis || unattended || /tpm2-device|fido2-device/.test(text)}
+		},
+	}
+	// Before a restart or shutdown: if this server wouldn't come back by itself (no linger), turn that
+	// on first; if that isn't possible, refuse unless they chose to go ahead anyway. A restart from a
+	// phone used to leave a server with no screen down until someone went and signed in at it.
+	async function bootGuard(input, what) {
+		if (appOptions.run || machineOptions.run) return
+		const lock = await bootStart.diskLock().catch(() => null)
+		if (what === 'restart' && lock?.encrypted && !lock.unlocksItself && input?.evenIfDiskLocked !== true)
+			throw new RpcError(
+				'PRECONDITION_FAILED',
+				'DISK_LOCKED: This computer’s disk is encrypted, so after restarting it waits at its disk password screen. Nothing on it can start until someone types that password at the computer: not this server, and not remote access.',
+			)
+		if ((await bootStart.state()) !== false) return
+		if (await bootStart.enable()) return
+		if (input?.evenIfNoBootStart === true) return
+		throw new RpcError(
+			'PRECONDITION_FAILED',
+			`BOOT_START_OFF: After ${what === 'restart' ? 'restarting' : 'shutting down'}, this server would stay off until someone signs in on it, and it couldn’t turn on starting at boot by itself. On the server, run: sudo loginctl enable-linger ${os.userInfo().username}`,
+		)
+	}
+	if (!process.env.NODE_TEST_CONTEXT && !appOptions.run)
+		setTimeout(async () => {
+			if ((await bootStart.state()) !== false) return
+			const ok = await bootStart.enable()
+			console.log(ok ? '[omarchyd] turned on start at boot (loginctl enable-linger)' : `[omarchyd] this server won’t start after a restart until you sign in; run: sudo loginctl enable-linger ${os.userInfo().username}`)
+		}, 15_000).unref?.()
+	// machines-add-lxc (the one command that sets up containers) on the PATH beside omarchy-server.
+	// The installer links it too; servers installed before it existed get the link here.
+	if (!process.env.NODE_TEST_CONTEXT && !appOptions.run)
+		(async () => {
+			const target = join(appDir, 'bin', 'machines-add-lxc')
+			const link = join(home, '.local', 'bin', 'machines-add-lxc')
+			if (!(await stat(target).catch(() => null))) return
+			const st = await lstat(link).catch(() => null)
+			if (st && !st.isSymbolicLink()) return
+			if (st && (await readlink(link).catch(() => '')) === target) return
+			await mkdir(join(home, '.local', 'bin'), {recursive: true})
+			if (st) await unlink(link)
+			await symlink(target, link)
+		})().catch(() => {})
 	// The desktop's screen is shared on a private socket in your runtime folder (only you can open
 	// it; containers, even on the host network, can't). Older installs shared it on 127.0.0.1:5900,
 	// which any program on the server could reach: still used until the share is moved (below).
@@ -938,14 +1182,40 @@ WantedBy=graphical-session.target
 				const id = url.searchParams.get('id') ?? ''
 				const remotePath = url.searchParams.get('path') ?? ''
 				const file = await connector.readRemoteFile(id, remotePath)
-				const safeDisp = file.name.replace(/["\\\r\n]/g, '_')
 				res.writeHead(200, {
 					'content-type': 'application/octet-stream',
 					'content-length': file.data.length,
-					'content-disposition': `attachment; filename="${safeDisp}"`,
+					'content-disposition': contentDisposition(file.name),
 					'cache-control': 'no-store',
 				})
 				return res.end(file.data)
+			}
+			// Owner-only file download/upload for this server's containers (Incus), up to 100 MB.
+			if (url.pathname === '/api/containers/files/download' && req.method === 'GET') {
+				const auth = accounts.authenticate(req) || accounts.checkUrlToken(url.searchParams.get('token'), req)
+				if (!auth) return sendJson(res, 401, {error: 'unauthorized'})
+				ownerOnly(auth, 'download files from containers')
+				const file = await containers.readFile(url.searchParams.get('name') ?? '', url.searchParams.get('path') ?? '')
+				res.writeHead(200, {
+					'content-type': 'application/octet-stream',
+					'content-length': file.data.length,
+					'content-disposition': contentDisposition(file.name),
+					'cache-control': 'no-store',
+				})
+				return res.end(file.data)
+			}
+			if (url.pathname === '/api/containers/files/upload' && req.method === 'POST') {
+				const auth = accounts.authenticate(req)
+				if (!auth) return sendJson(res, 401, {error: 'unauthorized'})
+				ownerOnly(auth, 'upload files to containers')
+				let size = 0
+				const chunks = []
+				for await (const c of req) {
+					size += c.length
+					if (size > 100 * 1024 * 1024) return sendJson(res, 413, {error: 'Files larger than 100 MB can’t be uploaded this way'})
+					chunks.push(c)
+				}
+				return sendJson(res, 200, await containers.writeFile(url.searchParams.get('name') ?? '', url.searchParams.get('path') ?? '', Buffer.concat(chunks)))
 			}
 			if (url.pathname === '/api/swarm/files/upload' && req.method === 'POST') {
 				const auth = accounts.authenticate(req)
@@ -991,6 +1261,8 @@ WantedBy=graphical-session.target
 				})
 				return res.end(icon.data)
 			}
+			// This server's tools, for the Hermes agent connected in Settings › Assistant (its own token).
+			if (url.pathname === '/mcp') return await hermes.handleMcp(req, res)
 			if (url.pathname === '/hyprland/events' && req.method === 'GET') {
 				const auth = accounts.authenticate(req)
 				if (!auth) return sendJson(res, 401, {error: 'unauthorized'})
@@ -1209,6 +1481,17 @@ WantedBy=graphical-session.target
 					const fresh = url.searchParams.get('fresh') === '1'
 					return wss.handleUpgrade(req, socket, head, (ws) => connector.openChannel(agentId, 'pty', ws, {cols, rows, session, fresh}))
 				}
+				// A root shell inside one of this server's containers (Incus).
+				const containerId = url.searchParams.get('containerId')
+				if (containerId) {
+					const mode = url.searchParams.get('containerMode') === 'console' ? 'console' : 'shell'
+					const inContainer = await containers.shellFor(containerId, mode).catch(() => null)
+					if (!inContainer) return refuse('409 Conflict')
+					const fresh = url.searchParams.get('fresh') === '1'
+					return wss.handleUpgrade(req, socket, head, (ws) =>
+						terminals.attach(ws, {userId: t.userId, appId: `container:${containerId}:${mode}`, cols, rows, fresh, shell: {home, cwd: home, ...inContainer}}).catch(() => ws.close(1011, 'Couldn’t start a shell')),
+					)
+				}
 				const appId = url.searchParams.get('appId')
 				const inApp = appId ? await apps.shellFor(appId).catch(() => null) : null
 				if (appId && !inApp) return refuse('409 Conflict')
@@ -1228,9 +1511,19 @@ WantedBy=graphical-session.target
 			}
 			// This server's own desktop is the owner's signed-in Omarchy session: owner-only too.
 			if (machineId === 'desktop' && !owner) return refuse('403 Forbidden')
-			const target = machineId === 'desktop' ? await desktopTarget() : await machines.vncSocket(machineId).then((path) => ({path}), () => null)
+			let target
+			try {
+				target = machineId === 'desktop' ? await desktopTarget() : await machines.vncSocket(machineId)
+			} catch (error) {
+				if (!(error instanceof RpcError)) throw error
+				const message = closeReason(error.message)
+				return wss.handleUpgrade(req, socket, head, (ws) => ws.close(1011, message))
+			}
 			if (!target) return refuse('409 Conflict')
-			const vnc = net.connect(target)
+			// Apps opened from the shared screen should open on it (not on the headless display).
+			if (machineId === 'desktop') Promise.resolve().then(() => hyprland.focusSharedScreen?.()).catch(() => {})
+			if (typeof target === 'object' && target.agentId) return wss.handleUpgrade(req, socket, head, (ws) => connector.openChannel(target.agentId, 'vnc', ws, {guest: target.guest}))
+			const vnc = net.connect(typeof target === 'string' ? {path: target} : target)
 			vnc.once('error', () => refuse('502 Bad Gateway'))
 			vnc.once('connect', () => {
 				vnc.removeAllListeners('error')
@@ -1239,22 +1532,27 @@ WantedBy=graphical-session.target
 						viewerJoined()
 						ws.once('close', viewerLeft)
 					}
-					vnc.on('data', (d) => {
-						if (ws.readyState !== ws.OPEN) return
-						// A browser that stopped reading (asleep, off Wi-Fi, a frozen tab) would otherwise make the
-						// server keep every frame in memory. Same 1 MiB cap as the connector viewer.
-						if (ws.bufferedAmount > 1024 * 1024) {
+					// A big burst (the whole screen after signing in) pauses the screen's source until the
+					// viewer catches up; only a viewer that reads nothing for a long time is let go.
+					const behind = viewerBackpressure(
+						ws,
+						vnc,
+						() => {
 							ws.close(1011, 'The viewer fell behind')
 							vnc.destroy()
-							return
-						}
+						},
+						viewerStallMs ? {stallMs: viewerStallMs} : {},
+					)
+					vnc.on('data', (d) => {
+						if (ws.readyState !== ws.OPEN) return
 						ws.send(d, {binary: true})
+						behind.check()
 					})
 					ws.on('message', (d) => vnc.write(d))
 					vnc.on('close', () => ws.close(1000))
 					vnc.on('error', () => ws.terminate())
-					ws.on('close', () => vnc.destroy())
-					ws.on('error', () => vnc.destroy())
+					ws.on('close', () => (behind.stop(), vnc.destroy()))
+					ws.on('error', () => (behind.stop(), vnc.destroy()))
 				})
 			})
 		} catch {

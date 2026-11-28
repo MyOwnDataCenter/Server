@@ -1,21 +1,25 @@
-import {useEffect, useMemo, useRef, useState, type CSSProperties} from 'react'
+import {useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties} from 'react'
 import {useMutation, useQuery, useQueryClient} from '@tanstack/react-query'
 import {PluginBrowser} from './Plugins'
 
 import {mutate, query, type RegistryApp, type UserApp} from '../api'
 import {queryProblem, useBrowserOnline} from '../connection'
+import {plural} from '../plural'
 import {appUrl, useAction, useApps, useBootstrap, useMachines, useRegistry, useUser} from '../data'
-import {computerInstallInput, confirmInstallTarget, guestInstallInput, installKindLabel, installTargets, installsOf, machineCountLabel} from '../fleet/installTargets'
+import {isOwner} from '../isOwner'
+import {computerInstallInput, confirmInstallTarget, guestInstallInput, installKindLabel, installTargets, installsOf, machineCountLabel, SERVER_INSTALL_ID, type InstallTarget} from '../fleet/installTargets'
 import {type StoreBinding} from '../fleet/openStore'
 import {BeforeInstall} from '../beforeInstall'
 import {CategoryChips} from '../CategoryChips'
 import {useDesktop} from '../desktop/Desktop'
 import {explainProbe, openApp} from '../openApp'
 import {Icon, hasIcon} from '../icons'
+import {rovingKeyDown, TAB_SELECTOR} from '../roving'
 import {AppIcon, Sheet, SheetHeader, StatusPill, appStatus, bytes, haptic, isAppBusy, useToast} from '../ui'
 import {SearchField} from './Apps'
 import {remainingSuggestedStores, type StoreRepo} from '../storeSuggestions'
-import {categoryOf, effectiveCategory, joinedFields, nextStartingToast, rankedCategories, searchNeedle, validCommunityStoreUrl} from '../storeBrowse'
+import {isClamped} from '../textClamp'
+import {categoryOf, effectiveCategory, joinedFields, nextStartingToast, rankedCategories, searchNeedle, storeDisplayName, storeRiskHints, validCommunityStoreUrl} from '../storeBrowse'
 
 type StoreApp = RegistryApp & {compatible?: boolean; repo?: string; unsupported?: string}
 
@@ -38,8 +42,9 @@ const catIcon = (c: string) => (hasIcon(c) ? c : 'category')
 // Shown first in "Featured" when present in the catalog; otherwise any app with screenshots.
 const FEATURED = ['immich', 'nextcloud', 'home-assistant', 'jellyfin', 'plex', 'bitcoin', 'ollama', 'vaultwarden', 'pi-hole', 'tailscale']
 
-function useStoreApp(app: StoreApp | null) {
-	const missing = !!app && (!app.description || !Array.isArray(app.gallery) || !app.website)
+function useStoreApp(app: StoreApp | null, opts?: {detail?: boolean}) {
+	// Featured only needs gallery; the sheet always loads detail so permissions feed trust hints.
+	const missing = !!app && (opts?.detail || !app.description || !Array.isArray(app.gallery) || !app.website)
 	return useQuery({
 		queryKey: ['appStore.app', app?.id],
 		queryFn: () => query<RegistryApp>('appStore.app', {appId: app!.id}),
@@ -57,7 +62,7 @@ export function Store({onOpenInstalled, onBack, onTerminal, bound = null}: {onOp
 	const problem = queryProblem(registry, browserOnline)
 	const apps = useApps()
 	const user = useUser()
-	const owner = user.data?.role !== 'member'
+	const owner = isOwner(user.data)
 	const [q, setQ] = useState('')
 	const [category, setCategory] = useState('all')
 	const [selected, setSelected] = useState<{app: StoreApp; install?: boolean} | null>(null)
@@ -73,16 +78,37 @@ export function Store({onOpenInstalled, onBack, onTerminal, bound = null}: {onOp
 		onError: (e) => toast((e as Error).message, true),
 	})
 
-	const storeList = useMemo(() => (registry.data ?? []).map((r) => ({key: r.url ?? r.meta.id, name: r.meta.name, count: r.apps.length})), [registry.data])
+	const storeList = useMemo(
+		() => (registry.data ?? []).map((r) => ({key: r.url ?? r.meta.id, name: storeDisplayName(r.meta.name), count: r.apps.length})),
+		[registry.data],
+	)
 	const oneStore = storeKey === 'all' ? null : (storeList.find((st) => st.key === storeKey) ?? null)
 	const all = useMemo(() => {
 		const seen = new Map<string, StoreApp>()
 		for (const repo of registry.data ?? []) {
 			if (storeKey !== 'all' && (repo.url ?? repo.meta.id) !== storeKey) continue
-			for (const app of repo.apps) if (!seen.has(app.id)) seen.set(app.id, {...app, repo: repo.meta.name})
+			for (const app of repo.apps) if (!seen.has(app.id)) seen.set(app.id, {...app, repo: storeDisplayName(repo.meta.name)})
 		}
 		return [...seen.values()].sort((a, b) => a.name.localeCompare(b.name))
 	}, [registry.data, storeKey])
+	const boot = useBootstrap()
+	const machines = useMachines()
+	const computers = useQuery({queryKey: ['swarm.list'], queryFn: () => query<{id: string; name: string; online: boolean; guestOf?: string}[]>('swarm.list')})
+	const targets = useMemo(
+		() =>
+			installTargets({
+				serverName: boot.server?.device || 'This server',
+				computers: (computers.data ?? []).filter((a) => !a.guestOf).map(computerInstallInput),
+				guests: (machines.data ?? []).map((m) => guestInstallInput({id: m.id, name: m.name, state: m.state, connector: (computers.data ?? []).some((a) => a.guestOf === m.id && a.online)})),
+			}),
+		[boot.server?.device, computers.data, machines.data],
+	)
+	const [browseTargetId, setBrowseTargetId] = useState<string>(SERVER_INSTALL_ID)
+	useEffect(() => {
+		if (bound) return
+		if (!targets.some((t) => t.id === browseTargetId)) setBrowseTargetId(targets[0]?.id ?? SERVER_INSTALL_ID)
+	}, [bound, targets, browseTargetId])
+	const browseTarget = bound ? null : (targets.find((t) => t.id === browseTargetId) ?? targets[0] ?? null)
 	// A store that's gone (removed) falls back to all of them.
 	useEffect(() => {
 		if (storeKey !== 'all' && registry.data && !storeList.some((st) => st.key === storeKey)) setStoreKey('all')
@@ -110,15 +136,15 @@ export function Store({onOpenInstalled, onBack, onTerminal, bound = null}: {onOp
 
 	return (
 		<div className="stagger">
-			<div className="page-head">
+			<div className="page-head store-head">
 				{onBack && (
 					<button className="round-btn" aria-label="Back" onClick={onBack}>
 						<Icon name="back" size={20} />
 					</button>
 				)}
-				<div>
-					<h1 className="title">App Store</h1>
-					<p className="subtitle">{bound ? `Installs on ${bound.name}` : registry.isLoading ? 'Loading the catalog…' : problem && !registry.data ? 'Can’t reach your server' : oneStore ? `${all.length} apps in ${oneStore.name}` : `${all.length} apps from ${storeList.length} store${storeList.length === 1 ? '' : 's'}`}</p>
+				<div className="store-heading">
+					<h1 className="title">{bound ? `App Store for ${bound.name}` : 'App Store'}</h1>
+					<p className="subtitle">{bound ? `Installs on ${bound.name}` : registry.isLoading ? 'Loading the catalog…' : problem && !registry.data ? 'Can’t reach your server' : oneStore ? `${plural(all.length, 'app')} in ${oneStore.name}` : `${plural(all.length, 'app')} from ${plural(storeList.length, 'store')}`}</p>
 				</div>
 				<button className="btn small stores-btn" style={{marginLeft: 'auto'}} aria-label="Check for new apps" title="Check for new apps" disabled={refresh.isPending} onClick={() => (haptic(5), refresh.mutate())}>
 					{refresh.isPending ? <span className="spinner" /> : <Icon name="restart" size={17} />}
@@ -129,12 +155,13 @@ export function Store({onOpenInstalled, onBack, onTerminal, bound = null}: {onOp
 				</button>
 			</div>
 			{storeList.length > 1 && (
-				<div className="chips store-picker" role="tablist" aria-label="App stores">
+				<div className="chips store-picker" role="tablist" aria-label="App stores" onKeyDown={(e) => rovingKeyDown(e, TAB_SELECTOR, 'horizontal')}>
 					{[{key: 'all', name: 'All stores', count: null as number | null}, ...storeList].map((st) => (
 						<button
 							key={st.key}
 							role="tab"
 							aria-selected={storeKey === st.key}
+							tabIndex={storeKey === st.key ? 0 : -1}
 							className={`chip${storeKey === st.key ? ' on' : ''}`}
 							onClick={() => {
 								haptic(5)
@@ -149,6 +176,30 @@ export function Store({onOpenInstalled, onBack, onTerminal, bound = null}: {onOp
 					))}
 				</div>
 			)}
+			{!bound && targets.length > 0 && (
+				<div className="store-install-on" role="group" aria-label="Install on">
+					<span className="store-install-label">Install on</span>
+					<div className="chips store-target-picker" role="listbox" aria-label="Machine for installs" onKeyDown={(e) => rovingKeyDown(e, TAB_SELECTOR, 'horizontal')}>
+						{targets.map((t) => (
+							<button
+								key={`${t.kind}:${t.id}`}
+								type="button"
+								role="option"
+								aria-selected={browseTarget?.id === t.id}
+								tabIndex={browseTarget?.id === t.id ? 0 : -1}
+								className={`chip${browseTarget?.id === t.id ? ' on' : ''}`}
+								onClick={() => {
+									haptic(5)
+									setBrowseTargetId(t.id)
+								}}
+							>
+								{t.name}
+								<span className="store-count">{installKindLabel(t.kind)}</span>
+							</button>
+						))}
+					</div>
+				</div>
+			)}
 			<SearchField value={q} onChange={setQ} placeholder={oneStore ? `Search ${oneStore.name}` : 'Search apps'} />
 			<CategoryChips label="Categories">
 				{['all', ...(oneStore ? [] : [PLUGINS]), ...categories].map((c) => (
@@ -156,6 +207,7 @@ export function Store({onOpenInstalled, onBack, onTerminal, bound = null}: {onOp
 						key={c}
 						role="tab"
 						aria-selected={active === c}
+						tabIndex={active === c ? 0 : -1}
 						className={`chip${active === c ? ' on' : ''}`}
 						onClick={() => {
 							haptic(5)
@@ -196,6 +248,7 @@ export function Store({onOpenInstalled, onBack, onTerminal, bound = null}: {onOp
 				: browsing
 				? categories.slice(0, 8).map((c) => {
 						const items = all.filter((a) => categoryOf(a.category) === c).slice(0, 9)
+						if (items.length === 0) return null
 						return (
 							<section key={c}>
 								<div className="section-head">
@@ -204,7 +257,7 @@ export function Store({onOpenInstalled, onBack, onTerminal, bound = null}: {onOp
 										See all
 									</button>
 								</div>
-								<div className="shelf">
+								<div className="shelf screen-list glass">
 									{items.map((app) => (
 										<StoreItem key={app.id} app={app} installed={installed.get(app.id)} count={installsOf(app.id, installPlaces)} onPick={pick} onOpenInstalled={onOpenInstalled} />
 									))}
@@ -213,23 +266,24 @@ export function Store({onOpenInstalled, onBack, onTerminal, bound = null}: {onOp
 						)
 					})
 				: !registry.isLoading && !(problem && !registry.data) && (
-						<div className="list-store" style={{marginTop: 4}}>
+						shown.length === 0 ? (
+							<div className="glass empty">
+								<span className="big">
+									<Icon name="search" size={30} />
+								</span>
+								<b>No apps found</b>
+								<span>Try a different search, or submit the app you’re looking for.</span>
+								<a className="btn small" href={SUBMIT_APP_URL} target="_blank" rel="noopener noreferrer" style={{marginTop: 10}}>
+									Submit an app
+								</a>
+							</div>
+						) : (
+						<div className="list-store screen-list glass" style={{marginTop: 4}}>
 							{shown.map((app) => (
 								<StoreItem key={app.id} app={app} installed={installed.get(app.id)} count={installsOf(app.id, installPlaces)} onPick={pick} onOpenInstalled={onOpenInstalled} />
 							))}
-							{shown.length === 0 && (
-								<div className="glass empty">
-									<span className="big">
-										<Icon name="search" size={30} />
-									</span>
-									<b>No apps found</b>
-									<span>Try a different search, or submit the app you’re looking for.</span>
-									<a className="btn small" href={SUBMIT_APP_URL} target="_blank" rel="noopener noreferrer" style={{marginTop: 10}}>
-										Submit an app
-									</a>
-								</div>
-							)}
 						</div>
+						)
 					)}
 
 			{browsing && !registry.isLoading && <SubmitApp compact />}
@@ -248,12 +302,13 @@ export function Store({onOpenInstalled, onBack, onTerminal, bound = null}: {onOp
 
 			{selected && (
 				<StoreSheet
-					key={`${selected.app.id}:${bound?.kind ?? 'any'}:${bound?.id ?? ''}`}
+					key={`${selected.app.id}:${bound?.kind ?? 'any'}:${bound?.id ?? ''}:${browseTarget?.id ?? ''}`}
 					app={selected.app}
 					startInstall={selected.install}
 					all={all}
 					installed={installed}
 					bound={bound}
+					preferredTarget={browseTarget}
 					onSelect={(a) => setSelected({app: a})}
 					onClose={() => setSelected(null)}
 					onTerminal={onTerminal}
@@ -276,7 +331,7 @@ const SUGGESTED_STORES = [
 	},
 	{
 		url: MODC_URL,
-		name: 'Modc',
+		name: 'MODC community',
 		blurb: 'Apps submitted by the community, checked automatically and reviewed before they’re added.',
 	},
 ]
@@ -369,10 +424,10 @@ function CommunityStores({owner, onClose, onView}: {owner: boolean; onClose: () 
 										<Icon name="store" size={19} />
 									</span>
 									<span className="main">
-										<b>{r.meta.name}</b>
+										<b>{storeDisplayName(r.meta.name)}</b>
 										<span className="mono muted" style={{fontSize: 12, wordBreak: 'break-all'}}>{r.url}</span>
 									</span>
-									<button className="btn small" onClick={() => (haptic(5), onView(r.url))} aria-label={`View ${r.meta.name}’s apps`}>
+									<button className="btn small" onClick={() => (haptic(5), onView(r.url))} aria-label={`View ${storeDisplayName(r.meta.name)}’s apps`}>
 										View apps
 									</button>
 									{owner && (removing === r.url ? (
@@ -380,7 +435,7 @@ function CommunityStores({owner, onClose, onView}: {owner: boolean; onClose: () 
 											{remove.isPending ? 'Removing…' : 'Remove'}
 										</button>
 									) : (
-										<button className="btn small" onClick={() => setRemoving(r.url)} aria-label={`Remove ${r.meta.name}`}>
+										<button className="btn small" onClick={() => setRemoving(r.url)} aria-label={`Remove ${storeDisplayName(r.meta.name)}`}>
 											Remove
 										</button>
 									))}
@@ -400,7 +455,7 @@ function CommunityStores({owner, onClose, onView}: {owner: boolean; onClose: () 
 										<Icon name="store" size={19} />
 									</span>
 									<span className="main">
-										<b>{sg.name}</b>
+										<b>{storeDisplayName(sg.name)}</b>
 										<span className="muted" style={{fontSize: 13}}>{sg.blurb}</span>
 									</span>
 									<button className="btn small primary" disabled={add.isPending} onClick={() => add.mutate(sg.url)}>
@@ -461,6 +516,7 @@ function StoreItem({
 	onOpenInstalled: (app: UserApp) => void
 }) {
 	const machines = machineCountLabel(count)
+	const risks = storeRiskHints(app)
 	return (
 		<div className="store-item">
 			<button className="store-main" onClick={() => onPick(app)}>
@@ -468,18 +524,32 @@ function StoreItem({
 				<span className="t">
 					<b>
 						{app.name}
-						{machines && <span className="muted" style={{marginLeft: 6, fontSize: 12, fontWeight: 650}} aria-label={`On ${machines} machines`}>{machines}</span>}
+						{machines && (
+							<span className="count-machines" style={{marginLeft: 6, fontSize: 12}} aria-label={`On ${machines} machines`}>
+								{machines}
+							</span>
+						)}
 					</b>
 					<span>{app.tagline}</span>
+					{(app.repo || risks.length > 0) && (
+						<span className="store-trust">
+							{app.repo && <span className="store-source">{app.repo}</span>}
+							{risks.map((hint) => (
+								<span key={hint} className="store-risk">
+									{hint}
+								</span>
+							))}
+						</span>
+					)}
 				</span>
 			</button>
 			<span className="end">
 				{installed ? (
-					<button className="btn get" onClick={() => onOpenInstalled(installed)} aria-label={`Manage ${app.name}`}>
-						{isAppBusy(installed.state) ? <span className="spinner" style={{width: 14, height: 14}} /> : 'Open'}
+					<button className="btn get open" onClick={() => onOpenInstalled(installed)} aria-label={`Open ${app.name}`}>
+						{isAppBusy(installed.state) ? <><span className="spinner" style={{width: 14, height: 14}} /><span className="sr-only">Open</span></> : 'Open'}
 					</button>
 				) : (
-					<button className="btn get" onClick={() => onPick(app, true)} aria-label={`Get ${app.name}`} disabled={app.compatible === false || !!app.unsupported}>
+					<button className="btn get primary" onClick={() => onPick(app, true)} aria-label={`Get ${app.name}`} disabled={app.compatible === false || !!app.unsupported}>
 						Get
 					</button>
 				)}
@@ -513,6 +583,7 @@ function StoreSheet({
 	all,
 	installed,
 	bound,
+	preferredTarget,
 	onSelect,
 	onClose,
 	onTerminal,
@@ -522,6 +593,7 @@ function StoreSheet({
 	all: StoreApp[]
 	installed: Map<string, UserApp>
 	bound: StoreBinding | null
+	preferredTarget: InstallTarget | null
 	onSelect: (a: StoreApp) => void
 	onClose: () => void
 	onOpenApp?: (app: UserApp) => void
@@ -540,22 +612,29 @@ function StoreSheet({
 		[boot.server?.device, computers.data, machines.data],
 	)
 	const boundTarget = bound ? (targets.find((t) => t.id === bound.id && t.kind === bound.kind) ?? null) : null
+	const preferredReady = preferredTarget && targets.some((t) => t.id === preferredTarget.id && t.ability === 'ready')
 	const boundReady = !bound || boundTarget?.ability === 'ready'
 	const desk = useDesktop()
 	const openTerminal = desk ? (input: string) => desk.openTerminal(undefined, input) : onTerminal
 	const toast = useToast()
 	const action = useAction()
-	const [choosing, setChoosing] = useState(!!startInstall && !bound)
+	const presetId = bound?.id ?? (preferredReady ? preferredTarget!.id : null)
+	const [choosing, setChoosing] = useState(!!startInstall && !presetId)
 	const [reviewing, setReviewing] = useState(false)
-	const [chosenId, setChosenId] = useState<string | null>(bound?.id ?? null)
+	const [chosenId, setChosenId] = useState<string | null>(presetId)
 	const started = useRef(false)
 	useEffect(() => {
-		if (!startInstall || !bound || started.current || !boundTarget) return
+		if (!startInstall || !presetId || started.current) return
+		const ready = bound ? boundTarget?.ability === 'ready' : preferredReady
+		if (!ready) return
 		started.current = true
-		if (boundTarget.ability === 'ready') setReviewing(true)
-	}, [startInstall, bound, boundTarget])
+		setChosenId(presetId)
+		setReviewing(true)
+	}, [startInstall, presetId, bound, boundTarget, preferredReady])
 	const [more, setMore] = useState(false)
-	const detail = useStoreApp(app)
+	const proseRef = useRef<HTMLDivElement>(null)
+	const [clipped, setClipped] = useState(false)
+	const detail = useStoreApp(app, {detail: true})
 	const website = detail.data?.website ?? app.website
 	const view = {
 		...app,
@@ -564,6 +643,16 @@ function StoreSheet({
 		website: typeof website === 'string' && /^https?:\/\//i.test(website) ? website : undefined,
 		releaseNotes: detail.data?.releaseNotes ?? app.releaseNotes,
 	}
+	// "More" shows when the text really is cut off, so a short list of lines gets it too.
+	useLayoutEffect(() => {
+		const el = proseRef.current
+		if (!el || more) return
+		const measure = () => setClipped(isClamped(el))
+		measure()
+		const watch = new ResizeObserver(measure)
+		watch.observe(el)
+		return () => watch.disconnect()
+	}, [view.description, more])
 
 	const live = installed.get(app.id)
 	// What it needs that isn't installed yet (an installed app can stand in, e.g. Bitcoin Knots).
@@ -573,15 +662,36 @@ function StoreSheet({
 	const canInstall = !live && !incompatible
 	const chosen = targets.find((t) => t.id === chosenId) ?? null
 	const chosenReady = chosen?.ability === 'ready'
+	const machineName = bound?.name || chosen?.name || preferredTarget?.name || ''
 	const targetGone = reviewing && canInstall && !chosenReady
 	const showChooser = canInstall && (choosing || (targetGone && !bound))
-	const showReview = reviewing && canInstall && chosenReady && (!bound || boundTarget?.ability === 'ready')
+	// The confirmation, and its install button, stay hidden until a machine is chosen.
+	const showReview = reviewing && canInstall && chosenReady && machineName !== '' && (!bound || boundTarget?.ability === 'ready')
 	const blockedReason = bound && !boundReady ? (boundTarget?.reason || (machines.isLoading || computers.isLoading ? '' : `${bound.name} isn’t available for an install.`)) : ''
 	const liveUrl = live ? appUrl(live, boot.server!.host) : null
+	const detailPerms = Array.isArray(detail.data?.permissions) ? detail.data!.permissions : app.permissions
+	const riskHints = storeRiskHints({oidc: app.oidc ?? detail.data?.oidc, caution: app.caution, permissions: detailPerms})
+	const sourceName = storeDisplayName(app.repo)
+	const beginInstall = () => {
+		if (bound) {
+			if (boundTarget?.ability === 'ready') setReviewing(true)
+			return
+		}
+		if (chosenReady && chosenId) {
+			setReviewing(true)
+			return
+		}
+		if (preferredReady && preferredTarget) {
+			setChosenId(preferredTarget.id)
+			setReviewing(true)
+			return
+		}
+		setChoosing(true)
+	}
 
 	return (
 		<Sheet open onClose={onClose} label={app.name}>
-			<SheetHeader icon={<AppIcon src={app.icon} name={app.name} size={72} />} title={app.name} subtitle={app.developer ?? app.repo} onClose={onClose} />
+			<SheetHeader icon={<AppIcon src={app.icon} name={app.name} size={72} />} title={app.name} subtitle={app.developer ?? sourceName} onClose={onClose} />
 
 			{showChooser ? (
 				<>
@@ -611,6 +721,7 @@ function StoreSheet({
 				<BeforeInstall
 					appId={app.id}
 					appName={app.name}
+					machineName={machineName}
 					installSize={app.installSize}
 					pending={action.isPending}
 					cancelLabel="Back"
@@ -650,7 +761,7 @@ function StoreSheet({
 							) : (
 								<>
 									<button
-										className="btn primary"
+										className="btn"
 										disabled={!liveUrl}
 										onClick={() => {
 											haptic(6)
@@ -683,18 +794,23 @@ function StoreSheet({
 							)}
 						</div>
 					) : incompatible ? (
-						<div className="error">
+						<div className="error" role="alert">
 							<Icon name="alert" size={18} />
 							{app.unsupported ?? 'This app needs a newer version of My Own Data Center.'}
 						</div>
 					) : (
 						<>
 							<div className="primary-row">
-								<button className="btn primary" onClick={() => (bound ? setReviewing(true) : setChoosing(true))} disabled={action.isPending || !!blockedReason}>
+								<button className="btn primary" onClick={beginInstall} disabled={action.isPending || !!blockedReason}>
 									<Icon name="download" size={20} />
-									Install
+									Install{machineName ? ` on ${machineName}` : ''}
 								</button>
 							</div>
+							{!bound && preferredTarget && !blockedReason && (
+								<p className="footer-note" style={{textAlign: 'left'}}>
+									Installs on {preferredTarget.name}. Change the target at the top of the App Store.
+								</p>
+							)}
 							{blockedReason && <p className="footer-note" style={{textAlign: 'left'}}>{blockedReason}</p>}
 							{missingDeps.length > 0 && (
 								<div className="glass" style={{marginBottom: 16, borderRadius: 18, overflow: 'hidden'}}>
@@ -718,12 +834,32 @@ function StoreSheet({
 							)}
 						</>
 					)}
+					{(app.repo || riskHints.length > 0) && !live && (
+						<div className="store-trust detail" style={{marginBottom: 14}}>
+							{app.repo && <span className="store-source">From {sourceName}</span>}
+							{riskHints.map((hint) => (
+								<span key={hint} className="store-risk">
+									{hint}
+								</span>
+							))}
+						</div>
+					)}
 					{app.caution && !live && (
 						<div className="glass card" style={{display: 'flex', gap: 12, alignItems: 'center', marginBottom: 16, borderRadius: 18}}>
 							<span className="row-ico" style={{'--c': 'var(--blue)'} as React.CSSProperties}>
 								<Icon name="info" size={18} />
 							</span>
 							<span style={{fontSize: 14.5}}>{app.caution}</span>
+						</div>
+					)}
+					{app.oidc?.supported && (
+						<div className="glass card" style={{display: 'flex', gap: 12, alignItems: 'center', marginBottom: 16, borderRadius: 18}}>
+							<span className="row-ico" style={{'--c': 'var(--accent)'} as React.CSSProperties}>
+								<Icon name="key" size={18} />
+							</span>
+							<span style={{fontSize: 14}}>
+								<b>Sign in with My Own Data Center</b> · {app.oidc.mode === 'auto' ? 'Accounts and two-factor on this server can sign into this app' : 'Pre-registers an OIDC client so you can paste credentials after install'}
+							</span>
 						</div>
 					)}
 
@@ -755,8 +891,10 @@ function StoreSheet({
 					)}
 					{view.description && (
 						<>
-							<div className={`prose${more ? '' : ' clamp'}`}>{view.description}</div>
-							{!more && view.description.length > 280 && (
+							<div ref={proseRef} className={`prose${more ? '' : ' clamp'}`}>
+								{view.description}
+							</div>
+							{!more && clipped && (
 								<button className="link-btn" style={{paddingLeft: 0}} onClick={() => setMore(true)}>
 									More
 								</button>
@@ -770,7 +908,7 @@ function StoreSheet({
 							</a>
 						</p>
 					)}
-					{app.repo && <p className="footer-note" style={{textAlign: 'left', marginTop: 18}}>From {app.repo}</p>}
+					{app.repo && <p className="footer-note" style={{textAlign: 'left', marginTop: 18}}>From {sourceName}</p>}
 				</>
 			)}
 		</Sheet>

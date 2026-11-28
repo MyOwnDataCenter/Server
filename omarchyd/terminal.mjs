@@ -18,7 +18,9 @@ const quote = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`
 export function openShell({cols, rows, command = null, cwd = os.homedir(), env = process.env, home = os.homedir()}) {
 	const shell = env.SHELL && /^\/[\w/.-]+$/.test(env.SHELL) ? env.SHELL : '/bin/bash'
 	const inner = command ? command.map(quote).join(' ') : `${quote(shell)} -l`
-	return spawn('script', ['-q', '-f', '-e', '-c', `stty cols ${cols} rows ${rows} 2>/dev/null; exec ${inner}`, '/dev/null'], {
+	// -ixon: Ctrl+S no longer pauses the terminal (it looked frozen until Ctrl+Q). Programs that want
+	// Ctrl+S, like nano, still get it.
+	return spawn('script', ['-q', '-f', '-e', '-c', `stty cols ${cols} rows ${rows} -ixon 2>/dev/null; exec ${inner}`, '/dev/null'], {
 		cwd,
 		env: {...env, HOME: home, TERM: 'xterm-256color', COLORTERM: 'truecolor', LANG: env.LANG || 'C.UTF-8'},
 	})
@@ -37,6 +39,8 @@ set -g set-clipboard on
 set -g window-size latest
 set -g aggressive-resize on
 set -ga terminal-overrides ',xterm*:smcup@:rmcup@'
+# Ctrl+S must not pause the terminal (it looked frozen until Ctrl+Q).
+set -g default-command 'stty -ixon 2>/dev/null; exec "\${SHELL:-/bin/sh}" -l'
 `
 const TMUX_NAME = /^[A-Za-z0-9._-]{1,40}$/
 
@@ -298,7 +302,8 @@ export function createTerminalSessions({exec = execFile, tmux = null} = {}) {
 		s.pty ??= await ptyOf(s.child.pid)
 		if (!s.pty) return false
 		// Setting the size signals the programs running in it (SIGWINCH), so full-screen ones redraw.
-		await new Promise((r) => exec('stty', ['-F', s.pty, 'cols', String(cols), 'rows', String(rows)], () => r()))
+		// Bounded: what's typed is held while this runs, so a stuck stty froze the terminal for good.
+		await new Promise((r) => exec('stty', ['-F', s.pty, 'cols', String(cols), 'rows', String(rows)], {timeout: 3_000}, () => r()))
 		s.cols = cols
 		s.rows = rows
 		return true

@@ -28,6 +28,7 @@ test('approve cards name the action and skip ids', () => {
 		{name: 'machines_updateSettings', args: {id: 'abcd1234', portForwards: [{}, {}]}, title: 'Change port forwards on Family NAS', detail: '2 port forwards'},
 		{name: 'machines_create', args: {name: 'ubuntu', osId: 'ubuntu-2404', cores: 2, memoryGb: 4, diskSizeGb: 32, username: 'chris'}, title: 'Create virtual machine “ubuntu”', detail: 'Ubuntu 24.04 · 2 cores · 4 GB memory · 32 GB disk · user chris · You type its password when you approve'},
 		{name: 'swarm_action', args: {id: 'abc', name: 'reboot'}, title: 'Restart kitchen-pi', detail: ''},
+		{name: 'swarm_wake', args: {id: 'abc'}, title: 'Wake up kitchen-pi', detail: 'Sends a wake packet on the local network'},
 		{name: 'swarm_action', args: {id: 'abc', name: 'theme-set', theme: 'tokyo-night'}, title: 'Set Tokyo Night on kitchen-pi', detail: ''},
 		{name: 'swarm_action', args: {id: 'abc', name: 'plugin-install', pluginId: 'omarchy-nvim'}, title: 'Install Omarchy Nvim on kitchen-pi', detail: ''},
 		{name: 'swarm_rename', args: {id: 'abc', name: 'Kitchen'}, title: 'Rename kitchen-pi to Kitchen', detail: ''},

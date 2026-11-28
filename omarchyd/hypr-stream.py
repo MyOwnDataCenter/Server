@@ -803,8 +803,16 @@ class InputInjector:
                 self.wl.send(self.kbd_id, 2, struct.pack("<IIII", mods, 0, 0, 0))
 
 
-def capture_once(wl: WaylandClient, shm_id: int, mgr_id: int, mgr_ver: int, mode: str, output_id: int, handle_u32: int, cached_shm):
-    """Capture one frame via zwlr_screencopy_manager_v1 or hyprland_toplevel_export_manager_v1."""
+IDLE = "idle"
+
+
+def capture_once(wl: WaylandClient, shm_id: int, mgr_id: int, mgr_ver: int, mode: str, output_id: int, handle_u32: int, cached_shm, timeout: float = 2.0):
+    """Capture one frame via zwlr_screencopy_manager_v1 or hyprland_toplevel_export_manager_v1.
+
+    Returns (frame, shm) on success, (None, shm) when the compositor says the capture failed (the
+    window or monitor is gone), and (IDLE, shm) when nothing arrived in time. Hyprland renders only
+    when something on screen changes, so a still desktop or an idle window simply has no new frame:
+    that is not a failure, and must never end the stream."""
     frame_id = wl.alloc_id()
     state = {"fmt": None, "w": 0, "h": 0, "stride": 0, "flags": 0, "ready": False, "failed": False, "copied": False}
     shm_ref = [cached_shm]
@@ -860,12 +868,13 @@ def capture_once(wl: WaylandClient, shm_id: int, mgr_id: int, mgr_ver: int, mode
     else:
         wl.send(mgr_id, 0, struct.pack("<IiI", frame_id, 1, output_id))
 
-    deadline = time.monotonic() + 2.0
+    deadline = time.monotonic() + timeout
+    timed_out = False
     while not state["ready"] and not state["failed"]:
         if time.monotonic() > deadline:
-            state["failed"] = True
+            timed_out = True
             break
-        wl.read_once(0.02)
+        wl.read_once(min(0.02, timeout))
 
     wl.handlers.pop(frame_id, None)
     try:
@@ -873,6 +882,8 @@ def capture_once(wl: WaylandClient, shm_id: int, mgr_id: int, mgr_ver: int, mode
     except Exception:
         pass
 
+    if timed_out and not state["failed"]:
+        return IDLE, shm_ref[0]
     if state["failed"] or not shm_ref[0]:
         return None, shm_ref[0]
 
@@ -891,6 +902,7 @@ def main():
     parser.add_argument("--bitrate", type=int, default=6000)
     parser.add_argument("--no-vaapi", action="store_true")
     parser.add_argument("--once", action="store_true", help="Capture 1 frame, encode, print meta+frames, and exit")
+    parser.add_argument("--steady", action="store_true", help="On a still screen, repeat the last frame at the full rate (benchmarks)")
     args = parser.parse_args()
 
     runtime = os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"
@@ -1034,11 +1046,24 @@ def main():
     fail_streak = 0
     vaapi_failed = bool(args.no_vaapi)
 
+    # Wait about three frames for a new one; after that the screen is simply still.
+    capture_wait = max(0.05, min(0.25, frame_interval * 3))
+    # On a still screen the last picture is sent again now and then, so the viewer keeps a live,
+    # decodable stream (and a keyframe asked for arrives) without spending a full frame rate on it.
+    idle_repeat = frame_interval if args.steady else 0.5
+    last = None
+    last_sent = 0.0
+
     try:
         while running[0]:
             t0 = time.monotonic()
-            res, shm_buf = capture_once(wl, shm_id, mgr_id, mgr_ver, args.mode, output_id, handle_u32, shm_buf)
-            if res is None:
+            res, shm_buf = capture_once(wl, shm_id, mgr_id, mgr_ver, args.mode, output_id, handle_u32, shm_buf, timeout=2.0 if last is None and args.once else capture_wait)
+            if res is IDLE:
+                fail_streak = 0
+                if last is None or not (force_restart_enc[0] or t0 - last_sent >= idle_repeat):
+                    continue
+                res = last
+            elif res is None:
                 fail_streak += 1
                 if fail_streak >= 15:
                     writer.send_json(3, {"error": "Target window or monitor closed"})
@@ -1046,6 +1071,8 @@ def main():
                 time.sleep(0.1)
                 continue
             fail_streak = 0
+            last = res
+            last_sent = t0
             w, h, pix_fmt, raw = res
 
             if (

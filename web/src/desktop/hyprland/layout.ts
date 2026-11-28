@@ -4,6 +4,91 @@ export type Rect = {x: number; y: number; w: number; h: number}
 export type Node = {kind: 'leaf'; id: string} | {kind: 'split'; axis: Axis; ratio: number; a: Node; b: Node}
 
 export const GAP = 8
+export const MIN_PANE = 120
+export const DIVIDER_HIT = 16
+
+export type Path = Array<'a' | 'b'>
+export type Divider = {
+	axis: Axis
+	rect: Rect
+	hit: Rect
+	path: Path
+	ratio: number
+	minRatio: number
+	maxRatio: number
+	parent: Rect
+}
+
+function hitOf(gap: Rect, axis: Axis, hit = DIVIDER_HIT): Rect {
+	const extra = Math.max(0, hit - (axis === 'h' ? gap.w : gap.h))
+	if (axis === 'h') return {x: gap.x - extra / 2, y: gap.y, w: gap.w + extra, h: gap.h}
+	return {x: gap.x, y: gap.y - extra / 2, w: gap.w, h: gap.h + extra}
+}
+
+export function dividers(tree: Node | null, area: Rect, gap = GAP, minPane = MIN_PANE, skip?: Iterable<string>): Divider[] {
+	const hidden = skip ? (skip instanceof Set ? skip : new Set(skip)) : new Set<string>()
+	const out: Divider[] = []
+	const walk = (n: Node, r: Rect, path: Path) => {
+		if (n.kind === 'leaf') return
+		const shownA = collapse(n.a, hidden)
+		const shownB = collapse(n.b, hidden)
+		if (shownA && shownB) {
+			const avail = Math.max(0, n.axis === 'h' ? r.w - gap : r.h - gap)
+			const first = Math.round(avail * n.ratio)
+			const tight = avail < minPane * 2
+			const minRatio = tight ? n.ratio : minPane / avail
+			const maxRatio = tight ? n.ratio : 1 - minPane / avail
+			const rect =
+				n.axis === 'h' ? {x: r.x + first, y: r.y, w: gap, h: r.h} : {x: r.x, y: r.y + first, w: r.w, h: gap}
+			out.push({axis: n.axis, rect, hit: hitOf(rect, n.axis), path, ratio: n.ratio, minRatio, maxRatio, parent: r})
+			if (n.axis === 'h') {
+				walk(n.a, {x: r.x, y: r.y, w: first, h: r.h}, [...path, 'a'])
+				walk(n.b, {x: r.x + first + gap, y: r.y, w: r.w - first - gap, h: r.h}, [...path, 'b'])
+			} else {
+				walk(n.a, {x: r.x, y: r.y, w: r.w, h: first}, [...path, 'a'])
+				walk(n.b, {x: r.x, y: r.y + first + gap, w: r.w, h: r.h - first - gap}, [...path, 'b'])
+			}
+		} else if (shownA) {
+			walk(n.a, r, [...path, 'a'])
+		} else if (shownB) {
+			walk(n.b, r, [...path, 'b'])
+		}
+	}
+	if (tree) walk(tree, area, [])
+	return out
+}
+
+export function setRatio(tree: Node | null, path: Path, ratio: number): Node | null {
+	if (!tree) return null
+	const next = Math.min(1, Math.max(0, ratio))
+	const apply = (n: Node, p: Path): Node => {
+		if (n.kind === 'leaf') return n
+		if (!p.length) return n.ratio === next ? n : {...n, ratio: next}
+		const rest = p.slice(1)
+		if (p[0] === 'a') {
+			const a = apply(n.a, rest)
+			return a === n.a ? n : {...n, a}
+		}
+		const b = apply(n.b, rest)
+		return b === n.b ? n : {...n, b}
+	}
+	return apply(tree, path)
+}
+
+export function ratioAt(d: Divider, x: number, y: number): number {
+	const avail = Math.max(0, d.axis === 'h' ? d.parent.w - d.rect.w : d.parent.h - d.rect.h)
+	if (avail <= 0) return d.ratio
+	const along = d.axis === 'h' ? x - d.parent.x : y - d.parent.y
+	return Math.min(d.maxRatio, Math.max(d.minRatio, along / avail))
+}
+
+export function hitDivider(list: Divider[], x: number, y: number): Divider | null {
+	for (let i = list.length - 1; i >= 0; i--) {
+		const r = list[i].hit
+		if (x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h) return list[i]
+	}
+	return null
+}
 
 export function rects(tree: Node | null, area: Rect, gap = GAP): Record<string, Rect> {
 	const out: Record<string, Rect> = {}
@@ -102,24 +187,32 @@ export function focusDir(tree: Node | null, focusedId: string, dir: Dir, area: R
 	if (!src) return focusedId
 	const scx = src.x + src.w / 2
 	const scy = src.y + src.h / 2
-	let best: string | null = null
-	let bestD = Infinity
-	for (const [id, r] of Object.entries(all)) {
-		if (id === focusedId) continue
-		const dx = r.x + r.w / 2 - scx
-		const dy = r.y + r.h / 2 - scy
-		const along = dir === 'left' || dir === 'right' ? dx : dy
-		const across = dir === 'left' || dir === 'right' ? dy : dx
-		const positive = dir === 'right' || dir === 'down'
-		if (positive ? along <= 0 : along >= 0) continue
-		if (Math.abs(along) < Math.abs(across)) continue
-		const d = dx * dx + dy * dy
-		if (d < bestD) {
-			bestD = d
-			best = id
+	const sideways = dir === 'left' || dir === 'right'
+	const positive = dir === 'right' || dir === 'down'
+	const pick = (accept: (r: Rect, along: number, across: number) => boolean): string | null => {
+		let best: string | null = null
+		let bestD = Infinity
+		for (const [id, r] of Object.entries(all)) {
+			if (id === focusedId) continue
+			const dx = r.x + r.w / 2 - scx
+			const dy = r.y + r.h / 2 - scy
+			const along = sideways ? dx : dy
+			const across = sideways ? dy : dx
+			if (positive ? along <= 0 : along >= 0) continue
+			if (!accept(r, along, across)) continue
+			const d = dx * dx + dy * dy
+			if (d < bestD) {
+				bestD = d
+				best = id
+			}
 		}
+		return best
 	}
-	return best ?? focusedId
+	// A window that sits that way and shares a stretch of this window's edge is the neighbour. Judging by
+	// centres alone sent Right from a lower window to the wide one above it on a wide screen, and gave no
+	// neighbour at all for Up and Down between a wide window and two narrow ones.
+	const beside = pick((r) => (sideways ? Math.min(src.y + src.h, r.y + r.h) - Math.max(src.y, r.y) : Math.min(src.x + src.w, r.x + r.w) - Math.max(src.x, r.x)) > 0)
+	return beside ?? pick((_r, along, across) => Math.abs(along) >= Math.abs(across)) ?? focusedId
 }
 
 export function swapIds(tree: Node | null, a: string, b: string): Node | null {

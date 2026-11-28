@@ -1,7 +1,7 @@
 // Move and copy between this server and computers the connector can read.
 // A path on this server starts with "/". A computer path is ::computer/<id>/<rel>.
 // The same machine uses its own rename or copy. A different machine pulls, then pushes.
-import {mkdtemp, open, rm} from 'node:fs/promises'
+import {mkdtemp, open, readdir, rm, stat} from 'node:fs/promises'
 import {tmpdir} from 'node:os'
 import {basename, join} from 'node:path'
 
@@ -39,19 +39,15 @@ function childServer(parentPath, name) {
 }
 
 export function createFileTransfer({files, fleet}) {
+	// Looked up on disk, not through the Files listing: that hides names starting with a dot, and a
+	// folder moved away is deleted whole once it has been copied.
 	async function serverNode(path) {
 		const name = basename(path)
-		const parent = path.split('/').slice(0, -1).join('/') || '/'
-		try {
-			const listed = await files.procedures['files.list'].run({path})
-			if (listed && Array.isArray(listed.files)) return {dir: true, name: name || 'Home', path, size: 0}
-		} catch {
-			/* a file is not a directory */
-		}
-		const listed = await files.procedures['files.list'].run({path: parent})
-		const hit = (listed.files ?? []).find((f) => f.path === path || f.name === name)
-		if (!hit) throw new RpcError('NOT_FOUND', 'That file isn’t there')
-		return {dir: hit.type === 'directory', name: hit.name, path: hit.path, size: hit.size ?? 0}
+		const {real} = await files.resolve(path)
+		const st = await stat(real).catch(() => {
+			throw new RpcError('NOT_FOUND', 'That file isn’t there')
+		})
+		return {dir: st.isDirectory(), name: name || 'Home', path, size: st.isDirectory() ? 0 : st.size}
 	}
 
 	async function computerNode(node) {
@@ -65,8 +61,13 @@ export function createFileTransfer({files, fleet}) {
 
 	async function listOf(loc) {
 		if (loc.kind === 'server') {
-			const listed = await files.procedures['files.list'].run({path: loc.path})
-			return (listed.files ?? []).map((f) => ({name: f.name, dir: f.type === 'directory', path: f.path, size: f.size ?? 0}))
+			const {real} = await files.resolve(loc.path)
+			const rows = []
+			for (const name of await readdir(real)) {
+				const st = await stat(join(real, name)).catch(() => null) // a broken link has nothing to copy
+				if (st) rows.push({name, dir: st.isDirectory(), path: childServer(loc.path, name).path, size: st.isDirectory() ? 0 : st.size})
+			}
+			return rows
 		}
 		const listed = await fleet.list(loc.id, loc.rel)
 		return (listed.entries ?? []).map((e) => ({name: e.name, dir: !!e.dir, size: e.size ?? 0}))
@@ -198,6 +199,8 @@ export function createFileTransfer({files, fleet}) {
 		const to = locateTransferPath(input?.toDirectory)
 		if (!from || !to) throw new RpcError('BAD_REQUEST', 'Choose a folder on a machine that can be read')
 		if (!from.rel && from.kind === 'computer') throw new RpcError('BAD_REQUEST', 'Choose a file')
+		// A move deletes the original afterwards. Home, Trash, Drives and a drive itself can't be moved.
+		if (!copy && from.kind === 'server' && /^\/(Home|Trash|External(\/[^/]+)?)\/*$/.test(from.path)) throw new RpcError('BAD_REQUEST', '[cannot-move]')
 		if (from.kind === 'server' && to.kind === 'server') {
 			return files.procedures[copy ? 'files.copy' : 'files.move'].run({path: from.path, toDirectory: to.path, collision: input?.collision || 'keep-both'})
 		}

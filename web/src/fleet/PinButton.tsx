@@ -54,7 +54,7 @@ export function PinButton({pin, name}: {pin: DashboardPin; name: string; mini?: 
 			}}
 		>
 			<Icon name="pin" size={16} />
-			{on ? 'pinned' : 'pin'}
+			{on ? 'Pinned' : 'Pin'}
 		</button>
 	)
 }

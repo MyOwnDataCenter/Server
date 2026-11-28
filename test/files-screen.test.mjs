@@ -86,13 +86,14 @@ describe('files screen: #189 Enter key on row action buttons', () => {
 		const childBtn = {}
 		assert.equal(helpers.shouldActivateRowOnKey({key: 'Enter', target: row, currentTarget: row}), true)
 		assert.equal(helpers.shouldActivateRowOnKey({key: 'Enter', target: childBtn, currentTarget: row}), false)
-		assert.equal(helpers.shouldActivateRowOnKey({key: ' ', target: row, currentTarget: row}), false)
+		assert.equal(helpers.shouldActivateRowOnKey({key: ' ', target: row, currentTarget: row}), true)
+		assert.equal(helpers.shouldActivateRowOnKey({key: ' ', target: childBtn, currentTarget: row}), false)
 		assert.equal(helpers.shouldActivateRowOnKey({key: 'Escape', target: row, currentTarget: row}), false)
 	})
 
 	test('Files.tsx guards row onKeyDown with shouldActivateRowOnKey', async () => {
 		const src = await filesSource()
-		assert.match(src, /onKeyDown=\{\(e\) => shouldActivateRowOnKey\(e\) && activate\(f\)\}/)
+		assert.equal(src.match(/if \(!shouldActivateRowOnKey\(e\)\) return;\s*e\.preventDefault\(\);\s*activate\(f\);/g)?.length, 2, 'both the tile and the row stop the page scrolling on Space')
 	})
 })
 
@@ -179,7 +180,20 @@ describe('files screen: #489 Sync photos recognizes keep-both copies', () => {
 
 	test('Files.tsx uses filterUnsyncedPhotos in photoInput onChange', async () => {
 		const src = await filesSource()
-		assert.match(src, /const fresh = filterUnsyncedPhotos\(picked, listing\.data\?\.files \?\? \[\]\);/)
+		assert.match(src, /const fresh = filterUnsyncedPhotos\(picked, existing\);/)
+		assert.match(src, /existing = await photosAlreadyThere\(listing\.data,/)
+	})
+
+	test('photosAlreadyThere reads the whole folder when the listing is only the first page', async () => {
+		const page = [{name: 'a.jpg', path: '/Home/Photos/a.jpg', type: 'image/jpeg', size: 1, modified: 1, operations: []}]
+		const all = [...page, {name: 'z.jpg', path: '/Home/Photos/z.jpg', type: 'image/jpeg', size: 2, modified: 2, operations: []}]
+		let loads = 0
+		const loadAll = async () => (loads++, {files: all})
+		assert.deepEqual(await helpers.photosAlreadyThere({files: page, hasMore: true}, loadAll), all)
+		assert.equal(loads, 1)
+		assert.deepEqual(await helpers.photosAlreadyThere({files: page}, loadAll), page)
+		assert.equal(loads, 1)
+		assert.deepEqual(await helpers.photosAlreadyThere(undefined, loadAll), all)
 	})
 })
 

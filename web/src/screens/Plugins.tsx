@@ -6,6 +6,7 @@ import {useState} from 'react'
 import {mutate, query} from '../api'
 import {queryProblem, useBrowserOnline} from '../connection'
 import {useUser} from '../data'
+import {isOwner} from '../isOwner'
 import {CategoryChips} from '../CategoryChips'
 import {Icon} from '../icons'
 import {haptic, useConfirm, useToast} from '../ui'
@@ -33,7 +34,7 @@ export function PluginBrowser({q}: {q: string}) {
 	const qc = useQueryClient()
 	const toast = useToast()
 	const confirm = useConfirm()
-	const owner = useUser().data?.role !== 'member'
+	const owner = isOwner(useUser().data)
 	const [category, setCategory] = useState('')
 	const [sort, setSort] = useState<'stars' | 'new'>('stars')
 	const filterKey = `${q}\0${category}\0${sort}`
@@ -91,7 +92,7 @@ export function PluginBrowser({q}: {q: string}) {
 				</span>
 			</div>
 			{data && !data.available && (
-				<div className="error" style={{marginBottom: 12}}>
+				<div className="error" role="alert" style={{marginBottom: 12}}>
 					<Icon name="alert" size={18} />
 					This server’s Omarchy doesn’t support plugins yet. Update Omarchy, then come back.
 				</div>
@@ -99,7 +100,7 @@ export function PluginBrowser({q}: {q: string}) {
 			<div className="plugin-chipbar">
 				<CategoryChips label="Plugin categories">
 					{['', ...(data?.categories ?? [])].map((c) => (
-						<button key={c || 'all'} type="button" role="tab" aria-selected={category === c} className={`chip${category === c ? ' on' : ''}`} onClick={() => (haptic(5), setCategory(c))}>
+						<button key={c || 'all'} type="button" role="tab" aria-selected={category === c} tabIndex={category === c ? 0 : -1} className={`chip${category === c ? ' on' : ''}`} onClick={() => (haptic(5), setCategory(c))}>
 							{c || 'All'}
 						</button>
 					))}
@@ -134,22 +135,22 @@ export function PluginBrowser({q}: {q: string}) {
 									{p.stars ? ` · ★ ${p.stars}` : ''}
 								</small>
 								<p>{p.description}</p>
-								{p.job?.state === 'error' && <p className="plugin-error">{p.job.error}</p>}
+								{p.job?.state === 'error' && <p className="plugin-error" role="alert">{p.job.error}</p>}
 								<div className="plugin-actions">
 									{busy ? (
-										<button className="btn small" disabled>
+										<button className="btn small" disabled aria-label={`${p.job!.state === 'installing' ? 'Installing' : 'Removing'} ${p.name}`}>
 											<span className="spinner" /> {p.job!.state === 'installing' ? 'Installing…' : 'Removing…'}
 										</button>
 									) : p.installed ? (
-										<button className="btn small" disabled={!owner || act.isPending} onClick={() => remove(p)}>
+										<button className="btn small" disabled={!owner || act.isPending} aria-label={`Installed · Remove ${p.name}`} onClick={() => remove(p)}>
 											<Icon name="check" size={15} /> Installed · Remove
 										</button>
 									) : (
-										<button className="btn small primary" disabled={!owner || !data?.available || act.isPending} onClick={() => install(p)} title={owner ? undefined : 'Only the server’s owner can install plugins'}>
+										<button className="btn small primary" disabled={!owner || !data?.available || act.isPending} aria-label={`Install ${p.name}`} onClick={() => install(p)} title={owner ? undefined : 'Only the server’s owner can install plugins'}>
 											Install
 										</button>
 									)}
-									<a className="btn small ghost" href={p.page} target="_blank" rel="noopener noreferrer">
+									<a className="btn small ghost" href={p.page} target="_blank" rel="noopener noreferrer" aria-label={`Details for ${p.name}`}>
 										Details
 									</a>
 								</div>

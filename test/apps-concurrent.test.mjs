@@ -29,11 +29,11 @@ function gitAsync(args, cwd, delayMs = 0) {
 
 async function freeAppPort() {
 	for (let attempt = 0; attempt < 40; attempt++) {
-		const candidate = 30_000 + Math.floor(Math.random() * 9_000)
+		const candidate = 29_000 + Math.floor(Math.random() * 3_768)
 		const ok = await new Promise((resolve) => {
 			const s = net.createServer()
 			s.once('error', () => resolve(false))
-			s.listen(candidate, '127.0.0.1', () => s.close(() => resolve(true)))
+			s.listen(candidate, '0.0.0.0', () => s.close(() => resolve(true)))
 		})
 		if (ok) return candidate
 	}

@@ -252,7 +252,7 @@ export async function startFakeserverd({
 		systemDefault: !!k.systemDefault,
 		mine: k.ownerUserId === userId,
 	})
-	const assistantCanUse = (k, userId) => k.ownerUserId === userId || k.sharedWith.includes(userId) || k.systemDefault
+	const assistantCanUse = (k, userId) => k.ownerUserId === userId || (!!k.systemDefault && k.provider !== 'chatgpt' && k.provider !== 'hermes')
 	const assistantOwned = (id, userId) => assistantChats.find((c) => c.id === String(id ?? '') && c.userId === userId)
 	const assistantStep = (actionId, userId) => {
 		const id = String(actionId ?? '').trim()
@@ -309,7 +309,10 @@ export async function startFakeserverd({
 				tokens.get(accessToken).expiresAt = Infinity
 				const cookie = newToken()
 				browser.set(accessToken, cookie)
-				res.setHeader('set-cookie', [`OMARCHY_BROWSER_SESSION=${cookie}; Path=/; HttpOnly; SameSite=Lax`])
+				// Like omarchyd, it also hands over the app-gateway session.
+				const appTok = newToken()
+				appSessionTokens.add(appTok)
+				res.setHeader('set-cookie', [`OMARCHY_APP_SESSION=${appTok}; Path=/; HttpOnly`, `OMARCHY_BROWSER_SESSION=${cookie}; Path=/; HttpOnly; SameSite=Lax`])
 				return accessToken
 			},
 		},
@@ -984,7 +987,7 @@ export async function startFakeserverd({
 				socket.write('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n')
 				return socket.destroy()
 			}
-			terminals.push({appId: url.searchParams.get('appId'), cols: Number(url.searchParams.get('cols')), rows: Number(url.searchParams.get('rows')), ...(url.searchParams.get('fresh') ? {fresh: url.searchParams.get('fresh')} : {})})
+			terminals.push({appId: url.searchParams.get('appId'), cols: Number(url.searchParams.get('cols')), rows: Number(url.searchParams.get('rows')), ...(url.searchParams.get('fresh') ? {fresh: url.searchParams.get('fresh')} : {}), ...(url.searchParams.get('containerId') ? {containerId: url.searchParams.get('containerId'), containerMode: url.searchParams.get('containerMode')} : {})})
 			return wss.handleUpgrade(req, socket, head, (ws) => shellServer(ws, url.searchParams.get('appId'), keys))
 		}
 		if (url.pathname !== '/machines/console' || !ticket?.startsWith('machines:') || !tickets.delete(ticket) || !held || !url.searchParams.get('machineId') || !url.searchParams.get('sessionId')) {

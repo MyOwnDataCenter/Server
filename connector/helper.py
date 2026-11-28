@@ -23,11 +23,11 @@ import subprocess
 import sys
 import time
 
-DEV = re.compile(r"^/dev/(sd[a-z]{1,2}|vd[a-z]{1,2}|nvme\d{1,2}n\d{1,2}|mmcblk\d{1,2}|hd[a-z])$")
-BY_ID = re.compile(r"^/dev/disk/by-id/[A-Za-z0-9._:+-]+$")
-NAME = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
+DEV = re.compile(r"^/dev/(sd[a-z]{1,2}|vd[a-z]{1,2}|nvme\d{1,2}n\d{1,2}|mmcblk\d{1,2}|hd[a-z])\Z")
+BY_ID = re.compile(r"^/dev/disk/by-id/[A-Za-z0-9._:+-]+\Z")
+NAME = re.compile(r"^[a-z][a-z0-9-]{0,31}\Z")
 ZFS_NAME = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]{0,63}\Z")
-UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\Z")
 SYSTEM_MOUNTS = frozenset(["/", "/home", "[SWAP]"])
 SYSTEM_MOUNT_PREFIXES = ("/boot", "/efi", "/var", "/usr", "/opt", "/srv", "/nix")
 SKIP_FS = frozenset(["crypto_LUKS", "swap", "LVM2_member", "linux_raid_member", "zfs_member"])
@@ -829,7 +829,7 @@ def handle(verb, args, run=None, user=None, realpath=None, fstab_text=None, file
         if d.get("rota") not in (True, 1, "1"):
             fail("Only spinning hard drives sleep")
         serial = d.get("serial") or ""
-        if not re.match(r"^[\w.-]{1,64}$", serial):
+        if not re.match(r"^[\w.-]{1,64}\Z", serial):
             fail("This drive doesn’t report a serial number, so its setting can’t be kept")
         run("hdparm", ["-S", str(SLEEP_MINUTES[m]), d["path"]])
         try:

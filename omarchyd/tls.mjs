@@ -342,7 +342,9 @@ export function tlsContext({dir = defaultTlsDir(), refreshMs = 10 * 60_000, lazy
 // Listen for both http:// and https:// on one port and hand every connection to `server` (an
 // http.Server, with its own request and upgrade handlers). Requests over TLS have
 // req.socket.encrypted set. Returns the listening net.Server.
-export function dualProtocolServer(server, getContext) {
+// A connection that sends nothing for `firstByteMs` is closed: until its first bytes arrive it
+// belongs to no http server, so no http timeout ever ends it, and idle connections would pile up.
+export function dualProtocolServer(server, getContext, {firstByteMs = 30_000} = {}) {
 	// Every connection, so a restart can end them (net.Server.close() waits for all of them to close,
 	// and an open WebSocket never does).
 	const sockets = new Set()
@@ -351,7 +353,10 @@ export function dualProtocolServer(server, getContext) {
 		sockets.add(socket)
 		socket.once('close', () => sockets.delete(socket))
 		socket.once('error', () => socket.destroy())
+		const silent = setTimeout(() => socket.destroy(), firstByteMs)
+		socket.once('close', () => clearTimeout(silent))
 		socket.once('data', (first) => {
+			clearTimeout(silent)
 			socket.pause()
 			const ctx = getContext?.()
 			if (first[0] === 0x16 && ctx) {

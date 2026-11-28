@@ -104,6 +104,19 @@ test('folderPathOk rejects home itself, double slashes, and dot segments while a
 	assert.deepEqual(reviewInstallInput(review, true, {'jellyfin/media': '/home/chris/my..folder'}), {folders: [{appId: 'jellyfin', id: 'media', path: '/home/chris/my..folder'}]})
 })
 
+test('a bound store names its machine, and the confirmation waits for a choice', async () => {
+	const store = await readFile(new URL('../web/src/screens/Store.tsx', import.meta.url), 'utf8')
+	const review = await readFile(new URL('../web/src/beforeInstall.tsx', import.meta.url), 'utf8')
+	const desk = await readFile(new URL('../web/src/desktop/Desktop.tsx', import.meta.url), 'utf8')
+	assert.match(store, /bound \? `App Store for \$\{bound\.name\}` : 'App Store'/)
+	assert.match(store, /const machineName = bound\?\.name \|\| chosen\?\.name \|\| preferredTarget\?\.name \|\| ''/)
+	assert.match(store, /machineName !== ''/)
+	assert.match(store, /machineName=\{machineName\}/)
+	assert.match(review, /will be installed on \{machineName \|\| 'your server'\}/)
+	assert.match(review, /Install \$\{appName\}\$\{machineName \? ` on \$\{machineName\}` : ''\}/)
+	assert.match(desk, /return name \? `App Store for \$\{name\}` : SYS\.store\.title/)
+})
+
 test('store install review stays open until the install request succeeds', async () => {
 	const store = await readFile(new URL('../web/src/screens/Store.tsx', import.meta.url), 'utf8')
 	const block = store.match(/<BeforeInstall[\s\S]*?\/>/)?.[0] ?? ''

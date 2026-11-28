@@ -3,7 +3,7 @@
 // server's own certificate authority), so the other computer opens no ports.
 //
 // Joining: the owner makes a one-time pairing code (15 minutes, used once) with the abilities they
-// allow (watching is always on; terminal, desktop, manage, storage, backup and files are optional). The connector trades
+// allow (watching is always on; terminal, desktop, manage, storage, backup, files and virtual machines are optional). The connector trades
 // it for its own id and key; only a hash of the key is kept here.
 //
 // Two limits on what a computer does: the abilities chosen when pairing, which the connector also
@@ -20,16 +20,21 @@ import {basename, join} from 'node:path'
 import {fileURLToPath} from 'node:url'
 import {WebSocketServer} from 'ws'
 
-import {writeAtomic} from './atomic.mjs'
+import {readJsonState, writeAtomic} from './atomic.mjs'
+import {GUEST_PAIR_TTL} from './guest-install.mjs'
+import {createKeyedLock} from './locks.mjs'
+import {updateNics} from './nics.mjs'
 import {RpcError} from './rpc.mjs'
 import {parseResize} from './terminal.mjs'
+import {fanoutWake} from './wol.mjs'
 
 // backup: the computer backs up folders you choose to this server (see backups.mjs). Its restic
 // uploads through the connector's own pinned connection, and can only add backups, never delete them.
 // storage: see its drives, format extra disks, and manage pools on that computer (connector/helper.py).
 // services: inspect and restart user systemd units and Podman/Docker containers.
 // files: browse, upload, download, and copy files inside /Home and /Pools (and Clip Book home streaming).
-const ABILITIES = ['terminal', 'desktop', 'manage', 'storage', 'backup', 'services', 'files']
+// vms: create and run virtual machines on that computer (connector/vm-helper.py).
+const ABILITIES = ['terminal', 'desktop', 'manage', 'storage', 'backup', 'services', 'files', 'vms']
 const REMOTE_FILE_MAX = 20 * 1024 * 1024
 const PAIR_TTL = 15 * 60_000
 // A viewer that stops reading must not queue connector frames in memory without a bound.
@@ -62,7 +67,7 @@ function closeSocket(ws, code, reason) {
 }
 // Same sentence a refused new connection gets, so an open session ends with that reason too.
 function switchedOff(name, ability) {
-	const what = ability === 'terminal' ? 'The terminal' : ability === 'files' ? 'Files' : 'The desktop'
+	const what = ability === 'terminal' ? 'The terminal' : ability === 'files' ? 'Files' : ability === 'vms' ? 'Virtual machines' : 'The desktop'
 	return `${what} isn’t switched on for ${name}`
 }
 function closeLiveChannel(l, ch, reason) {
@@ -176,13 +181,40 @@ export async function sendWolPacket(mac) {
 				resolve()
 			})
 		})
+		// One address failing (no route to it) is fine. Every one failing means nothing was sent.
+		let sent = 0
+		let failure = null
 		for (const host of subnetBroadcasts()) {
-			await new Promise((resolve) => sock.send(packet, 9, host, () => resolve()))
+			const error = await new Promise((resolve) => sock.send(packet, 9, host, resolve))
+			if (error) failure ??= error
+			else sent++
 		}
+		if (!sent) throw failure ?? new Error('Couldn’t send a wake packet')
 	} finally {
 		try {
 			sock.close()
 		} catch {}
+	}
+}
+
+function cleanPosture(p) {
+	if (!p || typeof p !== 'object') return null
+	const ports = Array.isArray(p.listeningPorts)
+		? p.listeningPorts
+				.slice(0, 50)
+				.map((x) => ({
+					port: num(x?.port),
+					proto: x?.proto === 'tcp6' ? 'tcp6' : 'tcp',
+					addr: clip(x?.addr, 32),
+				}))
+				.filter((x) => x.port && x.port > 0 && x.port <= 65535)
+		: []
+	return {
+		rebootRequired: !!p.rebootRequired,
+		rebootReason: clip(p.rebootReason, 120),
+		securityUpdates: num(p.securityUpdates),
+		listeningPorts: ports,
+		failedUnits: num(p.failedUnits) ?? 0,
 	}
 }
 
@@ -198,6 +230,7 @@ function cleanInfo(i = {}) {
 		agentSha: cleanSha(i.agentSha),
 		helperSha: cleanSha(i.helperSha),
 		macs: Array.isArray(i.macs) ? i.macs.filter((m) => MAC_RE.test(String(m ?? ''))).map((m) => String(m).toLowerCase()).slice(0, 8) : [],
+		posture: cleanPosture(i.posture),
 		pkg: clip(i.pkg, 16),
 		updateCommand: clip(i.updateCommand, 160),
 		omarchy: !!i.omarchy,
@@ -205,6 +238,7 @@ function cleanInfo(i = {}) {
 		themes: Array.isArray(i.themes) ? i.themes.slice(0, 200).map((t) => clip(t, 80)) : [],
 		theme: clip(i.theme, 80),
 		desktop: {kind: clip(i.desktop?.kind, 32), ok: !!i.desktop?.ok, why: clip(i.desktop?.why, 200)},
+		libvirt: i.libvirt === true,
 	}
 }
 
@@ -220,7 +254,7 @@ function serverAddresses() {
 	return out
 }
 
-export function createConnector({dataDir, tlsDir, connectorDir = fileURLToPath(new URL('../connector', import.meta.url)), plugins = null, files = null, source = async () => 'https://raw.githubusercontent.com/MyOwnDataCenter/server', webPort = 7780, now = () => Date.now(), pingInterval = 25_000, sendWol = sendWolPacket}) {
+export function createConnector({dataDir, tlsDir, connectorDir = fileURLToPath(new URL('../connector', import.meta.url)), plugins = null, files = null, source = async () => 'https://raw.githubusercontent.com/MyOwnDataCenter/server', webPort = 7780, now = () => Date.now(), pingInterval = 25_000, sendWol = sendWolPacket, onOnline = null}) {
 	const file = join(dataDir, 'swarm.json')
 	let state = {agents: []}
 	// Set when swarm.json exists but cannot be used. Nothing may write it until the owner repairs it.
@@ -314,31 +348,68 @@ export function createConnector({dataDir, tlsDir, connectorDir = fileURLToPath(n
 	// A guest connector is the same agent, remembered against the virtual machine it was installed on.
 	// Anything else stays a physical computer. A bad value must not hide that computer.
 	const guestOf = (a) => (typeof a?.guestOf === 'string' && /^[a-f0-9]{8}$/.test(a.guestOf) ? a.guestOf : '')
+	// An LXC connector is remembered against the Incus instance name (same rules as containers.mjs NAME).
+	const CONTAINER_OF = /^[a-z]([a-z0-9-]{0,61}[a-z0-9])?$/
+	const containerOf = (a) => (typeof a?.containerOf === 'string' && CONTAINER_OF.test(a.containerOf) ? a.containerOf : '')
+	function reportedMacs(info) {
+		const nics = info?.nics
+		if (Array.isArray(nics) && nics.length) {
+			return nics.map((n) => (typeof n === 'string' ? n : n?.mac)).filter(Boolean)
+		}
+		return Array.isArray(info?.macs) ? info.macs : []
+	}
+	function rememberedMacs(a) {
+		const fromNics = (a.nics ?? []).map((n) => n.mac).filter(Boolean)
+		if (fromNics.length) return fromNics
+		return Array.isArray(a.info?.macs) ? a.info.macs : []
+	}
+	function tickNics(a, reported) {
+		const t = now()
+		const elapsed = a.nicTick ? Math.max(0, t - a.nicTick) : 0
+		a.nicTick = t
+		a.nics = updateNics(a.nics, reported, {now: t, session: a.nicSession ?? 0, elapsedOnlineMs: elapsed})
+	}
+
 	const view = (a) => {
 		const l = live.get(a.id)
 		const agentSha = a.info?.agentSha || ''
 		const helperSha = a.info?.helperSha || ''
+		const t = now()
+		const m = l?.metrics ?? a.metrics ?? null
+		const lastSeen = l ? (l.lastActivity ?? t) : (a.lastSeen ?? null)
+		const activityAgeMs = l ? Math.max(0, t - (l.lastActivity ?? t)) : null
+		const freshness = !l ? 'offline' : activityAgeMs > 120_000 ? 'stale' : 'live'
+		const macs = rememberedMacs(a)
+		const info = a.info || macs.length ? {...(a.info ?? {}), macs} : null
 		return {
 			id: a.id,
 			name: a.name,
 			online: !!l,
-			lastSeen: l ? now() : (a.lastSeen ?? null),
+			lastSeen,
+			asOf: lastSeen,
+			freshness,
 			enrolledAt: a.enrolledAt,
 			guestOf: guestOf(a),
+			containerOf: containerOf(a),
 			// What it may do: allowed at pairing (and by the connector itself) and still switched on here.
 			allowed: a.allowed,
 			on: a.on,
-			info: a.info ?? null,
-			metrics: l?.metrics ?? a.metrics ?? null,
+			info,
+			macs,
+			libvirt: a.info?.libvirt === true,
+			metrics: m,
 			updateAvailable: Boolean(a.info && bundledShas.agentSha && agentSha !== bundledShas.agentSha),
 			helperUpdateAvailable: Boolean(a.info && a.allowed?.storage && bundledShas.helperSha && helperSha && helperSha !== bundledShas.helperSha),
 		}
 	}
 
-	async function caFingerprint() {
+	async function caCertificate() {
 		const pem = await readFile(join(tlsDir, 'ca.crt'), 'utf8').catch(() => null)
-		if (!pem) throw new RpcError('PRECONDITION_FAILED', 'This server’s secure address (https) isn’t set up yet, and the connector needs it.')
-		return new X509Certificate(pem).fingerprint256.replace(/:/g, '').toLowerCase()
+		if (!pem || !pem.includes('BEGIN CERTIFICATE')) throw new RpcError('PRECONDITION_FAILED', 'This server’s secure address (https) isn’t set up yet, and the connector needs it.')
+		return pem
+	}
+	async function caFingerprint() {
+		return new X509Certificate(await caCertificate()).fingerprint256.replace(/:/g, '').toLowerCase()
 	}
 
 	// ---- owner actions (tRPC) ------------------------------------------------------------------
@@ -348,14 +419,28 @@ export function createConnector({dataDir, tlsDir, connectorDir = fileURLToPath(n
 		if (!/^[a-f0-9]{8}$/.test(id)) throw new RpcError('BAD_REQUEST', 'That virtual machine isn’t valid')
 		return id
 	}
+	function pairingContainer(input) {
+		if (input == null || input === '') return ''
+		const name = String(input)
+		if (!CONTAINER_OF.test(name)) throw new RpcError('BAD_REQUEST', 'That container isn’t valid')
+		return name
+	}
 	async function pair(input = {}) {
 		await loaded
 		const abilities = Object.fromEntries(ABILITIES.map((k) => [k, input?.[k] === true]))
 		const linked = pairingGuest(input?.machineId)
+		const linkedContainer = pairingContainer(input?.containerOf)
+		if (linked && linkedContainer) throw new RpcError('BAD_REQUEST', 'A connector can’t belong to both a virtual machine and a container')
 		const token = randomBytes(24).toString('base64url')
 		for (const [k, p] of pairings) if (p.expires < now()) pairings.delete(k)
-		pairings.set(sha(token), {abilities, expires: now() + PAIR_TTL, ...(linked ? {guestOf: linked} : {})})
-		return {token, ca: await caFingerprint(), expiresAt: now() + PAIR_TTL, abilities, source: await source(), port: webPort, addresses: serverAddresses()}
+		const ttl = linked || linkedContainer ? GUEST_PAIR_TTL : PAIR_TTL
+		pairings.set(sha(token), {
+			abilities,
+			expires: now() + ttl,
+			...(linked ? {guestOf: linked} : {}),
+			...(linkedContainer ? {containerOf: linkedContainer} : {}),
+		})
+		return {token, ca: await caFingerprint(), expiresAt: now() + ttl, abilities, source: await source(), port: webPort, addresses: serverAddresses()}
 	}
 	// Re-authorize an existing computer in place so its name, id, metrics and backups stay intact.
 	async function reauthorize(input = {}) {
@@ -456,6 +541,16 @@ export function createConnector({dataDir, tlsDir, connectorDir = fileURLToPath(n
 			if (v.updateAvailable) {
 				out.push({id: `${a.id}:connector`, agentId: a.id, name: a.name, kind: 'connector-update', severity: 'info', message: `Connector update available for ${a.name}`})
 			}
+			const posture = a.info?.posture
+			if (posture?.rebootRequired) {
+				out.push({id: `${a.id}:reboot`, agentId: a.id, name: a.name, kind: 'reboot-required', severity: 'warning', message: `${a.name} needs a restart${posture.rebootReason ? ` (${posture.rebootReason})` : ''}`})
+			}
+			if (typeof posture?.securityUpdates === 'number' && posture.securityUpdates > 0) {
+				out.push({id: `${a.id}:security-updates`, agentId: a.id, name: a.name, kind: 'security-updates', severity: 'warning', message: `${a.name} has ${posture.securityUpdates} security update${posture.securityUpdates === 1 ? '' : 's'} waiting`})
+			}
+			if (typeof posture?.failedUnits === 'number' && posture.failedUnits > 0) {
+				out.push({id: `${a.id}:failed-units`, agentId: a.id, name: a.name, kind: 'failed-units', severity: 'warning', message: `${a.name} has ${posture.failedUnits} failed system service${posture.failedUnits === 1 ? '' : 's'}`})
+			}
 		}
 		return out
 	}
@@ -463,10 +558,25 @@ export function createConnector({dataDir, tlsDir, connectorDir = fileURLToPath(n
 		await loaded
 		const a = find(String(input?.id ?? ''))
 		if (!a) throw new RpcError('NOT_FOUND', 'That computer isn’t in your swarm')
-		const mac = String(input?.mac || a.info?.macs?.[0] || '').trim().toLowerCase()
-		if (!mac || !MAC_RE.test(mac)) throw new RpcError('PRECONDITION_FAILED', `No network adapter address has been recorded for ${a.name} yet`)
-		await sendWol(mac)
-		return {ok: true, mac}
+		if (!may(a, 'manage')) throw new RpcError('FORBIDDEN', `Managing ${a.name} isn’t switched on`)
+		const macs = rememberedMacs(a)
+		const mac = String(input?.mac || macs[0] || '').trim().toLowerCase()
+		try {
+			const out = await fanoutWake({
+				macs,
+				selfId: a.id,
+				onlineIds: [...live.keys()],
+				sendLocal: async (list) => {
+					for (const one of list) await sendWol(one)
+				},
+				sendRemote: (id, list) => call(id, 'wol', {macs: list}, 4_000),
+			})
+			return {ok: true, mac, ...out}
+		} catch (e) {
+			if (/remembered/i.test(e?.message ?? '')) throw new RpcError('PRECONDITION_FAILED', 'No network address remembered yet. It has to be online once so its network card can be learned.')
+			if (e instanceof RpcError) throw e
+			throw new RpcError('BAD_GATEWAY', 'Couldn’t send a wake packet from this server or any computer that’s on')
+		}
 	}
 	async function list() {
 		await loaded
@@ -482,8 +592,13 @@ export function createConnector({dataDir, tlsDir, connectorDir = fileURLToPath(n
 		await save()
 		await forgetRemote(a.id).catch(() => {})
 		const l = live.get(a.id)
-		// Tell it to forget this server and stop; then cut it off either way.
+		// Tell it to forget this server and stop; then cut it off either way. Terminals, desktops and
+		// transfers that are open end at once, with the real reason, not after the delay as "went offline".
 		if (l) {
+			const reason = 'This computer was removed from the swarm'
+			for (const ch of [...l.channels.keys()]) closeLiveChannel(l, ch, reason)
+			for (const c of l.calls.values()) (clearTimeout(c.timer), c.reject(new RpcError('BAD_GATEWAY', reason)))
+			l.calls.clear()
 			try {
 				l.ws.send(JSON.stringify({op: 'removed'}))
 			} catch {}
@@ -522,7 +637,7 @@ export function createConnector({dataDir, tlsDir, connectorDir = fileURLToPath(n
 		const l = live.get(a.id)
 		if (l) {
 			for (const [ch, channel] of [...l.channels]) {
-				const ability = channel.kind === 'pty' ? 'terminal' : channel.kind === 'vnc' ? 'desktop' : channel.kind === 'file' ? 'files' : null
+				const ability = channel.kind === 'pty' ? 'terminal' : channel.kind === 'vnc' ? (channel.guest ? 'vms' : 'desktop') : channel.kind === 'file' ? 'files' : null
 				if (ability && !may(a, ability)) closeLiveChannel(l, ch, switchedOff(a.name, ability))
 			}
 			if (!may(a, 'terminal') && l.ws.readyState === l.ws.OPEN) {
@@ -622,11 +737,16 @@ export function createConnector({dataDir, tlsDir, connectorDir = fileURLToPath(n
 			existing.allowed = allowed
 			existing.on = {...allowed}
 			existing.info = info
+			tickNics(existing, reportedMacs(body?.info ?? info))
 			await save()
 			const old = live.get(existing.id)
 			if (old) {
 				old.progress = null
-				for (const ch of old.channels.values()) closeSocket(ch.ws, 1000, 'Permissions updated')
+				for (const ch of [...old.channels.values()]) {
+					// A file transfer has no browser socket, only a way to end it.
+					if (ch.kind === 'file') ch.end(new RpcError('BAD_GATEWAY', 'Permissions updated'))
+					else closeSocket(ch.ws, 1000, 'Permissions updated')
+				}
 				for (const c of old.calls.values()) (clearTimeout(c.timer), c.reject(new RpcError('BAD_GATEWAY', 'Permissions updated')))
 				old.channels.clear()
 				old.calls.clear()
@@ -640,7 +760,9 @@ export function createConnector({dataDir, tlsDir, connectorDir = fileURLToPath(n
 		let name = info.hostname || 'computer'
 		for (let n = 2; state.agents.some((a) => a.name === name); n++) name = `${info.hostname || 'computer'} ${n}`
 		const agent = {id, name, keyHash: sha(key), allowed, on: {...allowed}, enrolledAt: t, lastSeen: null, info}
+		tickNics(agent, reportedMacs(body?.info ?? info))
 		if (p.guestOf) agent.guestOf = p.guestOf
+		if (p.containerOf) agent.containerOf = p.containerOf
 		state.agents.push(agent)
 		await save()
 		return {status: 200, body: {id, key, name, abilities: allowed}}
@@ -681,11 +803,14 @@ export function createConnector({dataDir, tlsDir, connectorDir = fileURLToPath(n
 				old.calls.clear()
 				old.ws.terminate()
 			}
-			const l = {ws, metrics: a.metrics ?? null, channels: new Map(), nextCh: 0, calls: new Map(), nextCall: 0}
+			a.nicSession = (a.nicSession ?? 0) + 1
+			a.nicTick = now()
+			const l = {ws, metrics: a.metrics ?? null, lastActivity: now(), channels: new Map(), nextCh: 0, calls: new Map(), nextCall: 0, reportedNics: null}
 			live.set(a.id, l)
 			let ponged = true
 			ws.on('pong', () => {
 				ponged = true
+				l.lastActivity = now()
 			})
 			const alive = setInterval(() => {
 				if (ws.readyState !== ws.OPEN) return
@@ -695,6 +820,7 @@ export function createConnector({dataDir, tlsDir, connectorDir = fileURLToPath(n
 			}, pingInterval)
 			alive.unref?.()
 			ws.on('message', async (data, isBinary) => {
+				l.lastActivity = now()
 				try {
 					if (isBinary) {
 						const buf = Buffer.from(data)
@@ -720,6 +846,9 @@ export function createConnector({dataDir, tlsDir, connectorDir = fileURLToPath(n
 					}
 					if (msg.op === 'hello') {
 						a.info = cleanInfo(msg.info)
+						l.reportedNics = reportedMacs(msg.info)
+						if (!l.reportedNics.length) l.reportedNics = a.info?.macs ?? []
+						tickNics(a, l.reportedNics)
 						// The connector's own limits win if they're narrower than what was stored.
 						for (const k of ABILITIES) if (msg.abilities?.[k] !== true) a.allowed[k] = a.on[k] = false
 						a.lastSeen = now()
@@ -729,9 +858,12 @@ export function createConnector({dataDir, tlsDir, connectorDir = fileURLToPath(n
 						} catch {
 							console.error('[omarchyd] couldn’t save swarm.json')
 						}
+						// Not awaited: a vm-start result is a later message on this socket.
+						if (typeof onOnline === 'function') onOnline(a.id)
 					} else if (msg.op === 'metrics') {
 						l.metrics = cleanMetrics(msg.metrics)
 						a.metrics = l.metrics
+						if (l.reportedNics) tickNics(a, l.reportedNics)
 						recordHistory(a.id, l.metrics)
 					} else if (msg.op === 'file' || msg.op === 'ack') {
 						const ch = l.channels.get(Number(msg.ch))
@@ -794,12 +926,18 @@ export function createConnector({dataDir, tlsDir, connectorDir = fileURLToPath(n
 		const l = live.get(agentId)
 		// Only a terminal or a desktop is a browser socket. A file channel is opened by the server
 		// itself (files.pull / files.push). Treating "file" as a desktop would let a browser read it.
-		const ability = kind === 'pty' ? 'terminal' : kind === 'vnc' ? 'desktop' : null
+		// A guest console is VNC on that VM (ability vms). VNC without guest is still the desktop.
+		if (kind === 'vnc' && typeof opts.guest === 'string' && !/^[a-f0-9]{8}$/.test(opts.guest)) {
+			return closeSocket(browserWs, 1011, 'That virtual machine isn’t valid')
+		}
+		const guest = kind === 'vnc' && typeof opts.guest === 'string' ? opts.guest : undefined
+		const ability = kind === 'pty' ? 'terminal' : kind === 'vnc' ? (guest ? 'vms' : 'desktop') : null
 		const why = !a ? 'Unknown computer' : !l ? 'That computer is offline' : !ability ? 'That isn’t a terminal or a desktop' : switchedOff(a.name, ability)
 		if (!a || !l || !ability || !may(a, ability)) return closeSocket(browserWs, 1011, why)
 		const ch = ++l.nextCh
-		l.channels.set(ch, {ws: browserWs, kind})
+		l.channels.set(ch, guest ? {ws: browserWs, kind, guest} : {ws: browserWs, kind})
 		const openMsg = {op: 'open', ch, kind, cols: opts.cols, rows: opts.rows}
+		if (guest) openMsg.guest = guest
 		if (kind === 'pty') {
 			openMsg.session = typeof opts.session === 'string' && /^[A-Za-z0-9._-]{1,40}$/.test(opts.session) ? opts.session : 'main'
 			if (opts.fresh) openMsg.fresh = true
@@ -1128,27 +1266,31 @@ export function createConnector({dataDir, tlsDir, connectorDir = fileURLToPath(n
 	}
 	const remoteFile = join(dataDir, 'remote-apps.json')
 	const APP_INSTALL_ID = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,64}$/
+	const validRemote = (value) => value !== null && typeof value === 'object' && Array.isArray(value.apps)
+	let remoteDamagedLogged = false
+	// A damaged file is not an empty list: it is reported once and never overwritten.
 	async function readRemote() {
-		try {
-			const data = JSON.parse(await readFile(remoteFile, 'utf8'))
-			return Array.isArray(data?.apps) ? data.apps : []
-		} catch {
-			return []
-		}
+		const res = await readJsonState(remoteFile, remoteDamagedLogged ? {validate: validRemote, log: null} : {validate: validRemote})
+		remoteDamagedLogged = res.damaged
+		return {apps: res.status === 'ok' ? res.value.apps : [], damaged: res.damaged}
 	}
 	async function writeRemote(apps) {
 		await writeAtomic(remoteFile, JSON.stringify({apps}), {mode: 0o600})
 	}
+	// Installs and removals read, change and write the same file: one at a time, so none is lost.
+	const remoteLock = createKeyedLock()
+	const updateRemote = (change) =>
+		remoteLock('remote-apps', async () => {
+			const {apps, damaged} = await readRemote()
+			if (!damaged) await writeRemote(change(apps))
+		})
 	async function forgetRemote(computerId) {
-		const apps = (await readRemote()).filter((a) => a.computerId !== computerId)
-		await writeRemote(apps)
+		await updateRemote((apps) => apps.filter((a) => a.computerId !== computerId))
 	}
 	async function rememberRemote(agent, apps) {
-		const current = await readRemote()
 		const ids = new Set(apps.map((a) => a.appId))
-		const kept = current.filter((a) => !(a.computerId === agent.id && ids.has(a.id)))
-		const next = [
-			...kept,
+		await updateRemote((current) => [
+			...current.filter((a) => !(a.computerId === agent.id && ids.has(a.id))),
 			...apps.map((a) => ({
 				id: a.appId,
 				name: clip(a.name || a.appId, 80),
@@ -1159,13 +1301,12 @@ export function createConnector({dataDir, tlsDir, connectorDir = fileURLToPath(n
 				state: 'running',
 				installedAt: Date.now(),
 			})),
-		]
-		await writeRemote(next)
+		])
 	}
 	async function remoteApps() {
 		await loaded
 		const names = new Map(state.agents.map((a) => [a.id, a.name]))
-		return (await readRemote())
+		return (await readRemote()).apps
 			.filter((a) => a && names.has(a.computerId) && typeof a.id === 'string')
 			.map((a) => ({
 				id: a.id,
@@ -1203,8 +1344,11 @@ export function createConnector({dataDir, tlsDir, connectorDir = fileURLToPath(n
 	const fleetFiles = {stat: statFile, list: listFiles, pull: pullFile, push: pushFile, copy: (id, from, to) => transferOn(id, from, to, true), move: (id, from, to) => transferOn(id, from, to, false), remove: removeOn, mkdir: mkdirOn, recents: recentsOn, agents: fileAgents}
 
 	return {
+		caCertificate,
 		files: fleetFiles,
 		backup,
+		call,
+		progress: (id) => live.get(id)?.progress ?? null,
 		procedures: {
 			'swarm.list': {kind: 'query', run: list},
 			'swarm.history': {kind: 'query', run: getHistory},
@@ -1231,6 +1375,33 @@ export function createConnector({dataDir, tlsDir, connectorDir = fileURLToPath(n
 					} catch (e) {
 						if (/allow Storage|doesn’t allow/i.test(e.message)) return {helperAvailable: false, zfsAvailable: false, storageAllowed: false}
 						throw storageReadError(e, a.name)
+					}
+				},
+			},
+			'swarm.vms.status': {
+				kind: 'query',
+				run: async (input) => {
+					const a = await requireAgent(input, false)
+					if (!may(a, 'vms')) return {vmsAllowed: false, libvirt: false}
+					try {
+						const raw = await call(a.id, 'vm-status', {}, 30_000)
+						const s = typeof raw === 'string' ? JSON.parse(raw) : raw
+						const libvirt = s?.libvirt === true
+						const kvm = s?.kvm === true
+						const models = Array.isArray(s?.videoModels) ? s.videoModels.filter((m) => m === 'vga' || m === 'virtio' || m === 'bochs' || m === 'qxl' || m === 'cirrus' || m === 'none') : []
+						return {
+							vmsAllowed: true,
+							libvirt,
+							kvm,
+							arch: s?.arch === 'arm64' ? 'arm64' : 'amd64',
+							threads: num(s?.threads),
+							memoryMb: num(s?.memoryMb),
+							freeGb: num(s?.freeGb),
+							videoModels: models,
+							...(libvirt && !kvm ? {performanceWarning: 'Hardware virtualization (KVM) isn’t available, so machines run much slower. Turn on VT-x/AMD-V in the BIOS, or nested virtualization if this is itself a VM.'} : {}),
+						}
+					} catch (e) {
+						throw new RpcError('BAD_GATEWAY', e.message)
 					}
 				},
 			},
@@ -1493,6 +1664,10 @@ export function createConnector({dataDir, tlsDir, connectorDir = fileURLToPath(n
 		readAgentScript,
 		readRemoteFile,
 		writeRemoteFile,
+		summary: async () => {
+			await loaded
+			return {total: state.agents.length, online: state.agents.filter((a) => live.has(a.id)).length}
+		},
 		upgradeAgent,
 		openChannel,
 		isAgentMachine: (machineId) => /^agent-[0-9a-f]{12}$/.test(machineId),

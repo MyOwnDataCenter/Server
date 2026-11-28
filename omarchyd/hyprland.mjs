@@ -10,7 +10,7 @@
 import {execFile, spawn} from 'node:child_process'
 import {createHash} from 'node:crypto'
 import {constants as fsConstants} from 'node:fs'
-import {access, chmod, lstat, mkdir, open as fsOpen, readFile, readdir, realpath, rename, rm, stat} from 'node:fs/promises'
+import {access, chmod, lstat, mkdir, open as fsOpen, readFile, readdir, realpath, rename, rm, stat, writeFile} from 'node:fs/promises'
 import net from 'node:net'
 import os from 'node:os'
 import {dirname, extname, join, resolve} from 'node:path'
@@ -24,11 +24,52 @@ const CAPTURE_SOURCE = join(HERE, 'hypr-rail-capture.c')
 const ADDRESS_RE = /^0x[0-9a-f]{4,16}$/i
 const DESKTOP_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,119}$/
 const OUTPUT_NAME_RE = /^[A-Za-z0-9_.-]{1,32}$/
+const PROFILE_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/
 const MAX_STREAMS = 12
 const MAX_SSE_SUBSCRIBERS = 32
 const MAX_PENDING_LAUNCHES = 8
 const MAX_CLIPBOARD_BYTES = 128 * 1024
 const RAIL_OUTPUT = 'RAIL-1'
+
+// Deterministic selector algorithm for ranking measured GPU encode presets against client RTT & target frame rate.
+export function scoreProfileCandidate(cand, {rttMs = 15} = {}) {
+	const fps = Number(cand.fps) || 0
+	const targetFps = Math.max(15, Number(cand.targetFps) || 60)
+	const p95 = Number(cand.p95Ms) || 999
+	const keyKb = Number(cand.keyKb) || 0
+	const codec = String(cand.codec || 'h264')
+	const quality = Number(cand.quality) || 22
+	const bitrate = Number(cand.bitrate) || 20000
+	const rtt = Math.max(0, Number(rttMs) || 0)
+
+	if (!cand.ok || fps < 12) return 0
+
+	// 1. Frame-rate adherence (0..45 pts) - heavily penalize stuttery presets that drop below 88% of target FPS
+	const fpsRatio = Math.min(1, fps / targetFps)
+	let score = fpsRatio >= 0.9 ? 45 : fpsRatio >= 0.78 ? 28 * fpsRatio : 12 * fpsRatio
+
+	// 2. Frame-pacing stability (0..25 pts) - reward tight p95 frame times near 16.7ms
+	const budgetMs = 1000 / targetFps
+	if (p95 <= budgetMs * 1.15) score += 25
+	else if (p95 <= budgetMs * 1.45) score += 16
+	else if (p95 <= budgetMs * 1.9) score += 7
+
+	// 3. Visual sharpness & codec efficiency (0..23 pts)
+	const codecBonus = codec === 'hevc444' ? 14 : codec === 'hevc10' ? 13 : codec === 'hevc' ? 12 : 8
+	const sharpBonus = quality <= 14 ? 9 : quality <= 17 ? 8 : quality <= 20 ? 7 : quality <= 22 ? 5 : quality <= 25 ? 3 : 1
+	score += codecBonus + sharpBonus
+
+	// 4. Network-aware WAN/LAN fit (0..10 pts) - reward high-bitrate presets on LAN while penalizing oversized WAN streams
+	const idealMaxBitrate = rtt >= 45 ? 18000 : rtt >= 18 ? 28000 : 100000
+	const idealMinBitrate = rtt >= 45 ? 12000 : rtt >= 18 ? 16000 : 24000
+	let netScore = 10
+	if (bitrate > idealMaxBitrate) netScore -= Math.min(6, (bitrate - idealMaxBitrate) / 4000)
+	if (bitrate < idealMinBitrate) netScore -= Math.min(4, (idealMinBitrate - bitrate) / 4000)
+	if (rtt >= 25 && keyKb > 450) netScore -= Math.min(4, (keyKb - 450) / 120)
+	score += Math.max(0, netScore)
+
+	return Math.max(0, Math.min(100, Math.round(score)))
+}
 
 // O(1)-amortized chunk queue for framed stdout streams ([u8 type][u32be len][payload]), avoiding O(N^2) Buffer.concat and Array.shift().
 export function createFrameReader() {
@@ -445,6 +486,7 @@ export function createHyprland({
 				reserved: Array.isArray(m.reserved) && m.reserved.length === 4 ? m.reserved.map((n) => Number(n) || 0) : [0, 0, 0, 0],
 				locked: Array.isArray(m.solitaryBlockedBy) && m.solitaryBlockedBy.includes('LOCK'),
 				hasLockInfo: Array.isArray(m.solitaryBlockedBy),
+				focused: m.focused === true,
 			}))
 		} catch {
 			return []
@@ -473,7 +515,7 @@ export function createHyprland({
 	// Wake the headless RAIL-1 monitor without lighting up physical displays (eDP-1 stays dark/asleep).
 	async function wakeRailOutput() {
 		await hyprDispatch(
-			`hl.dispatch(hl.dsp.dpms({state = "on", monitor = "${RAIL_OUTPUT}"}))`,
+			`hl.dispatch(hl.dsp.dpms({action = "on", monitor = "${RAIL_OUTPUT}"}))`,
 			['dispatch', 'dpms', 'on', RAIL_OUTPUT],
 		).catch(() => {})
 	}
@@ -516,6 +558,20 @@ export function createHyprland({
 		return rail
 	}
 
+	// The screen-share view (wayvnc) shows the real display, not the headless RAIL-1 that desktop-mode
+	// app windows use. Launching an app from desktop mode leaves focus on RAIL-1, so an app opened later
+	// from the screen-share view (Super+Space, say) would open there, out of sight. When the shared
+	// screen is opened, put focus back on the real display's workspace. Nothing moves; windows already
+	// on RAIL-1 stay where they are.
+	async function focusSharedScreen() {
+		const mons = await monitorsInfo()
+		const rail = mons.find((m) => m.name === RAIL_OUTPUT)
+		const shown = mons.find((m) => m.name !== RAIL_OUTPUT && Number.isInteger(m.activeWorkspace) && m.activeWorkspace >= 1)
+		if (!rail?.focused || !shown) return false
+		await hyprDispatch(`hl.dispatch(hl.dsp.focus({workspace = ${shown.activeWorkspace}}))`, ['dispatch', 'workspace', String(shown.activeWorkspace)])
+		return true
+	}
+
 	// Size & position a floating window strictly inside RAIL-1's usable rect.
 	async function placeOnRail(addr, reqW, reqH, {strict = false, expectedWorkspace = null} = {}) {
 		const checkOwnership = async () => {
@@ -543,7 +599,7 @@ export function createHyprland({
 		let resized
 		try {
 			resized = await hyprDispatch(
-				`hl.dispatch(hl.dsp.window.resize({window = "address:${addr}", x = ${w}, y = ${h}, exact = true}))`,
+				`hl.dispatch(hl.dsp.window.resize({window = "address:${addr}", x = ${w}, y = ${h}, relative = false}))`,
 				['dispatch', 'resizewindowpixel', `exact ${w} ${h},address:${addr}`],
 				{beforeAttempt},
 			)
@@ -556,7 +612,11 @@ export function createHyprland({
 			const ty = rail.y + padT
 			let moved
 			try {
-				moved = await hyprDispatch(null, ['dispatch', 'movewindowpixel', `exact ${tx} ${ty},address:${addr}`], {beforeAttempt})
+				moved = await hyprDispatch(
+					`hl.dispatch(hl.dsp.window.move({window = "address:${addr}", x = ${tx}, y = ${ty}, relative = false}))`,
+					['dispatch', 'movewindowpixel', `exact ${tx} ${ty},address:${addr}`],
+					{beforeAttempt},
+				)
 			} catch (err) {
 				if (strict) throw err
 			}
@@ -1229,6 +1289,7 @@ export function createHyprland({
 
 		let settled = false
 		let openedAddr = null
+		let openedWs = null
 		let ambiguous = false
 		let launchErr = null
 		let pollTimer = null
@@ -1258,7 +1319,7 @@ export function createHyprland({
 			}
 
 			// Switch active workspace to RAIL-1 and capture strict window baseline BEFORE spawning so physical-display windows are never treated as new.
-			await hyprDispatch(`hl.dispatch(hl.dsp.workspace.change_id({id = ${railWs}}))`, ['dispatch', 'workspace', String(railWs)])
+			await hyprDispatch(`hl.dispatch(hl.dsp.focus({workspace = ${railWs}}))`, ['dispatch', 'workspace', String(railWs)])
 			const baselineWins = await windows({strict: true})
 			const beforeAddrs = new Set(baselineWins.map((w) => w.address.toLowerCase()))
 
@@ -1282,12 +1343,16 @@ export function createHyprland({
 				return peers
 			}
 
-			// Only claim new windows that actually opened on the intended RAIL workspace (never stealing newly opened physical-display windows).
+			// Claim the new window of this app wherever Hyprland put it. Focus can leave RAIL-1 before the
+			// app maps its window (a physical-display click, the screen-share view, an app that reuses its
+			// running process like Chrome), and the window then opened on the physical display: the launch
+			// used to wait 15 s, give up, and the app never showed. Only a window that did not exist when
+			// this launch started and that matches this app is claimed; it is then moved to RAIL-1 below.
 			const canClaim = (addr, winWorkspace, winClass, winTitle) => {
 				const lower = String(addr || '').toLowerCase()
 				if (!lower || beforeAddrs.has(lower) || claimedLaunchAddrs.has(lower)) return false
 				const wsNum = Number(winWorkspace)
-				if (!Number.isInteger(wsNum) || wsNum !== railWs) return false
+				if (!Number.isInteger(wsNum) || wsNum < 1) return false
 				return matchesLaunchedApp(app, winClass, winTitle)
 			}
 
@@ -1302,6 +1367,7 @@ export function createHyprland({
 				}
 				settled = true
 				openedAddr = addr
+				openedWs = Number(winWorkspace)
 				claimedLaunchAddrs.set(String(addr).toLowerCase(), Date.now())
 				resolveOpen(addr)
 				return true
@@ -1381,8 +1447,19 @@ export function createHyprland({
 
 			// Wake RAIL-1 BEFORE checking ownership, then revalidate RAIL workspace immediately before every mutation so a window moved to a physical workspace is never touched.
 			await wakeRailOutput()
-			const list = await windows({strict: true}).catch(() => [])
-			const win = list.find((w) => w.address.toLowerCase() === openedAddr.toLowerCase())
+			let list = await windows({strict: true}).catch(() => [])
+			let win = list.find((w) => w.address.toLowerCase() === openedAddr.toLowerCase())
+			// Only a window that opened elsewhere is brought over; one that opened on RAIL-1 and was then
+			// moved away (by the person, say) is left where they put it.
+			if (win && win.workspace !== railWs && openedWs !== railWs && win.workspace === openedWs) {
+				// It opened on another display: bring it to RAIL-1 (silently, so focus doesn't jump).
+				await hyprDispatch(
+					`hl.dispatch(hl.dsp.window.move({window = "address:${win.address}", workspace = ${railWs}, silent = true}))`,
+					['dispatch', 'movetoworkspacesilent', `${railWs},address:${win.address}`],
+				).catch(() => {})
+				list = await windows({strict: true}).catch(() => [])
+				win = list.find((w) => w.address.toLowerCase() === openedAddr.toLowerCase())
+			}
 			if (!win || win.workspace !== railWs) {
 				return {launched: true, app, window: null}
 			}
@@ -1393,7 +1470,7 @@ export function createHyprland({
 					return !!found && found.workspace === railWs
 				}
 				const floated = await hyprDispatch(
-					`hl.dispatch(hl.dsp.window.float({window = "address:${win.address}", state = true}))`,
+					`hl.dispatch(hl.dsp.window.float({window = "address:${win.address}", action = "set"}))`,
 					['dispatch', 'setfloating', `address:${win.address}`],
 					{beforeAttempt: checkFloatOwnership},
 				)
@@ -1476,7 +1553,7 @@ export function createHyprland({
 			const cur = (await windows().catch(() => [])).find((x) => x.address.toLowerCase() === addr.toLowerCase())
 			if (cur && !cur.floating) {
 				await hyprDispatch(
-					`hl.dispatch(hl.dsp.window.float({window = "address:${addr}", state = true}))`,
+					`hl.dispatch(hl.dsp.window.float({window = "address:${addr}", action = "set"}))`,
 					['dispatch', 'setfloating', `address:${addr}`],
 				).catch(() => {})
 			}
@@ -1486,7 +1563,7 @@ export function createHyprland({
 				await placeOnRail(addr, w, h)
 			} else {
 				await hyprDispatch(
-					`hl.dispatch(hl.dsp.window.resize({window = "address:${addr}", x = ${w}, y = ${h}, exact = true}))`,
+					`hl.dispatch(hl.dsp.window.resize({window = "address:${addr}", x = ${w}, y = ${h}, relative = false}))`,
 					['dispatch', 'resizewindowpixel', `exact ${w} ${h},address:${addr}`],
 				)
 			}
@@ -1499,7 +1576,7 @@ export function createHyprland({
 			const railMon = await ensureRailOutput()
 			const railWs = Number.isInteger(railMon?.activeWorkspace) && railMon.activeWorkspace >= 1 && railMon.activeWorkspace <= 99 ? railMon.activeWorkspace : 11
 			await hyprDispatch(
-				`hl.dispatch(hl.dsp.window.move({window = "address:${addr}", workspace = "${railWs}", silent = true}))`,
+				`hl.dispatch(hl.dsp.window.move({window = "address:${addr}", workspace = ${railWs}, silent = true}))`,
 				['dispatch', 'movetoworkspacesilent', `${railWs},address:${addr}`],
 			)
 			await syncStreamRect(addr).catch(() => {})
@@ -1508,13 +1585,619 @@ export function createHyprland({
 		if (action === 'workspace') {
 			const id = Number(input.workspace)
 			if (!Number.isInteger(id) || id < 1 || id > 20) throw new RpcError('BAD_REQUEST', 'Invalid workspace')
-			await hyprDispatch(`hl.dispatch(hl.dsp.workspace.change_id({id = ${id}}))`, ['dispatch', 'workspace', String(id)])
+			await hyprDispatch(`hl.dispatch(hl.dsp.focus({workspace = ${id}}))`, ['dispatch', 'workspace', String(id)])
 			return true
 		}
 		throw new RpcError('BAD_REQUEST', 'Unsupported Hyprland action')
 	}
 
 	let disconnectLockRetryTimer = null
+
+	// ---- Stream Profiler & Per-Device Saved Profiles --------------------------------------------
+	const profilesPath = join(dataDir, 'hyprland-profiles.json')
+	let profileStoreChain = Promise.resolve()
+	let profileBenchChain = Promise.resolve()
+	let stuckBenchChild = null
+	let profileTmpSeq = 0
+	let profileResetGen = 0
+
+	function withProfileStoreLock(fn) {
+		const run = profileStoreChain.then(fn, fn)
+		profileStoreChain = run.then(() => {}, () => {})
+		return run
+	}
+
+	function withProfileBenchLock(fn) {
+		const run = profileBenchChain.then(fn, fn)
+		profileBenchChain = run.then(() => {}, () => {})
+		return run
+	}
+
+	function resetProfiles() {
+		profileResetGen++
+		return withProfileStoreLock(async () => {
+			await rm(profilesPath, {force: true})
+		})
+	}
+
+	function codecFromEncoderName(encoderName, fallbackCodec) {
+		const name = String(encoderName || '').toLowerCase()
+		if (name.startsWith('hevc444')) return 'hevc444'
+		if (name.startsWith('hevc10')) return 'hevc10'
+		if (name.startsWith('hevc')) return 'hevc'
+		if (name.startsWith('h264') || name.includes('264')) return 'h264'
+		return fallbackCodec
+	}
+
+	const VALID_CODECS = new Set(['hevc444', 'hevc10', 'hevc', 'h264'])
+
+	function sanitizeProfile(raw, fallbackId = '', {strict = false} = {}) {
+		if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null
+		let id
+		if (strict) {
+			if (raw.id !== undefined) {
+				if (typeof raw.id !== 'string') return null
+				const trimmed = raw.id.trim()
+				if (!PROFILE_ID_RE.test(trimmed)) return null
+				id = trimmed
+			} else {
+				const trimmed = String(fallbackId ?? '').trim()
+				if (!PROFILE_ID_RE.test(trimmed)) return null
+				id = trimmed
+			}
+		} else {
+			const hasExplicitId = raw.id !== undefined && raw.id !== null && String(raw.id).trim() !== ''
+			id = hasExplicitId
+				? String(raw.id).trim().replace(/[^A-Za-z0-9._-]/g, '-').slice(0, 64)
+				: String(fallbackId ?? '').trim().replace(/[^A-Za-z0-9._-]/g, '-').slice(0, 64)
+		}
+		if (!PROFILE_ID_RE.test(id)) return null
+		let codec
+		if (strict) {
+			if (typeof raw.codec !== 'string' || !VALID_CODECS.has(raw.codec)) return null
+			codec = raw.codec
+		} else {
+			codec = VALID_CODECS.has(raw.codec) ? raw.codec : 'h264'
+		}
+		const rawFps = raw.fps === undefined ? 60 : Number(raw.fps)
+		const rawBitrate = raw.bitrate === undefined ? 22000 : Number(raw.bitrate)
+		const rawQuality = raw.quality === undefined ? 20 : Number(raw.quality)
+		const rawCompression = raw.compression === undefined ? 7 : Number(raw.compression)
+		if (strict) {
+			if (!Number.isFinite(rawFps) || rawFps < 15 || rawFps > 60) return null
+			if (!Number.isFinite(rawBitrate) || rawBitrate < 4000 || rawBitrate > 150000) return null
+			if (!Number.isFinite(rawQuality) || rawQuality < 10 || rawQuality > 34) return null
+			if (!Number.isFinite(rawCompression) || rawCompression < 1 || rawCompression > 7) return null
+		}
+		const fps = Math.max(15, Math.min(60, Math.round(Number.isFinite(rawFps) ? rawFps : 60)))
+		const bitrate = Math.max(4000, Math.min(150000, Math.round(Number.isFinite(rawBitrate) ? rawBitrate : 22000)))
+		const quality = Math.max(10, Math.min(34, Math.round(Number.isFinite(rawQuality) ? rawQuality : 20)))
+		const compression = Math.max(1, Math.min(7, Math.round(Number.isFinite(rawCompression) ? rawCompression : 7)))
+		return {
+			id,
+			name: String(raw.name || id).trim().slice(0, 64) || id,
+			deviceHint: String(raw.deviceHint || '').trim().slice(0, 100),
+			codec,
+			fps,
+			bitrate,
+			quality,
+			compression,
+			...(raw.measuredFps != null && Number.isFinite(Number(raw.measuredFps)) ? {measuredFps: Math.round(Number(raw.measuredFps) * 10) / 10} : {}),
+			...(raw.measuredP95Ms != null && Number.isFinite(Number(raw.measuredP95Ms)) ? {measuredP95Ms: Math.round(Number(raw.measuredP95Ms) * 10) / 10} : {}),
+			...(raw.measuredRttMs != null && Number.isFinite(Number(raw.measuredRttMs)) ? {measuredRttMs: Math.round(Number(raw.measuredRttMs))} : {}),
+			...(raw.measuredMbps != null && Number.isFinite(Number(raw.measuredMbps)) ? {measuredMbps: Math.round(Number(raw.measuredMbps) * 10) / 10} : {}),
+			...(typeof raw.encoder === 'string' && raw.encoder ? {encoder: raw.encoder.slice(0, 40)} : {}),
+			...(raw.score != null && Number.isFinite(Number(raw.score)) ? {score: Math.round(Number(raw.score))} : {}),
+			...(raw.testedAt != null && Number.isFinite(Number(raw.testedAt)) ? {testedAt: Number(raw.testedAt)} : {}),
+			autoSelected: raw.autoSelected === true,
+		}
+	}
+
+	async function readProfilesStore({strict = false} = {}) {
+		let text
+		try {
+			text = await readFile(profilesPath, 'utf8')
+		} catch (err) {
+			if (err && err.code === 'ENOENT') return {profiles: [], activeByDevice: {}, defaultProfileId: null}
+			if (strict) throw new RpcError('INTERNAL_SERVER_ERROR', `Failed to read saved stream profiles: ${err?.message || 'IO error'}`)
+			return {profiles: [], activeByDevice: {}, defaultProfileId: null}
+		}
+		try {
+			const raw = JSON.parse(text)
+			if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+				throw new Error('Root must be a JSON object')
+			}
+			if (!Array.isArray(raw.profiles)) {
+				if (strict) throw new Error('profiles must be an array')
+			}
+			const list = []
+			if (Array.isArray(raw.profiles)) {
+				for (const item of raw.profiles) {
+					const clean = sanitizeProfile(item, '', {strict})
+					if (!clean) {
+						if (strict) throw new Error('Invalid profile entry in store')
+						continue
+					}
+					list.push(clean)
+				}
+			}
+			if (raw.activeByDevice !== undefined && (raw.activeByDevice === null || typeof raw.activeByDevice !== 'object' || Array.isArray(raw.activeByDevice))) {
+				if (strict) throw new Error('activeByDevice must be an object')
+			}
+			if (raw.defaultProfileId !== undefined && raw.defaultProfileId !== null && typeof raw.defaultProfileId !== 'string') {
+				if (strict) throw new Error('defaultProfileId must be a string or null')
+			}
+			const validIds = new Set(list.map((p) => p.id))
+			const activeByDevice = {}
+			if (raw.activeByDevice && typeof raw.activeByDevice === 'object' && !Array.isArray(raw.activeByDevice)) {
+				for (const [dev, pid] of Object.entries(raw.activeByDevice)) {
+					if (PROFILE_ID_RE.test(dev) && typeof pid === 'string' && validIds.has(pid)) {
+						activeByDevice[dev] = pid
+					} else if (strict) {
+						throw new Error('Invalid activeByDevice reference in store')
+					}
+				}
+			}
+			if (strict && raw.defaultProfileId !== undefined && raw.defaultProfileId !== null && !validIds.has(raw.defaultProfileId)) {
+				throw new Error('Dangling defaultProfileId in store')
+			}
+			const defaultProfileId =
+				typeof raw.defaultProfileId === 'string' && validIds.has(raw.defaultProfileId)
+					? raw.defaultProfileId
+					: strict
+						? null
+						: (list[0]?.id ?? null)
+			return {profiles: list, activeByDevice, defaultProfileId}
+		} catch {
+			if (strict) throw new RpcError('INTERNAL_SERVER_ERROR', 'Saved stream profiles file is corrupted; refusing to overwrite')
+			return {profiles: [], activeByDevice: {}, defaultProfileId: null}
+		}
+	}
+
+	async function writeProfilesStore(store) {
+		await mkdir(dataDir, {recursive: true, mode: 0o700})
+		const tmp = `${profilesPath}.${process.pid}.${++profileTmpSeq}.${Math.random().toString(36).slice(2, 8)}.tmp`
+		try {
+			await writeFile(tmp, JSON.stringify(store, null, '\t') + '\n', {mode: 0o600})
+			await rename(tmp, profilesPath)
+		} catch (err) {
+			await rm(tmp, {force: true}).catch(() => {})
+			throw err
+		}
+	}
+
+	async function profiles() {
+		const store = await readProfilesStore({strict: true})
+		const hasVaapi = await exists(vaapiDevice)
+		const hasNative = !!(compiledBin && (await exists(compiledBin)))
+		return {...store, vaapi: hasVaapi, nativeEngine: hasNative}
+	}
+
+	function profileSave(input = {}, {expectedResetGen = null} = {}) {
+		return withProfileStoreLock(async () => {
+			if (expectedResetGen !== null && expectedResetGen !== profileResetGen) {
+				return {profiles: [], activeByDevice: {}, defaultProfileId: null, saved: null, abortedByReset: true}
+			}
+			const rawProf = input?.profile ?? input
+			if (!rawProf || typeof rawProf !== 'object' || Array.isArray(rawProf)) {
+				throw new RpcError('BAD_REQUEST', 'Invalid stream profile')
+			}
+			let explicitId = null
+			if (rawProf.id !== undefined) {
+				if (typeof rawProf.id !== 'string' || !PROFILE_ID_RE.test(rawProf.id.trim())) {
+					throw new RpcError('BAD_REQUEST', 'Invalid profile ID')
+				}
+				explicitId = rawProf.id.trim()
+			}
+			if (input?.id !== undefined) {
+				if (typeof input.id !== 'string' || !PROFILE_ID_RE.test(input.id.trim())) {
+					throw new RpcError('BAD_REQUEST', 'Invalid profile ID')
+				}
+				if (explicitId === null) explicitId = input.id.trim()
+			}
+			if (typeof rawProf.codec !== 'string' || !VALID_CODECS.has(rawProf.codec)) {
+				throw new RpcError('BAD_REQUEST', 'Unsupported video codec')
+			}
+			const rawDev = input?.deviceId
+			let dev = ''
+			if (rawDev !== undefined) {
+				if (typeof rawDev !== 'string' || !PROFILE_ID_RE.test(rawDev.trim())) {
+					throw new RpcError('BAD_REQUEST', 'Invalid device ID')
+				}
+				dev = rawDev.trim()
+			}
+			const store = await readProfilesStore({strict: true})
+			const candidate = explicitId !== null ? {...rawProf, id: explicitId} : rawProf
+			const clean = sanitizeProfile(candidate, `profile-${Date.now().toString(36)}`, {strict: true})
+			if (!clean) throw new RpcError('BAD_REQUEST', 'Invalid stream profile parameters')
+			const idx = store.profiles.findIndex((p) => p.id === clean.id)
+			if (idx >= 0) store.profiles[idx] = clean
+			else store.profiles.push(clean)
+			if (dev && input?.activate !== false) store.activeByDevice[dev] = clean.id
+			if (input?.setDefault || !store.defaultProfileId) store.defaultProfileId = clean.id
+			await writeProfilesStore(store)
+			return {...store, saved: clean}
+		})
+	}
+
+	function profileDelete(input = {}) {
+		return withProfileStoreLock(async () => {
+			if (typeof input?.id !== 'string') throw new RpcError('BAD_REQUEST', 'Invalid profile ID')
+			const id = input.id.trim()
+			if (!PROFILE_ID_RE.test(id)) throw new RpcError('BAD_REQUEST', 'Invalid profile ID')
+			const store = await readProfilesStore({strict: true})
+			store.profiles = store.profiles.filter((p) => p.id !== id)
+			for (const [dev, pid] of Object.entries(store.activeByDevice)) {
+				if (pid === id) delete store.activeByDevice[dev]
+			}
+			if (store.defaultProfileId === id) store.defaultProfileId = store.profiles[0]?.id ?? null
+			await writeProfilesStore(store)
+			return store
+		})
+	}
+
+	function runCaptureBenchmark(bin, env, {codec, fps, bitrate, quality, compression, outputName, durationMs = 750}) {
+		return new Promise((resolveDone) => {
+			const args = [
+				'--mode',
+				'output',
+				'--output',
+				outputName,
+				'--fps',
+				String(fps),
+				'--bitrate',
+				String(bitrate),
+				'--codec',
+				codec,
+				'--quality',
+				String(quality),
+				'--compression',
+				String(compression),
+				'--vaapi-device',
+				vaapiDevice,
+				'--continuous',
+			]
+			const child = spawnImpl(bin, args, {env, stdio: ['pipe', 'pipe', 'pipe']})
+			child.stdin?.on('error', () => {})
+			const frameReader = createFrameReader()
+			let meta = null
+			let firstFrameAt = 0
+			let lastFrameAt = 0
+			let windowEndAt = 0
+			let frames = 0
+			let totalBytes = 0
+			let keyKb = 0
+			const dts = []
+			let stopping = false
+			let exited = false
+			let hasStarted = false
+			let stuck = false
+			let hadError = false
+			let errorMsg = null
+			let framingError = false
+			let prematureExit = false
+			let settled = false
+			let killTimer = null
+			let closeWaitTimer = null
+			let sampleTimer = null
+
+			const resolveResult = () => {
+				if (settled) return
+				settled = true
+				frameReader.clear()
+				clearTimeout(stopTimer)
+				if (sampleTimer) clearTimeout(sampleTimer)
+				if (killTimer) clearTimeout(killTimer)
+				if (closeWaitTimer) clearTimeout(closeWaitTimer)
+				// Measure sustained FPS across the full observation window and reject streams that stalled before the window ended.
+				const endAt = windowEndAt || performance.now()
+				const observedMs = firstFrameAt > 0 && endAt > firstFrameAt ? Math.max(durationMs * 0.95, endAt - firstFrameAt) : 0
+				const spanSec = observedMs / 1000
+				const measuredFps = frames > 1 && spanSec > 0.05 ? (frames - 1) / spanSec : 0
+				const trailingGapMs = lastFrameAt > 0 ? Math.max(0, endAt - lastFrameAt) : durationMs
+				const maxTrailingGapMs = Math.max(250, Math.round((1000 / Math.max(15, fps)) * 8))
+				const stalled = frames > 0 && trailingGapMs > maxTrailingGapMs
+				const allDts = [...dts]
+				if (lastFrameAt > 0 && trailingGapMs > 50) allDts.push(trailingGapMs)
+				allDts.sort((a, b) => a - b)
+				const p50Ms = allDts.length ? allDts[Math.floor(allDts.length / 2)] : 0
+				const p95Ms = allDts.length ? allDts[Math.min(allDts.length - 1, Math.floor(allDts.length * 0.95))] : 0
+				const mbps = spanSec > 0.05 ? (totalBytes * 8) / spanSec / 1e6 : 0
+				const cleanTermination = !stuck && !hadError && !framingError && !prematureExit && !stalled
+				resolveDone({
+					ok: cleanTermination && frames >= 6 && !!meta,
+					stuck,
+					...(errorMsg || framingError || prematureExit || stalled || stuck
+						? {
+								error:
+									errorMsg ||
+									(framingError
+										? 'Malformed capture wire framing'
+										: prematureExit
+											? 'Capture worker exited unexpectedly'
+											: stalled
+												? 'Capture encoder stalled before benchmark window ended'
+												: 'Capture worker timed out on shutdown'),
+							}
+						: {}),
+					frames,
+					fps: Math.round(measuredFps * 10) / 10,
+					p50Ms: Math.round(p50Ms * 10) / 10,
+					p95Ms: Math.round(p95Ms * 10) / 10,
+					mbps: Math.round(mbps * 10) / 10,
+					keyKb: Math.round(keyKb * 10) / 10,
+					encoder: meta?.encoder ?? null,
+					codecStr: meta?.codec ?? null,
+				})
+			}
+
+			const finish = () => {
+				if (stopping) return
+				stopping = true
+				if (!windowEndAt) windowEndAt = performance.now()
+				clearTimeout(stopTimer)
+				if (sampleTimer) clearTimeout(sampleTimer)
+				try {
+					child.stdin?.end()
+				} catch {}
+				if (exited || child.exitCode != null) {
+					resolveResult()
+					return
+				}
+				try {
+					child.kill('SIGTERM')
+				} catch {}
+				// Track actual exit (NOT child.killed, which becomes true immediately on SIGTERM!) and hold the GPU lock until exit/close is observed.
+				killTimer = setTimeout(() => {
+					try {
+						if (!exited && child.exitCode == null) child.kill('SIGKILL')
+					} catch {}
+				}, 350)
+				killTimer.unref?.()
+				// Emergency uninterruptible-D-state cap so the RPC cannot hang forever; hold stuckBenchChild until real exit so no later run overlaps it.
+				closeWaitTimer = setTimeout(() => {
+					if (!exited && child.exitCode == null) {
+						try {
+							child.kill('SIGKILL')
+						} catch {}
+						stuck = true
+						stuckBenchChild = child
+						frames = 0
+						meta = null
+						resolveResult()
+					}
+				}, 5000)
+				closeWaitTimer.unref?.()
+			}
+
+			// Keep sampleTimer and stopTimer ref'd (both are cleared in resolveResult/finish) so Node 22 never exits early when awaiting mocked PassThrough workers.
+			const stopTimer = setTimeout(finish, durationMs + 700)
+
+			child.once('spawn', () => {
+				hasStarted = true
+			})
+			child.stdout?.on('data', (chunk) => {
+				hasStarted = true
+				if (stopping) return
+				frameReader.push(chunk)
+				const ok = frameReader.drain((typ, pl) => {
+					if (stopping) return
+					if (typ === 1) {
+						try {
+							meta = JSON.parse(pl.toString('utf8'))
+						} catch {}
+					} else if (typ === 2 && pl.length > 9) {
+						const now = performance.now()
+						const payloadBytes = pl.length - 9
+						if (pl[0] === 1 && keyKb === 0) keyKb = payloadBytes / 1024
+						if (firstFrameAt === 0) {
+							firstFrameAt = now
+							clearTimeout(stopTimer)
+							sampleTimer = setTimeout(finish, durationMs)
+						} else {
+							dts.push(now - lastFrameAt)
+							totalBytes += payloadBytes
+						}
+						lastFrameAt = now
+						frames++
+					} else if (typ === 3) {
+						hadError = true
+						try {
+							const parsed = JSON.parse(pl.toString('utf8'))
+							if (typeof parsed?.error === 'string' && parsed.error) errorMsg = parsed.error.slice(0, 200)
+						} catch {}
+						if (!errorMsg) errorMsg = 'Capture encoder reported fatal error'
+						finish()
+					}
+				})
+				if (!ok) {
+					framingError = true
+					finish()
+				}
+			})
+			const onExit = () => {
+				if (!stopping) prematureExit = true
+				if (!windowEndAt) windowEndAt = performance.now()
+				exited = true
+				if (stuckBenchChild === child) stuckBenchChild = null
+				resolveResult()
+			}
+			// Only treat 'error' as immediate exit when spawn itself failed (process never started);
+			// post-spawn kill errors leave the worker alive, so retain the GPU guard until 'exit' or 'close'.
+			child.once('error', () => {
+				if (!hasStarted && child.pid == null) onExit()
+			})
+			child.once('exit', onExit)
+			child.once('close', onExit)
+		})
+	}
+
+	function profileRun(input = {}) {
+		const runGen = profileResetGen
+		return withProfileBenchLock(async () => {
+			if (runGen !== profileResetGen) {
+				return {winner: null, results: [], rttMs: null, profiles: [], activeByDevice: {}, defaultProfileId: null}
+			}
+			if (stuckBenchChild && stuckBenchChild.exitCode == null) {
+				throw new RpcError('CONFLICT', 'A previous GPU benchmark worker is still exiting; wait a moment and try again')
+			}
+			stuckBenchChild = null
+			const env = await discoverEnv()
+			if (!env?.WAYLAND_DISPLAY || !env?.HYPRLAND_INSTANCE_SIGNATURE) {
+				throw new RpcError('PRECONDITION_FAILED', 'Hyprland desktop session isn’t running right now')
+			}
+			const bin = await ensureCaptureBinary().catch(() => null)
+			if (!bin) {
+				throw new RpcError('PRECONDITION_FAILED', 'Native VA-API GPU capture engine is unavailable on this host')
+			}
+			const hasMeasuredRtt = input?.clientRttMs != null && Number.isFinite(Number(input.clientRttMs))
+			const measuredRttMs = hasMeasuredRtt ? Math.max(0, Math.min(2000, Math.round(Number(input.clientRttMs)))) : null
+			const effectiveRttMs = measuredRttMs ?? 20
+			const explicitCodecs = Array.isArray(input?.clientCodecs)
+			const rawClientCodecs = explicitCodecs ? input.clientCodecs.filter((c) => VALID_CODECS.has(c)) : ['hevc', 'h264']
+			const clientCodecs = [...new Set(rawClientCodecs)]
+			if (!clientCodecs.length) {
+				throw new RpcError('PRECONDITION_FAILED', 'Client browser reported no supported WebCodecs video codecs')
+			}
+			const rail = await ensureRailOutput().catch(() => null)
+			const outputName = rail?.name || RAIL_OUTPUT
+
+			// Tailor candidate matrix to client RTT + EVERY advertised WebCodecs codec (never injecting unadvertised codecs)
+			const isHighWan = effectiveRttMs >= 45
+			const isModWan = effectiveRttMs >= 18 && effectiveRttMs < 45
+			const isLan = effectiveRttMs < 12
+			const candidates = []
+			if (clientCodecs.includes('hevc444')) {
+				candidates.push({
+					label: isLan ? 'HEVC 4:4:4 Ultra LAN 60' : 'HEVC 4:4:4 Crisp 60',
+					codec: 'hevc444',
+					fps: 60,
+					bitrate: isLan ? 100000 : isHighWan ? 18000 : isModWan ? 24000 : 32000,
+					quality: isLan ? 12 : isHighWan ? 21 : 19,
+					compression: 7,
+				})
+			}
+			if (clientCodecs.includes('hevc')) {
+				if (isLan) {
+					candidates.push({
+						label: 'HEVC Ultra LAN 60',
+						codec: 'hevc',
+						fps: 60,
+						bitrate: 80000,
+						quality: 14,
+						compression: 7,
+					})
+					candidates.push({
+						label: 'HEVC High LAN 60',
+						codec: 'hevc',
+						fps: 60,
+						bitrate: 45000,
+						quality: 16,
+						compression: 7,
+					})
+				} else {
+					candidates.push({
+						label: 'HEVC Crisp Low-Latency 60',
+						codec: 'hevc',
+						fps: 60,
+						bitrate: isHighWan ? 16000 : isModWan ? 22000 : 28000,
+						quality: isHighWan ? 21 : 20,
+						compression: 7,
+					})
+					candidates.push({
+						label: 'HEVC Balanced 60',
+						codec: 'hevc',
+						fps: 60,
+						bitrate: isHighWan ? 14000 : 18000,
+						quality: 22,
+						compression: 5,
+					})
+				}
+			}
+			if (clientCodecs.includes('hevc10')) {
+				candidates.push({
+					label: 'HEVC 10-bit Deep Color',
+					codec: 'hevc10',
+					fps: 60,
+					bitrate: isHighWan ? 16000 : isLan ? 60000 : 24000,
+					quality: isLan ? 16 : 21,
+					compression: 7,
+				})
+			}
+			if (clientCodecs.includes('h264')) {
+				candidates.push({
+					label: isLan ? 'H.264 High LAN 60' : 'H.264 High Universal',
+					codec: 'h264',
+					fps: 60,
+					bitrate: isHighWan ? 16000 : isLan ? 60000 : 22000,
+					quality: isLan ? 16 : 21,
+					compression: 7,
+				})
+			}
+
+			const CODEC_DISPLAY = {hevc444: 'HEVC 4:4:4', hevc10: 'HEVC 10-bit', hevc: 'HEVC', h264: 'H.264'}
+			const results = []
+			for (const c of candidates) {
+				if (runGen !== profileResetGen) break
+				const m = await runCaptureBenchmark(bin, env, {...c, outputName})
+				// Score the codec the encoder ACTUALLY used (in case hardware fell back from HEVC -> H.264), and reflect any codec fallback in the displayed label.
+				const actualCodec = m.ok ? codecFromEncoderName(m.encoder, c.codec) : c.codec
+				const label = m.ok && actualCodec !== c.codec ? `${CODEC_DISPLAY[actualCodec] || actualCodec} (fallback from ${CODEC_DISPLAY[c.codec] || c.codec})` : c.label
+				const clientSupportsActual = clientCodecs.includes(actualCodec)
+				const score = clientSupportsActual ? scoreProfileCandidate({...c, ...m, codec: actualCodec, targetFps: c.fps}, {rttMs: effectiveRttMs}) : 0
+				results.push({...c, ...m, label, codec: actualCodec, targetFps: c.fps, score})
+				if (m.stuck) break
+			}
+			if (runGen !== profileResetGen) {
+				return {winner: null, results: [], rttMs: measuredRttMs, profiles: [], activeByDevice: {}, defaultProfileId: null}
+			}
+			results.sort((a, b) => b.score - a.score)
+			const best = results.find((r) => r.ok && r.score > 0 && clientCodecs.includes(r.codec)) ?? null
+
+			let store = await readProfilesStore()
+			if (!best) {
+				return {winner: null, results, rttMs: measuredRttMs, ...store}
+			}
+
+			const deviceId = typeof input?.deviceId === 'string' && PROFILE_ID_RE.test(input.deviceId.trim()) ? input.deviceId.trim() : `device-${Date.now().toString(36)}`
+			const netTag = effectiveRttMs >= 45 ? 'WAN' : effectiveRttMs >= 18 ? 'Remote' : 'LAN'
+			const profileName = String(input?.deviceName || '').trim().slice(0, 48) || `Auto (${netTag})`
+			const winner = sanitizeProfile(
+				{
+					id: deviceId,
+					name: `${profileName} · ${best.label}`,
+					deviceHint: String(input?.deviceHint || '').trim().slice(0, 100),
+					codec: best.codec,
+					fps: best.targetFps ?? 60,
+					bitrate: best.bitrate,
+					quality: best.quality,
+					compression: best.compression,
+					measuredFps: best.fps,
+					measuredP95Ms: best.p95Ms,
+					...(measuredRttMs !== null ? {measuredRttMs} : {}),
+					measuredMbps: best.mbps,
+					encoder: best.encoder || undefined,
+					score: best.score,
+					testedAt: Date.now(),
+					autoSelected: true,
+				},
+				'',
+				{strict: true},
+			)
+
+			if (input?.saveAsActive !== false && winner) {
+				const saved = await profileSave(
+					{profile: winner, deviceId, activate: true, setDefault: !store.defaultProfileId},
+					{expectedResetGen: runGen},
+				)
+				if (saved?.abortedByReset) {
+					return {winner: null, results: [], rttMs: measuredRttMs, profiles: [], activeByDevice: {}, defaultProfileId: null}
+				}
+				store = saved
+			}
+			return {winner, results, rttMs: measuredRttMs, ...store}
+		})
+	}
 
 	// Attach an authenticated owner WebSocket to a live 60 FPS GPU H.264/HEVC/HEVC-4:4:4 Hyprland stream (with 10 ms Opus or silence-gated PCM PipeWire audio).
 	async function attachStream(ws, {mode = 'output', address = '', output = '', fps = 60, bitrate = 22000, audio = false, audioCodec = 'pcm', codec = 'h264', quality = 0, compression = 0} = {}) {
@@ -1597,7 +2280,7 @@ export function createHyprland({
 					const railWs = Number.isInteger(ensured?.activeWorkspace) && ensured.activeWorkspace >= 1 && ensured.activeWorkspace <= 99 ? ensured.activeWorkspace : 11
 					if (ensured) {
 						await hyprDispatch(
-							`hl.dispatch(hl.dsp.window.move({window = "address:${cleanAddr}", workspace = "${railWs}", silent = true}))`,
+							`hl.dispatch(hl.dsp.window.move({window = "address:${cleanAddr}", workspace = ${railWs}, silent = true}))`,
 							['dispatch', 'movetoworkspacesilent', `${railWs},address:${cleanAddr}`],
 						).catch(() => {})
 						await placeOnRail(cleanAddr, targetWin.size[0], targetWin.size[1]).catch(() => {})
@@ -2310,11 +2993,13 @@ export function createHyprland({
 
 	return {
 		attachStream,
+		focusSharedScreen,
 		readAppIcon,
 		subscribeEvents,
 		waitForEventSocketReady,
 		nextEventSnapSeq: () => ++eventSnapSeq,
 		notifyUnlocked,
+		resetProfiles,
 		windows,
 		windowsSnapshot,
 		async currentInstanceId() {
@@ -2356,6 +3041,10 @@ export function createHyprland({
 			'hyprland.dispatch': {kind: 'mutation', run: dispatch},
 			'hyprland.clipboardRead': {kind: 'query', run: clipboardRead},
 			'hyprland.clipboardWrite': {kind: 'mutation', run: clipboardWrite},
+			'hyprland.profiles': {kind: 'query', run: profiles},
+			'hyprland.profileRun': {kind: 'mutation', run: profileRun},
+			'hyprland.profileSave': {kind: 'mutation', run: profileSave},
+			'hyprland.profileDelete': {kind: 'mutation', run: profileDelete},
 		},
 	}
 }

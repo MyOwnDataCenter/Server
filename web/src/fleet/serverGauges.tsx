@@ -1,11 +1,14 @@
 import type {ReactNode} from 'react'
 
+import type {ThermalSensor} from '../api'
 import {useBattery, useCpu, useDisk, useGpus, useMemory, useTemp, useUptime} from '../data'
 import {BatteryRing} from './BatteryRing'
 import type {FleetRings, GaugeKind} from './aggregate'
 import {Icon, type IconName} from '../icons'
 import {swarmGaugeItems, type SwarmMetrics} from '../swarm/gauges'
-import {Ring, StatChip, levelColor} from '../ui'
+import {Ring, levelColor} from '../ui'
+import {LiveStats} from './StatRegion'
+import {gaugeButtonLabel} from './gaugeLabel'
 
 export type GaugeModel = {
 	k: string
@@ -33,7 +36,7 @@ function gaugeKind(name: string): GaugeKind {
 	return 'CPU'
 }
 
-export function useServerGaugeMetrics(): {metrics: SwarmMetrics; temp: number | null; uptime: number | undefined} {
+export function useServerGaugeMetrics(): {metrics: SwarmMetrics; temp: number | null; sensors: ThermalSensor[] | null; uptime: number | undefined} {
 	const cpu = useCpu()
 	const mem = useMemory()
 	const disk = useDisk()
@@ -46,36 +49,21 @@ export function useServerGaugeMetrics(): {metrics: SwarmMetrics; temp: number | 
 			cpu: cpu.data ? cpu.data.totalUsed : null,
 			cores: cpu.data?.threads,
 			mem: mem.data ? {total: mem.data.size, used: mem.data.totalUsed} : null,
+			swap: mem.data?.swap && mem.data.swap.total > 0 ? mem.data.swap : null,
 			disks: disk.data ? [{mount: '/', total: disk.data.totalUsed + disk.data.available, used: disk.data.totalUsed}] : [],
-			gpus: (gpus.data?.gpus ?? []).map((g) => ({id: g.id, index: g.index, name: g.name, used: g.used})),
+			gpus: (gpus.data?.gpus ?? []).map((g) => ({id: g.id, index: g.index, name: g.name, used: g.used, temp: g.temperature})),
 			batteries: battery.data?.batteries ?? [],
 		},
 		temp: temp.data?.temperature ?? null,
+		sensors: temp.data?.sensors ?? null,
 		uptime: uptime.data,
 	}
 }
 
-/** The same spec chips a joined computer shows on its card. */
+/** This server's readings on its card. The account's stat view decides the drawing. */
 export function ServerSpecs() {
-	const {metrics, temp} = useServerGaugeMetrics()
-	const items = swarmGaugeItems(metrics)
-	if (!items.length && temp == null) return null
-	return (
-		<span className="specs">
-			{items.map((g) =>
-				g.ready ? (
-					<StatChip key={'key' in g && g.key ? g.key : g.k} icon={g.icon} label={g.k}>
-						{Math.round(g.p)}%
-					</StatChip>
-				) : null,
-			)}
-			{temp != null && (
-				<StatChip icon="thermo" label="Temperature">
-					{Math.round(temp)}°C
-				</StatChip>
-			)}
-		</span>
-	)
+	const {metrics, temp, sensors} = useServerGaugeMetrics()
+	return <LiveStats metrics={metrics} temp={temp} sensors={sensors} />
 }
 
 function gaugeFace(g: GaugeModel): ReactNode {
@@ -98,8 +86,8 @@ function gaugeFace(g: GaugeModel): ReactNode {
 }
 
 /**
- * One gauge row for Home and for a machine.
- * The click is part of the component. A machine page leaves it off, so the line stays the measure.
+ * Home's aggregate gauges. Each gauge opens its detail.
+ * A machine's own readings use StatRegion instead, so this row is not part of the stat-view cycle.
  */
 export function GaugeCluster({
 	metrics,
@@ -155,7 +143,7 @@ export function GaugeCluster({
 						type="button"
 						className="gauge press"
 						key={key}
-						aria-label={level === 'ok' ? `${g.k}, ${g.sub}` : `${g.k}, tap for details`}
+						aria-label={gaugeButtonLabel(g.k, g.reading?.text ?? g.sub, level)}
 						onClick={() => onOpen?.({title: g.k, kind: gaugeKind(g.k), gpuId: g.key})}
 					>
 						{face}
@@ -166,7 +154,7 @@ export function GaugeCluster({
 	)
 }
 
-export function ServerRings() {
-	const {metrics} = useServerGaugeMetrics()
-	return <GaugeCluster metrics={metrics} />
+export function ServerRings({name}: {name?: string} = {}) {
+	const {metrics, temp, sensors} = useServerGaugeMetrics()
+	return <LiveStats metrics={metrics} temp={temp} sensors={sensors} machineName={name} />
 }

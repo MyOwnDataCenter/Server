@@ -23,6 +23,9 @@ SHIM = os.environ.get("OMARCHY_BIND_SHIM", "/usr/local/lib/omarchy-bind-localhos
 CWD = os.environ.get("OMARCHY_APP_CWD", "/opt/app")
 TOKEN = os.environ.get("OMARCHY_API_TOKEN", "")
 GATEWAY = os.environ.get("APP_GATEWAY_KEY", "")
+# How long a caller may stay silent while sending its request. The port is open to the network
+# before anyone has shown a token, so a connection that says nothing must not be held for ever.
+READ_TIMEOUT = 30
 
 
 def die(message):
@@ -43,7 +46,8 @@ def port_env(name):
 def same(left, right):
     if not left or not right or len(left) != len(right):
         return False
-    return hmac.compare_digest(left, right)
+    # compare_digest refuses a str with a non-ASCII character, and a header can hold any byte.
+    return hmac.compare_digest(left.encode("utf-8", "replace"), right.encode("utf-8", "replace"))
 
 
 def header_map(lines):
@@ -173,6 +177,7 @@ class Door(socketserver.BaseRequestHandler):
         client = self.request
         try:
             client.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            client.settimeout(READ_TIMEOUT)
             parsed = read_head(client)
             if not parsed:
                 return
@@ -189,6 +194,7 @@ class Door(socketserver.BaseRequestHandler):
             body = read_body(client, rest, length)
             if len(body) < length:
                 return
+            client.settimeout(None)
             forward(client, method, target, request_line, headers, body, self.upstream)
         except OSError:
             return

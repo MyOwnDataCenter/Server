@@ -1,7 +1,20 @@
 import type {IconName} from './icons'
 
-export function osLook(osId = ''): {icon: IconName; bg: string; name: string} {
-	const id = osId.toLowerCase()
+type Look = {icon: IconName; bg: string; name: string}
+
+// A machine made from your own ISO has the id `local:/Home/<folders>/<file>.iso`. Only whole words of the
+// file name count, so a folder called Machines or Archive does not make it macOS or Arch Linux.
+const WORDS: Record<string, string> = {ubuntu: 'ubuntu', debian: 'debian', omarchy: 'omarchy', fedora: 'fedora', alpine: 'alpine', arch: 'arch', archlinux: 'arch', windows: 'win', macos: 'mac'}
+
+export function osLook(osId = ''): Look {
+	let id = osId.toLowerCase()
+	if (id === 'imported') return {...osLook('server'), name: 'Imported'}
+	if (id.startsWith('local:')) {
+		const file = id.slice(id.lastIndexOf('/') + 1)
+		const hit = file.split(/[^a-z0-9]+/).map((w) => WORDS[w] ?? (/^win\d*$/.test(w) ? 'win' : undefined)).find(Boolean)
+		if (!hit) return {...osLook('server'), name: 'Custom ISO'}
+		id = hit
+	}
 	if (id.includes('ubuntu')) return {icon: 'ubuntu', bg: 'linear-gradient(140deg,#f2703c,#c7381d)', name: 'Ubuntu'}
 	if (id.includes('debian')) return {icon: 'debian', bg: 'linear-gradient(140deg,#d70a53,#8a0636)', name: 'Debian'}
 	if (id.includes('omarchy')) return {icon: 'terminal', bg: 'linear-gradient(140deg,#2b2b2b,#0b0b0b)', name: 'Omarchy'}

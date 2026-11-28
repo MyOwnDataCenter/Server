@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import {describe, test} from 'node:test'
 
-import {GAP, collapse, contains, flipSplit, focusDir, insert, isNode, leafIds, moveWorkspace, rebuild, reconcile, rects, remove, swapDir} from '../web/src/desktop/hyprland/layout.ts'
+import {DIVIDER_HIT, GAP, MIN_PANE, collapse, contains, dividers, flipSplit, focusDir, hitDivider, insert, isNode, leafIds, moveWorkspace, ratioAt, rebuild, reconcile, rects, remove, setRatio, swapDir} from '../web/src/desktop/hyprland/layout.ts'
 
 const area = {x: 0, y: 0, w: 1000, h: 800}
 
@@ -121,5 +121,66 @@ describe('hyprland layout', () => {
 		const movedFloat = moveWorkspace(trees, 'A', 1, 2, {floating: true, area: wide, gap: GAP})
 		assert.deepEqual(movedFloat[1], {kind: 'leaf', id: 'B'})
 		assert.equal(movedFloat[2], null)
+	})
+
+	test('dividers sit in the gap of a horizontal split', () => {
+		const t = insert(insert(null, null, 'a', area), 'a', 'b', area, 0)
+		const list = dividers(t, area, 0)
+		assert.equal(list.length, 1)
+		assert.equal(list[0].axis, 'h')
+		assert.equal(list[0].rect.x, 500)
+		assert.equal(list[0].rect.w, 0)
+		assert.equal(list[0].path.length, 0)
+		const padded = dividers(t, area, GAP)
+		assert.equal(padded[0].rect.w, GAP)
+		assert.ok(padded[0].hit.w >= DIVIDER_HIT)
+		assert.ok(padded[0].hit.x < padded[0].rect.x)
+	})
+
+	test('a nested split exposes the inner gap, and hitDivider prefers it', () => {
+		let t = insert(insert(null, null, 'a', area), 'a', 'b', area, 0)
+		t = insert(t, 'b', 'c', area, 0)
+		const list = dividers(t, area, 0)
+		assert.equal(list.length, 2)
+		const inner = list.find((d) => d.path.length > 0)
+		assert.ok(inner)
+		assert.equal(inner.axis, 'v')
+		const cx = inner.hit.x + inner.hit.w / 2
+		const cy = inner.hit.y + inner.hit.h / 2
+		const hit = hitDivider(list, cx, cy)
+		assert.equal(hit, inner)
+	})
+
+	test('setRatio moves the split and ratioAt clamps to MIN_PANE', () => {
+		const t = insert(insert(null, null, 'a', area), 'a', 'b', area, 0)
+		const [d] = dividers(t, area, 0)
+		const moved = setRatio(t, d.path, 0.25)
+		const r = rects(moved, area, 0)
+		assert.equal(r.a.w, 250)
+		assert.equal(r.b.w, 750)
+		const next = ratioAt(d, area.x + 10, area.y + 10)
+		assert.equal(next, d.minRatio)
+		assert.ok(d.minRatio * area.w >= MIN_PANE - 1)
+		const far = ratioAt(d, area.x + area.w - 10, area.y + 10)
+		assert.equal(far, d.maxRatio)
+	})
+
+	test('dividers skip a hidden leaf and keep the original path', () => {
+		let t = insert(insert(null, null, 'a', area), 'a', 'b', area, 0)
+		t = insert(t, 'b', 'c', area, 0)
+		const hidden = new Set(['a'])
+		const list = dividers(t, area, 0, MIN_PANE, hidden)
+		assert.equal(list.length, 1)
+		assert.deepEqual(list[0].path, ['b'])
+		assert.equal(list[0].axis, 'v')
+		assert.equal(list[0].parent.w, area.w)
+		const moved = setRatio(t, list[0].path, 0.25)
+		assert.equal(moved.kind, 'split')
+		assert.equal(moved.ratio, 0.5)
+		assert.equal(moved.b.kind, 'split')
+		assert.equal(moved.b.ratio, 0.25)
+		const r = rects(collapse(moved, hidden), area, 0)
+		assert.equal(r.b.h, 200)
+		assert.equal(r.c.h, 600)
 	})
 })

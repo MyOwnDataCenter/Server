@@ -23,6 +23,7 @@ type OidcStatus = {
 type OidcClient = {
 	id: string
 	name: string
+	managedAppId?: string
 	publicClient: boolean
 	requirePkce: boolean
 	redirectUris: string[]
@@ -341,17 +342,23 @@ export function OidcSheet({onClose}: {onClose: () => void}) {
 							{c.redirectUris.join(' · ')}
 						</div>
 						<div style={{display: 'flex', gap: 6, flexWrap: 'wrap'}}>
-							<button type="button" className="btn small" onClick={() => startEdit(c)}>
-								Edit
-							</button>
-							{!c.publicClient && (
-								<button type="button" className="btn small" disabled={busy} onClick={() => rotateSecret(c)}>
-									Rotate secret
-								</button>
+							{c.managedAppId ? (
+								<span className="muted">Managed by App Store ({c.managedAppId}): change SSO in that app’s sheet.</span>
+							) : (
+								<>
+									<button type="button" className="btn small" onClick={() => startEdit(c)}>
+										Edit
+									</button>
+									{!c.publicClient && (
+										<button type="button" className="btn small" disabled={busy} onClick={() => rotateSecret(c)}>
+											Rotate secret
+										</button>
+									)}
+									<button type="button" className="btn small" style={{color: 'var(--red)'}} disabled={busy} onClick={() => deleteClient(c)}>
+										Remove
+									</button>
+								</>
 							)}
-							<button type="button" className="btn small" style={{color: 'var(--red)'}} disabled={busy} onClick={() => deleteClient(c)}>
-								Remove
-							</button>
 						</div>
 					</div>
 				))}

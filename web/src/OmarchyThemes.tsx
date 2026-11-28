@@ -2,9 +2,11 @@ import {useEffect, useMemo, useRef, useState} from 'react'
 import {useQuery, useQueryClient} from '@tanstack/react-query'
 
 import {mutate, query} from './api'
+import {plural} from './plural'
 import {Icon} from './icons'
 import {isMoreThemeBusy, runThemeAction, shouldPollThemes} from './omarchyThemesLogic'
 import {themeAction} from './theme/themeAction'
+import {RADIO_SELECTOR, rovingKeyDown} from './roving'
 import {haptic, useConfirm, useToast} from './ui'
 
 type Job = {state: 'installing' | 'switching' | 'removing' | 'error'; error?: string}
@@ -59,19 +61,19 @@ export function OmarchyThemes({owner, onSwitched}: {owner: boolean; onSwitched?:
 	}, [data, search])
 
 	if (themes.isLoading) return <div className="omb-note"><span className="spinner" /> Loading Omarchy’s themes…</div>
-	if (themes.error) return <div className="error"><Icon name="alert" size={18} />{(themes.error as Error).message}</div>
+	if (themes.error) return <div className="error" role="alert"><Icon name="alert" size={18} />{(themes.error as Error).message}</div>
 	if (!data?.installed.length) return <div className="omb-note">No Omarchy themes found on this server.</div>
 
 	return (
 		<div className="omt">
 			{!data.available && (
-				<div className="error">
+				<div className="error" role="alert">
 					<Icon name="alert" size={18} />
 					Omarchy’s theme commands weren’t found, so themes can be shown but not switched here.
 				</div>
 			)}
 			{!owner && <p className="footer-note" style={{textAlign: 'left'}}>Only the server’s owner can change the desktop’s theme.</p>}
-			<div className="omt-grid" role="radiogroup" aria-label="Omarchy themes">
+			<div className="omt-grid" role="radiogroup" aria-label="Omarchy themes" onKeyDown={(e) => rovingKeyDown(e, RADIO_SELECTOR)}>
 				{data.installed.map((t) => {
 					const busy = (t.job && t.job.state !== 'error') || (pending === t.slug && !t.current)
 					return (
@@ -124,7 +126,7 @@ export function OmarchyThemes({owner, onSwitched}: {owner: boolean; onSwitched?:
 					<p className="footer-note" style={{textAlign: 'left', margin: '0 2px 10px'}}>
 						Community themes from the Omarchy manual. Getting one downloads it to this server and switches the desktop to it.
 					</p>
-					<input className="omt-search" type="search" placeholder={`Search ${data.more.length} themes`} value={search} onChange={(e) => setSearch(e.target.value)} />
+					<input className="omt-search" type="search" placeholder={`Search ${plural(data.more.length, 'theme')}`} value={search} onChange={(e) => setSearch(e.target.value)} />
 					<div className="omt-grid">
 						{more.map((t) => {
 							const busy = isMoreThemeBusy(t, pending)

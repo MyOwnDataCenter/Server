@@ -2,6 +2,7 @@ import {useCallback, useLayoutEffect, useRef, useState, type ReactNode} from 're
 
 import {chipEdgeFade, chipScrollEnds, chipScrollTarget} from './categoryChips'
 import {Icon} from './icons'
+import {rovingKeyDown, TAB_SELECTOR} from './roving'
 import {haptic} from './ui'
 
 // One line of category chips. An arrow at each end moves the line, and goes
@@ -60,7 +61,7 @@ export function CategoryChips({label, children}: {label: string; children: React
 				<Icon name="back" size={16} />
 			</button>
 			<div className={`category-chips-scroller${ends.fadeStart ? ' fade-start' : ''}${ends.fadeEnd ? ' fade-end' : ''}`} ref={scroller}>
-				<div className="category-chips-track" role="tablist" aria-label={label} ref={track}>
+				<div className="category-chips-track" role="tablist" aria-label={label} ref={track} onKeyDown={(e) => rovingKeyDown(e, TAB_SELECTOR, 'horizontal')}>
 					{children}
 				</div>
 			</div>

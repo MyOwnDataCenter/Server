@@ -1,4 +1,4 @@
-import {useEffect, useMemo, useRef, useState, type ReactNode} from 'react'
+import {useEffect, useId, useMemo, useRef, useState, type ReactNode} from 'react'
 
 import {
 	focusedLauncherIndex,
@@ -24,6 +24,7 @@ export function Launcher({
 }) {
 	const [q, setQ] = useState('')
 	const [sel, setSel] = useState(0)
+	const listId = useId()
 	const input = useRef<HTMLInputElement>(null)
 	const list = useRef<HTMLUListElement>(null)
 	const ignoreHover = useRef(false)
@@ -41,6 +42,8 @@ export function Launcher({
 	}, [sel, rows.length])
 	useEffect(() => {
 		const onKey = (e: KeyboardEvent) => {
+			// An input-method composition (candidate list, confirm, cancel) owns its keys.
+			if (e.isComposing) return
 			if (shouldYieldLauncherKey(document, e.target)) return
 			if (e.key === 'Escape') {
 				e.preventDefault()
@@ -68,11 +71,25 @@ export function Launcher({
 	return (
 		<div className="hypr-overlay" onClick={onClose}>
 			<div className="hypr-launcher" role="dialog" aria-label="Launcher" onClick={(e) => e.stopPropagation()}>
-				<input ref={input} value={q} onChange={(e) => (setQ(e.target.value), setSel(0))} placeholder="Open…" aria-label="Filter" />
-				<ul ref={list}>
+				<input
+					ref={input}
+					value={q}
+					onChange={(e) => (setQ(e.target.value), setSel(0))}
+					placeholder="Open…"
+					aria-label="Filter"
+					role="combobox"
+					aria-expanded="true"
+					aria-autocomplete="list"
+					aria-controls={listId}
+					aria-activedescendant={rows[sel] ? `${listId}-${sel}` : undefined}
+				/>
+				<ul ref={list} id={listId} role="listbox" aria-label="Open">
 					{rows.map((r, i) => (
-						<li key={r.key}>
+						<li key={r.key} role="presentation">
 							<button
+								id={`${listId}-${i}`}
+								role="option"
+								aria-selected={i === sel}
 								className={i === sel ? 'on' : ''}
 								onClick={() => pick(r.key)}
 								onMouseEnter={() => {
@@ -98,7 +115,11 @@ export function Launcher({
 							</button>
 						</li>
 					))}
-					{!rows.length && <li className="muted">Nothing matches</li>}
+					{!rows.length && (
+						<li className="muted" role="presentation">
+							Nothing matches
+						</li>
+					)}
 				</ul>
 			</div>
 		</div>

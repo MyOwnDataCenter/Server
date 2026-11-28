@@ -30,9 +30,9 @@ export function favoritePath(item: FavoriteItem): string {
 	return typeof item === 'string' ? item : item.path
 }
 
-/** Activate a file row only when Enter is pressed directly on the row, not a child action button. */
+/** Activate a file row only when Enter or Space is pressed directly on the row, not a child action button. */
 export function shouldActivateRowOnKey(e: {key: string; target: unknown; currentTarget: unknown}): boolean {
-	return e.key === 'Enter' && e.target === e.currentTarget
+	return (e.key === 'Enter' || e.key === ' ') && e.target === e.currentTarget
 }
 
 /** Label for the share password row across idle, loading, loaded, and failed states. */
@@ -88,6 +88,15 @@ export function filterUnsyncedPhotos<T extends {name: string; size: number}>(pic
 		have.add(`${stripCopySuffix(f.name)}:${f.size}`)
 	}
 	return picked.filter((f) => !have.has(`${f.name}:${f.size}`) && !have.has(`${stripCopySuffix(f.name)}:${f.size}`))
+}
+
+/** The files already in Photos. A listing cut off at one page (hasMore) is not all of them, so the whole folder is read. */
+export async function photosAlreadyThere(
+	listing: {files: FileEntry[]; hasMore?: boolean} | undefined,
+	loadAll: () => Promise<{files: FileEntry[]}>,
+): Promise<FileEntry[]> {
+	if (listing && !listing.hasMore) return listing.files
+	return (await loadAll()).files
 }
 
 export type FileDragEventLike = {

@@ -9,6 +9,7 @@ import {join} from 'node:path'
 import {test} from 'node:test'
 
 import {createApps, expandVars, prepareCompose} from '../omarchyd/apps.mjs'
+import {freePort} from './free-port.mjs'
 import {RpcError} from '../omarchyd/rpc.mjs'
 import {createSystemApps} from '../omarchyd/system-apps.mjs'
 
@@ -151,7 +152,7 @@ const untilInstalled = async (call, id) => {
 }
 
 test('update closes dropped openPorts and opens the listing’s new ones', async () => {
-	const port = 37000 + Math.floor(Math.random() * 2000)
+	const port = await freePort()
 	const manifest = (version, ports) => `manifestVersion: 1\nid: demo\nname: Demo\nversion: "${version}"\nport: ${port}\nweb:\n  service: web\n  port: 8080\nopenPorts: [${ports}]\n`
 	await withStore(
 		{manifest: manifest('1', '1'), compose: 'services:\n  web:\n    image: example/demo:1\n    ports:\n      - "8080:8080"\n'},
@@ -188,7 +189,7 @@ test('a symlink home accepts a folder in the real directory and still refuses on
 	const sock = join(root, 'podman.sock')
 	const prevDocker = process.env.DOCKER_HOST
 	process.env.DOCKER_HOST = `unix://${sock}`
-	const port = 33000 + Math.floor(Math.random() * 800)
+	const port = await freePort()
 	let apps
 	try {
 		await mkdir(realHome, {recursive: true})
@@ -233,7 +234,7 @@ test('a symlink home accepts a folder in the real directory and still refuses on
 })
 
 test('a failed pull restores the previous compose file and exports', async () => {
-	const port = 34000 + Math.floor(Math.random() * 800)
+	const port = await freePort()
 	const manifest = (version) => `manifestVersion: 1\nid: demo\nname: Demo\nversion: "${version}"\nport: ${port}\nweb:\n  service: web\n  port: 8080\n`
 	await withStore(
 		{
@@ -272,7 +273,7 @@ test('a failed Tailscale uninstall keeps the page running and the app listed', a
 	const root = await mkdtemp(join(os.tmpdir(), 'omarchyd-ts-rm-'))
 	const data = join(root, 'data')
 	const home = join(root, 'home')
-	const port = 35000 + Math.floor(Math.random() * 800)
+	const port = await freePort()
 	const kills = []
 	const prevDocker = process.env.DOCKER_HOST
 	process.env.DOCKER_HOST = `unix://${join(root, 'podman.sock')}`
@@ -290,6 +291,7 @@ test('a failed Tailscale uninstall keeps the page running and the app listed', a
 			},
 			helperFile,
 			tailscaleBin: join(root, 'tailscale'),
+			socketPath: join(root, 'tailscaled.sock'),
 			restartDelayMs: 60_000,
 			ports: {tailscale: port},
 			spawn: () => {

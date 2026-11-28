@@ -83,6 +83,9 @@ export function InstallerPrompt({ready}: {ready: boolean}) {
 					<code className="installer-command" onClick={copy} title="Copy">
 						{s.command}
 					</code>
+					<button type="button" className="btn small installer-copy" onClick={copy}>
+						<Icon name="copy" size={16} /> Copy command
+					</button>
 				</details>
 				<button className="btn block" onClick={close}>
 					Later

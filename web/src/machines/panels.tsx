@@ -6,7 +6,7 @@ import {useQuery} from '@tanstack/react-query'
 
 import {query, type OsImage} from '../api'
 import {Icon, type IconName} from '../icons'
-import {bytes, duration, haptic, useConfirm} from '../ui'
+import {bytes, duration, haptic, machineStatus, useConfirm} from '../ui'
 import {
 	BUS_LABEL,
 	CACHE_LABEL,
@@ -29,17 +29,17 @@ import {
 } from './api'
 import {backupListView} from './backupList'
 import {formatServerDiskGb} from './formatServerDisk'
-import {cpuStatusText, pointsInLastHour} from './statsWindow'
+import {cpuStatusText, memoryStatusText, pointsInLastHour} from './statsWindow'
 
-export type PanelId = 'summary' | 'console' | 'hardware' | 'cloudinit' | 'options' | 'network' | 'usb' | 'snapshots' | 'backups' | 'history' | 'monitor'
+export type PanelId = 'summary' | 'hardware' | 'cloudinit' | 'options' | 'network' | 'usb' | 'clips' | 'snapshots' | 'backups' | 'history' | 'monitor'
 export const PANELS: {id: PanelId; label: string; icon: IconName}[] = [
 	{id: 'summary', label: 'Summary', icon: 'activity'},
-	{id: 'console', label: 'Desktop', icon: 'devices'},
 	{id: 'hardware', label: 'Hardware', icon: 'cpu'},
 	{id: 'cloudinit', label: 'Cloud-Init', icon: 'key'},
 	{id: 'options', label: 'Options', icon: 'settings'},
 	{id: 'network', label: 'Port forwarding', icon: 'networking'},
 	{id: 'usb', label: 'Devices', icon: 'usb'},
+	{id: 'clips', label: 'Clip book', icon: 'clipboard'},
 	{id: 'snapshots', label: 'Snapshots', icon: 'history'},
 	{id: 'backups', label: 'Backup', icon: 'save'},
 	{id: 'history', label: 'Task History', icon: 'list'},
@@ -91,7 +91,7 @@ function Actions({onCancel, onSave, saving, disabled, label = 'Save', danger}: {
 				Cancel
 			</button>
 			<button type="button" className={`btn small ${danger ? 'danger solid' : 'primary'}`} onClick={onSave} disabled={disabled || saving}>
-				{saving ? <span className="spinner" /> : label}
+				{saving ? <><span className="spinner" /><span className="sr-only">{label}</span></> : label}
 			</button>
 		</div>
 	)
@@ -172,13 +172,13 @@ export function SummaryPanel({d}: {d: MachineDetails}) {
 					<h4>Status</h4>
 					<dl>
 						<dt>Status</dt>
-						<dd className={`st-${d.state}`}>{d.state}</dd>
+						<dd className={`st-${d.state}`}>{machineStatus(d.state).label}</dd>
 						<dt>ID</dt>
 						<dd>{d.vmid}</dd>
 						<dt>CPU usage</dt>
 						<dd>{cpuStatusText(d.state === 'running', last, d.hardware.sockets * d.hardware.cores)}</dd>
 						<dt>Memory</dt>
-						<dd>{last ? `${mib(last.memMb)} of ${mib(d.hardware.memoryMb)}` : mib(d.hardware.memoryMb)}</dd>
+						<dd>{memoryStatusText(d.state === 'running', last, d.hardware.memoryMb, mib)}</dd>
 						<dt>Boot disk</dt>
 						<dd>{disk0?.sizeGb ? `${disk0.sizeGb} GB${disk0.usedGb !== null ? ` (${disk0.usedGb} GB used)` : ''}` : '–'}</dd>
 						<dt>Address</dt>
@@ -204,7 +204,7 @@ export function SummaryPanel({d}: {d: MachineDetails}) {
 						<p className={d.options.notes ? 'mx-notes' : 'muted'}>{d.options.notes || 'No notes yet. Write down what this machine is for, logins, or anything else worth remembering.'}</p>
 					) : (
 						<>
-							<textarea className="field mx-textarea" value={notes} onChange={(e) => setNotes(e.target.value)} rows={6} maxLength={8000} />
+							<textarea className="field mx-textarea" aria-label="Notes" value={notes} onChange={(e) => setNotes(e.target.value)} rows={6} maxLength={8000} />
 							<Actions
 								onCancel={() => setNotes(null)}
 								saving={action.isPending}
@@ -215,7 +215,7 @@ export function SummaryPanel({d}: {d: MachineDetails}) {
 				</div>
 			</div>
 			{d.errorMessage && (
-				<div className="error">
+				<div className="error" role="alert">
 					<Icon name="alert" size={18} />
 					{d.errorMessage}
 				</div>
@@ -258,7 +258,7 @@ const useIsos = () =>
 	})
 
 export function HardwarePanel({d}: {d: MachineDetails}) {
-	const node = useNode()
+	const node = useNode(d.id)
 	const action = useMachineAction()
 	const [open, setOpen] = useState<string | null>(null)
 	const h = d.hardware
@@ -308,7 +308,7 @@ export function HardwarePanel({d}: {d: MachineDetails}) {
 					<ChoiceEdit
 						value={h.video}
 						options={(node.data?.videoModels ?? ['vga', 'none']).map((v) => ({id: v, label: VIDEO_LABEL[v] ?? v}))}
-						warning="Only adapters this server’s QEMU has are listed. “None” leaves the console blank."
+						warning="Only adapters this server’s QEMU has are listed. “None” leaves Desktop blank."
 						onCancel={() => setOpen(null)}
 						saving={action.isPending}
 						onSave={(video) => save('machines.updateHardware', {video}, 'Display changed')}
@@ -454,7 +454,7 @@ function NicEdit({h, models, onCancel, onSave, saving}: {h: MachineDetails['hard
 	)
 }
 function AddDisk({d, onDone}: {d: MachineDetails; onDone: () => void}) {
-	const node = useNode()
+	const node = useNode(d.id)
 	const action = useMachineAction()
 	const [size, setSize] = useState('32')
 	const [bus, setBus] = useState('virtio')
@@ -500,7 +500,7 @@ function AddDisk({d, onDone}: {d: MachineDetails; onDone: () => void}) {
 	)
 }
 function DriveEdit({d, drive, onDone}: {d: MachineDetails; drive: Drive; onDone: () => void}) {
-	const node = useNode()
+	const node = useNode(d.id)
 	const action = useMachineAction()
 	const confirm = useConfirm()
 	const isos = useIsos()
@@ -658,7 +658,7 @@ export function OptionsPanel({d}: {d: MachineDetails}) {
 				{flag('onBoot', 'Start at boot', 'Starts with the server, in its start order.')}
 				{flag('protection', 'Protection', 'Prevents deleting this machine until it’s turned off.')}
 				{flag('agent', 'QEMU Guest Agent', 'Lets the server read the machine’s IP addresses and shut it down cleanly. Install qemu-guest-agent inside it.')}
-				{flag('tablet', 'Use tablet for pointer', 'The mouse follows your pointer exactly in the console.')}
+				{flag('tablet', 'Use tablet for pointer', 'The mouse follows your pointer exactly on the Desktop.')}
 				{flag('acpi', 'ACPI support', 'Needed for Shut down to work. Turn off only for very old systems.')}
 				{flag('kvm', 'KVM hardware virtualization', 'Much faster. Turn off only to troubleshoot.')}
 				{flag('bootMenu', 'Boot menu', 'Shows the firmware’s boot menu for 3 seconds at start (press Esc or F12).')}
@@ -688,7 +688,7 @@ function BootOrder({d, onDone}: {d: MachineDetails; onDone: () => void}) {
 			<ol className="mx-boot">
 				{list.map((x, i) => (
 					<li key={x.id} className={x.on ? '' : 'off'}>
-						<button type="button" role="checkbox" aria-checked={x.on} className="mx-check" onClick={() => setList(list.map((y) => (y.id === x.id ? {...y, on: !y.on} : y)))}>
+						<button type="button" role="checkbox" aria-checked={x.on} aria-label={bootName(d, x.id)} className="mx-check" onClick={() => setList(list.map((y) => (y.id === x.id ? {...y, on: !y.on} : y)))}>
 							<Icon name={x.on ? 'checked' : 'unchecked'} size={18} />
 						</button>
 						<span>{bootName(d, x.id)}</span>
@@ -760,7 +760,7 @@ export function CloudInitPanel({d}: {d: MachineDetails}) {
 							action.mutate({path: 'machines.updateCloudInit', input: {id: d.id, username, hostname, sshKeys: keyList, ...(password ? {password} : {})}, done: 'Cloud-init updated for the next start'}, {onSuccess: () => setPassword('')})
 						}
 					>
-						{action.isPending ? <span className="spinner" /> : 'Regenerate image'}
+						{action.isPending ? <><span className="spinner" /><span className="sr-only">Regenerate image</span></> : 'Regenerate image'}
 					</button>
 				</div>
 			</div>
@@ -788,7 +788,7 @@ export function SnapshotsPanel({d}: {d: MachineDetails}) {
 	return (
 		<div className="mx-panel">
 			<div className="mx-toolbar">
-				<button type="button" className="btn small primary" onClick={() => setTaking(!taking)} disabled={!canAct}>
+				<button type="button" className="btn small primary" onClick={() => setTaking(!taking)} disabled={!canAct} aria-expanded={taking}>
 					<Icon name="camera" size={15} /> Take snapshot
 				</button>
 				{!canAct && <span className="muted mx-small">Shut down {d.name} to take, restore or delete snapshots.</span>}
@@ -825,19 +825,19 @@ export function SnapshotsPanel({d}: {d: MachineDetails}) {
 			)}
 			<div className="mx-table" role="table">
 				<div className="mx-tr head" role="row">
-					<span>Name</span>
-					<span>Date</span>
-					<span>Description</span>
-					<span />
+					<span role="columnheader">Name</span>
+					<span role="columnheader">Date</span>
+					<span role="columnheader">Description</span>
+					<span role="columnheader" aria-label="Actions" />
 				</div>
-				{d.snapshots.length === 0 && <div className="mx-tr empty">No snapshots yet. Take one before an upgrade or a risky change.</div>}
+				{d.snapshots.length === 0 && <div className="mx-tr empty" role="row"><span role="cell">No snapshots yet. Take one before an upgrade or a risky change.</span></div>}
 				{[...d.snapshots].reverse().map((s) => (
 					<div className="mx-tr" role="row" key={s.name}>
-						<span className="b">{s.name}</span>
-						<span>{when(s.createdAt)}</span>
-						<span className="muted">{s.description}</span>
-						<span className="mx-tr-actions">
-							<button type="button" className="btn small" disabled={!canAct || action.isPending} onClick={() => rollback(s.name)}>
+						<span role="cell" className="b">{s.name}</span>
+						<span role="cell">{when(s.createdAt)}</span>
+						<span role="cell" className="muted">{s.description}</span>
+						<span role="cell" className="mx-tr-actions">
+							<button type="button" className="btn small" disabled={!canAct || action.isPending} aria-label={`Roll back to ${s.name}`} onClick={() => rollback(s.name)}>
 								Rollback
 							</button>
 							<button type="button" className="btn small danger" disabled={!canAct || action.isPending} onClick={() => remove(s.name)} aria-label={`Delete ${s.name}`}>
@@ -846,11 +846,11 @@ export function SnapshotsPanel({d}: {d: MachineDetails}) {
 						</span>
 					</div>
 				))}
-				<div className="mx-tr now">
-					<span className="b">NOW</span>
-					<span />
-					<span className="muted">You are here</span>
-					<span />
+				<div className="mx-tr now" role="row">
+					<span role="cell" className="b">NOW</span>
+					<span role="cell" />
+					<span role="cell" className="muted">You are here</span>
+					<span role="cell" />
 				</div>
 			</div>
 			<p className="muted mx-foot">Snapshots are kept inside the machine’s disks (qcow2). UEFI settings aren’t part of a snapshot.</p>
@@ -878,7 +878,7 @@ export function BackupsPanel({d}: {d: MachineDetails}) {
 	return (
 		<div className="mx-panel">
 			<div className="mx-toolbar">
-				<button type="button" className="btn small primary" disabled={!!running || action.isPending || d.state === 'error'} onClick={() => setAsking(!asking)}>
+				<button type="button" className="btn small primary" disabled={!!running || action.isPending || d.state === 'error'} onClick={() => setAsking(!asking)} aria-expanded={asking}>
 					<Icon name="save" size={15} /> Backup now
 				</button>
 				{running && (
@@ -902,32 +902,32 @@ export function BackupsPanel({d}: {d: MachineDetails}) {
 			)}
 			<div className="mx-table" role="table">
 				<div className="mx-tr head" role="row">
-					<span>Date</span>
-					<span>Size</span>
-					<span>Notes</span>
-					<span />
+					<span role="columnheader">Date</span>
+					<span role="columnheader">Size</span>
+					<span role="columnheader">Notes</span>
+					<span role="columnheader" aria-label="Actions" />
 				</div>
-				{backupRows.loading && <div className="mx-tr empty">Loading…</div>}
+				{backupRows.loading && <div className="mx-tr empty" role="row"><span role="cell">Loading…</span></div>}
 				{backupRows.error && (
 					<div className="error" role="alert">
 						<Icon name="alert" size={18} />
 						{backupRows.error}
 					</div>
 				)}
-				{backupRows.showEmpty && <div className="mx-tr empty">No backups of {d.name} yet.</div>}
+				{backupRows.showEmpty && <div className="mx-tr empty" role="row"><span role="cell">No backups of {d.name} yet.</span></div>}
 				{(backups.data ?? []).map((b) => (
 					<div className="mx-tr" role="row" key={b.id}>
-						<span className="b">
+						<span role="cell" className="b">
 							{when(b.createdAt)}
 							{b.live && <em className="mx-tag">live</em>}
 						</span>
-						<span>{bytes(b.sizeBytes)}</span>
-						<span className="muted">{b.notes}</span>
-						<span className="mx-tr-actions">
-							<button type="button" className="btn small" disabled={action.isPending} onClick={() => restore(b.id, b.name)}>
+						<span role="cell">{bytes(b.sizeBytes)}</span>
+						<span role="cell" className="muted">{b.notes}</span>
+						<span role="cell" className="mx-tr-actions">
+							<button type="button" className="btn small" disabled={action.isPending} aria-label={`Restore the backup from ${when(b.createdAt)}`} onClick={() => restore(b.id, b.name)}>
 								Restore
 							</button>
-							<button type="button" className="btn small danger" disabled={action.isPending} onClick={() => remove(b.id)} aria-label="Delete backup">
+							<button type="button" className="btn small danger" disabled={action.isPending} onClick={() => remove(b.id)} aria-label={`Delete the backup from ${when(b.createdAt)}`}>
 								<Icon name="trash" size={14} />
 							</button>
 						</span>
@@ -944,21 +944,21 @@ export function TaskTable({tasks}: {tasks: Task[]}) {
 	return (
 		<div className="mx-table tasks" role="table">
 			<div className="mx-tr head" role="row">
-				<span>Start time</span>
-				<span>End time</span>
-				<span>Description</span>
-				<span>Status</span>
+				<span role="columnheader">Start time</span>
+				<span role="columnheader">End time</span>
+				<span role="columnheader">Description</span>
+				<span role="columnheader">Status</span>
 			</div>
-			{tasks.length === 0 && <div className="mx-tr empty">No tasks yet.</div>}
+			{tasks.length === 0 && <div className="mx-tr empty" role="row"><span role="cell">No tasks yet.</span></div>}
 			{tasks.map((t) => (
 				<div className={`mx-tr st-${t.status}`} role="row" key={`${t.machineId ?? ''}${t.id}`}>
-					<span>{when(t.startedAt)}</span>
-					<span>{t.endedAt ? when(t.endedAt) : ''}</span>
-					<span>
+					<span role="cell">{when(t.startedAt)}</span>
+					<span role="cell">{t.endedAt ? when(t.endedAt) : ''}</span>
+					<span role="cell">
 						{TASK_LABEL[t.type] ?? t.type}
 						{t.detail ? ` · ${t.detail}` : ''}
 					</span>
-					<span className="mx-status">{t.status === 'running' ? <span className="spinner" /> : t.status === 'ok' ? 'OK' : (t.message ?? 'Error')}</span>
+					<span role="cell" className="mx-status">{t.status === 'running' ? <span className="spinner" /> : t.status === 'ok' ? 'OK' : (t.message ?? 'Error')}</span>
 				</div>
 			))}
 		</div>
@@ -999,12 +999,12 @@ export function MonitorPanel({d}: {d: MachineDetails}) {
 					send()
 				}}
 			>
-				<input className="field mono" value={cmd} onChange={(e) => setCmd(e.target.value)} disabled={d.state !== 'running'} spellCheck={false} autoCapitalize="none" />
+				<input className="field mono" aria-label="QEMU monitor command" value={cmd} onChange={(e) => setCmd(e.target.value)} disabled={d.state !== 'running'} spellCheck={false} autoCapitalize="none" />
 				<button type="submit" className="btn small primary" disabled={d.state !== 'running' || action.isPending}>
 					Send
 				</button>
 			</form>
-			{d.state !== 'running' && <p className="muted mx-small">{d.name} isn’t running.</p>}
+			{d.state !== 'running' && <p className="muted mx-small">{d.name} isn’t online.</p>}
 		</div>
 	)
 }

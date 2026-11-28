@@ -10,6 +10,7 @@ import os from 'node:os'
 import {join} from 'node:path'
 
 import {RpcError} from './rpc.mjs'
+import {stoppedMessage} from './exec-error.mjs'
 
 export const HELPER = '/usr/local/libexec/omarchy-server/helper.mjs'
 const FSTAB_MARK = '# omarchy-server pool'
@@ -30,7 +31,7 @@ function execP(cmd, args, {input, timeout = 10 * 60_000, env} = {}) {
 	return new Promise((resolve, reject) => {
 		const child = execFile(cmd, args, {timeout, maxBuffer: 16 * 1024 * 1024, ...(env ? {env} : {})}, (error, stdout, stderr) => {
 			if (error) {
-				const e = new Error((stderr || error.message).toString().trim().split('\n')[0])
+				const e = new Error(stoppedMessage(cmd, error, timeout) ?? (stderr || error.message).toString().trim().split('\n')[0])
 				e.code = error.code
 				return reject(e)
 			}
@@ -437,7 +438,10 @@ export function createStorage({dataDir, home = os.homedir(), files, run = execP,
 		try {
 			const text = await readFile(passwordFile, 'utf8')
 			return text.endsWith('\n') ? text.slice(0, -1) : text
-		} catch {
+		} catch (error) {
+			// Only a missing file means no password was made yet. A file that cannot be read still holds
+			// the password Samba uses; making a new one here would lock out everyone using the share.
+			if (error?.code !== 'ENOENT') throw new RpcError('PRECONDITION_FAILED', 'share-password is damaged and was left unchanged.')
 			const words = Array.from({length: 4}, () => randomBytes(3).toString('base64url').toLowerCase().replace(/[^a-z0-9]/g, 'x').slice(0, 4))
 			const pw = words.join('-')
 			await helper('smb-password', [], `${pw}\n`)

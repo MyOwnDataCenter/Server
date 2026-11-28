@@ -1,8 +1,10 @@
-import {useMemo, useState} from 'react'
-import {useQuery} from '@tanstack/react-query'
+import {useEffect, useMemo, useRef, useState} from 'react'
+import {useQuery, useQueryClient} from '@tanstack/react-query'
 
+import {AddFile, type Download} from './AddFile'
 import {query, type MachineCapabilities, type MemoryUsage, type OsImage} from './api'
 import {useAction, useCpu, useMachines, useMemory, useUser} from './data'
+import {isOwner} from './isOwner'
 import {defaultCores, defaultMemoryGb, diskRange, hostMaxMemoryGb, machineUsernameHint, machineUsernameOk, nextDiskGb} from './machineForm'
 import {Icon} from './icons'
 import {osLook} from './osLook'
@@ -28,6 +30,10 @@ const SPECS: Record<string, Spec> = {
 	'debian:Server': spec(2, 2, 15, 1, 1, 4),
 	'arch:Server': spec(2, 2, 20, 1, 1, 4),
 	alpine: spec(2, 1, 8, 1, 1, 2),
+	'opensuse:Server': spec(2, 2, 20, 1, 1, 4),
+	'rocky:Server': spec(2, 2, 20, 1, 1, 5),
+	'cachyos:Desktop': spec(4, 8, 40, 2, 4, 20),
+	'linuxmint:Cinnamon': spec(2, 4, 40, 2, 2, 20),
 	android: spec(4, 8, 40, 2, 4, 25),
 	omarchy: spec(4, 8, 40, 2, 4, 25),
 	'windows-11': spec(4, 8, 96, 2, 4, 64),
@@ -50,7 +56,8 @@ function Stepper({label, value, unit, min, max, step = 1, next, onChange}: {labe
 			<button className="step-btn" aria-label={`Less ${label}`} onClick={() => go(-1)} disabled={value <= min}>
 				−
 			</button>
-			<span className="step-val num">
+			<span className="step-val num" role="status">
+				<span className="sr-only">{label} </span>
 				{value} <small>{unit}</small>
 			</span>
 			<button className="step-btn" aria-label={`More ${label}`} onClick={() => go(1)} disabled={value >= max}>
@@ -60,31 +67,44 @@ function Stepper({label, value, unit, min, max, step = 1, next, onChange}: {labe
 	)
 }
 
+type HostCaps = MachineCapabilities & {threads?: number; memoryTotalMb?: number}
+
 export function CreateMachine({open, onClose, host}: {open: boolean; onClose: () => void; host?: {id: string; name: string}}) {
-	// Joined computers get the same create control. The guest is not created on this server in their place.
-	if (host && host.id !== 'server') return <RemoteVmHost name={host.name} open={open} onClose={onClose} />
-	return <LocalCreateMachine open={open} onClose={onClose} />
+	return <LocalCreateMachine open={open} onClose={onClose} host={host ?? {id: 'server', name: 'This server'}} />
 }
 
-function RemoteVmHost({name, open, onClose}: {name: string; open: boolean; onClose: () => void}) {
-	return (
-		<Sheet open={open} onClose={onClose} label={`Virtual machines on ${name}`}>
-			<SheetHeader icon={<Icon name="machine" size={28} />} title={`Virtual machines on ${name}`} subtitle="Computer" onClose={onClose} />
-			<p>Create and manage virtual machines on {name} from this page. A guest has to be created on {name}.</p>
-			<p className="reason">The connector on {name} can’t host a virtual machine yet, so nothing was created on this server.</p>
-		</Sheet>
-	)
-}
-
-function LocalCreateMachine({open, onClose}: {open: boolean; onClose: () => void}) {
-	const caps = useQuery({queryKey: ['machines.capabilities'], queryFn: () => query<MachineCapabilities>('machines.capabilities'), enabled: open, staleTime: 60_000})
+function LocalCreateMachine({open, onClose, host}: {open: boolean; onClose: () => void; host: {id: string; name: string}}) {
+	const remote = host.id !== 'server'
+	const caps = useQuery({
+		queryKey: ['machines.capabilities', host.id],
+		queryFn: () => query<HostCaps>('machines.capabilities', remote ? {hostId: host.id} : undefined),
+		enabled: open,
+		staleTime: 60_000,
+	})
 	const images = useQuery({
 		queryKey: ['machines.osImages'],
 		queryFn: () => query<OsImage[]>('machines.osImages'),
 		enabled: open,
 		refetchInterval: (q) => ((q.state.data ?? []).some((i) => i.state === 'downloading') ? 2000 : false),
 	})
-	const ownIsos = useQuery({queryKey: ['machines.localIsos'], queryFn: () => query<OsImage[]>('machines.localIsos'), enabled: open, staleTime: 15_000})
+	const ownIsos = useQuery({queryKey: ['machines.localIsos'], queryFn: () => query<OsImage[]>('machines.localIsos'), enabled: open && !remote, staleTime: 15_000})
+	// Adding ISOs to the server is the owner's.
+	const isOwnerHere = isOwner(useUser().data)
+	const isoDownloads = useQuery({
+		queryKey: ['machines.isoDownloads'],
+		queryFn: () => query<Download[]>('machines.isoDownloads'),
+		enabled: open && !remote && isOwnerHere,
+		retry: false,
+		refetchInterval: (q) => ((q.state.data ?? []).some((d) => !d.error) ? 2000 : false),
+	})
+	const qcIso = useQueryClient()
+	const downloadingIsos = (isoDownloads.data ?? []).filter((d) => !d.error).length
+	const wasDownloading = useRef(0)
+	useEffect(() => {
+		// A download finished: look for ISOs again.
+		if (downloadingIsos < wasDownloading.current) qcIso.invalidateQueries({queryKey: ['machines.localIsos']})
+		wasDownloading.current = downloadingIsos
+	}, [downloadingIsos, qcIso])
 	const [picked, setPicked] = useState<OsImage | null>(null)
 	const close = () => {
 		setPicked(null)
@@ -94,9 +114,9 @@ function LocalCreateMachine({open, onClose}: {open: boolean; onClose: () => void
 	const list = useMemo(
 		() =>
 			(images.data ?? [])
-				.filter((i) => !i.custom)
-				.sort((a, b) => Number(b.arch === hostArch) - Number(a.arch === hostArch) || a.name.localeCompare(b.name) || (a.variantName ?? '').localeCompare(b.variantName ?? '')),
-		[images.data, hostArch],
+				.filter((i) => !i.custom && caps.data?.hostArchitecture != null && i.arch === hostArch)
+				.sort((a, b) => a.name.localeCompare(b.name) || (a.variantName ?? '').localeCompare(b.variantName ?? '')),
+		[images.data, hostArch, caps.data?.hostArchitecture],
 	)
 
 	const renderRow = (os: OsImage) => {
@@ -145,18 +165,25 @@ function LocalCreateMachine({open, onClose}: {open: boolean; onClose: () => void
 	return (
 		<Sheet open={open} onClose={close} label="New machine" tall>
 			{picked ? (
-				<Configure os={picked} hostArch={hostArch} onBack={() => setPicked(null)} onDone={close} />
+				<Configure os={picked} hostArch={hostArch} host={host} caps={caps.data} onBack={() => setPicked(null)} onDone={close} />
 			) : (
 				<>
-					<SheetHeader title="New machine" subtitle="Choose an operating system" onClose={close} />
+					<SheetHeader title="New machine" subtitle={remote ? host.name : 'Choose an operating system'} onClose={close} />
 					{caps.data?.performanceWarning && (
-						<div className="error" style={{marginBottom: 12}}>
+						<div className="error" role="alert" style={{marginBottom: 12}}>
 							<Icon name="alert" size={18} />
 							{caps.data.performanceWarning}
 						</div>
 					)}
+					{caps.error && (
+						<div className="error" role="alert">
+							<Icon name="alert" size={18} />
+							{remote ? `Couldn’t check what ${host.name} can run: ` : 'Couldn’t check what this server can run: '}
+							{(caps.error as Error).message}
+						</div>
+					)}
 					{caps.data && !caps.data.libvirtAvailable && (
-						<div className="error">
+						<div className="error" role="alert">
 							<Icon name="alert" size={18} />
 							Virtual machines aren’t available on this server.
 						</div>
@@ -164,7 +191,7 @@ function LocalCreateMachine({open, onClose}: {open: boolean; onClose: () => void
 					<div style={{overflowY: 'auto', flex: 1, margin: '0 -20px', padding: '0 20px 20px'}}>
 						{images.isLoading && Array.from({length: 5}, (_, i) => <div key={i} className="skeleton" style={{height: 64, margin: '8px 0'}} />)}
 						{images.error && (
-							<div className="error">
+							<div className="error" role="alert">
 								<Icon name="alert" size={18} />
 								{(images.error as Error).message}
 							</div>
@@ -172,18 +199,36 @@ function LocalCreateMachine({open, onClose}: {open: boolean; onClose: () => void
 						<div className="glass group" style={{borderRadius: 18, '--inset': '74px'} as React.CSSProperties}>
 							{list.map(renderRow)}
 						</div>
-						<div className="section-head" style={{marginTop: 18}}>
-							<h2>Your own ISO</h2>
-						</div>
-						{(ownIsos.data ?? []).length > 0 && (
-							<div className="glass group" style={{borderRadius: 18, '--inset': '74px'} as React.CSSProperties}>
-								{ownIsos.data!.map(renderRow)}
-							</div>
+						{remote ? (
+							<p className="footer-note" style={{textAlign: 'left'}}>
+								The operating system is downloaded on {host.name}. An ISO from this server’s files stays here.
+							</p>
+						) : (
+							<>
+								<div className="section-head" style={{marginTop: 18}}>
+									<h2>Your own ISO</h2>
+								</div>
+								{(ownIsos.data ?? []).length > 0 && (
+									<div className="glass group" style={{borderRadius: 18, '--inset': '74px'} as React.CSSProperties}>
+										{ownIsos.data!.map(renderRow)}
+									</div>
+								)}
+								{isOwnerHere && (
+									<AddFile
+										what="an ISO"
+										accept=".iso"
+										linkProcedure="machines.downloadIso"
+										linkPlaceholder="https://…/installer.iso"
+										downloads={isoDownloads.data ?? []}
+										onAdded={() => (qcIso.invalidateQueries({queryKey: ['machines.isoDownloads']}), qcIso.invalidateQueries({queryKey: ['machines.localIsos']}))}
+									/>
+								)}
+								<p className="footer-note" style={{textAlign: 'left'}}>
+									{(ownIsos.data ?? []).length ? 'ISOs found in your Home folder. ' : 'Put an .iso file anywhere in Files (Downloads is fine) and it shows up here. '}
+									Windows 10 and 11 install by themselves with your account: get the ISO from microsoft.com/software-download. Other ISOs boot their installer on the Desktop for you to finish.
+								</p>
+							</>
 						)}
-						<p className="footer-note" style={{textAlign: 'left'}}>
-							{(ownIsos.data ?? []).length ? 'ISOs found in your Home folder. ' : 'Put an .iso file anywhere in Files (Downloads is fine) and it shows up here. '}
-							Windows 10 and 11 install by themselves with your account: get the ISO from microsoft.com/software-download. Other ISOs boot their installer in the console for you to finish.
-						</p>
 					</div>
 				</>
 			)}
@@ -191,11 +236,12 @@ function LocalCreateMachine({open, onClose}: {open: boolean; onClose: () => void
 	)
 }
 
-function Configure({os, hostArch, onBack, onDone}: {os: OsImage; hostArch: string; onBack: () => void; onDone: () => void}) {
+function Configure({os, hostArch, host, caps, onBack, onDone}: {os: OsImage; hostArch: string; host: {id: string; name: string}; caps?: HostCaps; onBack: () => void; onDone: () => void}) {
 	const cpu = useCpu()
 	const mem = useMemory()
+	const remote = host.id !== 'server'
 	// useState keeps its first value, so wait until CPU and memory have loaded.
-	if (cpu.isPending || mem.isPending) {
+	if (remote ? !caps : cpu.isPending || mem.isPending) {
 		return (
 			<div style={{overflowY: 'auto', flex: 1, margin: '0 -20px', padding: '8px 20px'}}>
 				<div className="skeleton" style={{height: 64, margin: '8px 0'}} />
@@ -203,15 +249,20 @@ function Configure({os, hostArch, onBack, onDone}: {os: OsImage; hostArch: strin
 			</div>
 		)
 	}
-	return <ConfigureForm os={os} hostArch={hostArch} onBack={onBack} onDone={onDone} threads={cpu.data?.threads ?? 4} memory={mem.data ?? null} />
+	if (remote) {
+		const threads = caps?.threads ?? 1
+		const maxMemoryGb = Math.max(1, Math.floor((caps?.memoryTotalMb ?? 2048) / 1024) - 1)
+		return <ConfigureForm os={os} hostArch={hostArch} host={host} onBack={onBack} onDone={onDone} threads={threads} memory={null} maxMemoryGb={maxMemoryGb} />
+	}
+	return <ConfigureForm os={os} hostArch={hostArch} host={host} onBack={onBack} onDone={onDone} threads={cpu.data?.threads ?? 4} memory={mem.data ?? null} />
 }
 
-function ConfigureForm({os, hostArch, onBack, onDone, threads, memory}: {os: OsImage; hostArch: string; onBack: () => void; onDone: () => void; threads: number; memory: MemoryUsage | null}) {
+function ConfigureForm({os, hostArch, host, onBack, onDone, threads, memory, maxMemoryGb: maxFromHost}: {os: OsImage; hostArch: string; host: {id: string; name: string}; onBack: () => void; onDone: () => void; threads: number; memory: MemoryUsage | null; maxMemoryGb?: number}) {
 	const user = useUser()
 	const machines = useMachines()
 	const action = useAction()
 	const profile = specFor(os)
-	const maxMemoryGb = hostMaxMemoryGb(memory)
+	const maxMemoryGb = maxFromHost ?? hostMaxMemoryGb(memory)
 	const disk = diskRange(os, profile.minDiskSizeGb)
 	const baseName = `${os.name}${os.variantName ? ` ${os.variantName}` : ''}`
 	const taken = new Set((machines.data ?? []).map((m) => m.name.toLowerCase()))
@@ -220,7 +271,7 @@ function ConfigureForm({os, hostArch, onBack, onDone, threads, memory}: {os: OsI
 
 	const [name, setName] = useState(suggestion)
 	const [cores, setCores] = useState(defaultCores(profile, threads))
-	const [memoryGb, setMemoryGb] = useState(defaultMemoryGb(profile, memory))
+	const [memoryGb, setMemoryGb] = useState(maxFromHost != null ? Math.min(Math.max(profile.memoryGb, profile.minMemoryGb), maxMemoryGb) : defaultMemoryGb(profile, memory))
 	const [diskSizeGb, setDisk] = useState(Math.min(disk.max, Math.max(disk.min, profile.diskSizeGb)))
 	const [username, setUsername] = useState((user.data?.name ?? '').toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 20))
 	const [password, setPassword] = useState('')
@@ -247,6 +298,7 @@ function ConfigureForm({os, hostArch, onBack, onDone, threads, memory}: {os: OsI
 					memoryGb,
 					diskSizeGb,
 					arch: os.arch,
+					...(host.id !== 'server' ? {hostId: host.id} : {}),
 					...(os.requiresCredentials ? {username: username.trim(), ...(needsPassword ? {password} : {})} : {}),
 					...(os.requiresLicenseKey ? {licenseKey: licenseKey.trim().toUpperCase()} : {}),
 				},
@@ -278,7 +330,7 @@ function ConfigureForm({os, hostArch, onBack, onDone, threads, memory}: {os: OsI
 			</div>
 			<div style={{overflowY: 'auto', flex: 1, margin: '0 -20px', padding: '0 20px 8px'}}>
 				{error && (
-					<div className="error shake">
+					<div className="error shake" role="alert">
 						<Icon name="alert" size={18} />
 						{error}
 					</div>
@@ -337,13 +389,13 @@ function ConfigureForm({os, hostArch, onBack, onDone, threads, memory}: {os: OsI
 				)}
 				{(() => {
 					const note = os.manualSetup
-						? 'This ISO boots its own installer. When the machine is running, open its console and install it there; afterwards it starts from its own disk.'
+						? 'This ISO boots its own installer. When the machine is running, open Desktop and install it there; afterwards it starts from its own disk.'
 						: windows
 							? 'Windows installs by itself with this account (about 20–40 minutes; it restarts a few times). It installs as Windows Pro without activation: enter your own key in Windows Settings → Activation.'
 							: os.familyId === 'omarchy'
 								? 'Omarchy installs by itself from its official ISO. When it restarts, sign in with this username and password.'
 								: os.variantName === 'Desktop'
-									? 'The first start installs the desktop from the internet (10–30 minutes), then the machine restarts into it. Watch it in the console.'
+									? 'The first start installs the desktop from the internet (10–30 minutes), then the machine restarts into it. Watch it on the Desktop.'
 									: null
 					return note ? (
 						<p className="hint" style={{margin: '0 4px 14px', color: 'var(--muted)', fontSize: 13}}>

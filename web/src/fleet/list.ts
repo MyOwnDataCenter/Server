@@ -1,8 +1,8 @@
-// One list for this server, joined computers, and guests.
-// Online names come first, then offline names. A guest runs on a computer (this server, today).
+// One list for this server, joined computers, guests, and system containers (LXC).
+// Online names come first, then offline names. A guest or container runs on a computer (this server, today).
 // An ability that was not granted says why. Being offline is a separate fact: the grant stays.
 
-export type FleetKind = 'server' | 'computer' | 'guest'
+export type FleetKind = 'server' | 'computer' | 'guest' | 'container'
 export type FleetAbilityKey = 'apps' | 'vms' | 'files' | 'storage' | 'terminal' | 'desktop' | 'backups'
 
 export type FleetAbility = {
@@ -31,11 +31,20 @@ export type ComputerFleetInput = {
 	id: string
 	name: string
 	online: boolean
-	allowed?: Partial<Record<'terminal' | 'desktop' | 'storage' | 'backup' | 'files' | 'apps', boolean>>
-	on?: Partial<Record<'terminal' | 'desktop' | 'storage' | 'backup' | 'files' | 'apps', boolean>>
+	allowed?: Partial<Record<'terminal' | 'desktop' | 'storage' | 'backup' | 'files' | 'apps' | 'vms', boolean>>
+	on?: Partial<Record<'terminal' | 'desktop' | 'storage' | 'backup' | 'files' | 'apps' | 'vms', boolean>>
+	libvirt?: boolean
 }
 
 export type GuestFleetInput = {
+	id: string
+	name: string
+	state: string
+	hostId?: string
+	connector?: boolean
+}
+
+export type ContainerFleetInput = {
 	id: string
 	name: string
 	state: string
@@ -54,7 +63,7 @@ const byName = (a: {name: string}, b: {name: string}) => a.name.localeCompare(b.
 
 const grant = (key: FleetAbilityKey, ok: boolean, reason: string): FleetAbility => ({key, granted: ok, reason: ok ? '' : reason})
 
-function pair(row: ComputerFleetInput, key: 'terminal' | 'desktop' | 'storage' | 'backup' | 'files' | 'apps') {
+function pair(row: ComputerFleetInput, key: 'terminal' | 'desktop' | 'storage' | 'backup' | 'files' | 'apps' | 'vms') {
 	return !!(row.allowed?.[key] && row.on?.[key])
 }
 
@@ -62,7 +71,7 @@ function computerAbilities(row: ComputerFleetInput): FleetAbility[] {
 	const name = row.name
 	return [
 		grant('apps', row.online, `${name} is offline, so it can’t take an install.`),
-		grant('vms', false, `${name} can’t host its own virtual machines.`),
+		grant('vms', !!(row.online && pair(row, 'vms') && row.libvirt), `${name} can’t host its own virtual machines.`),
 		grant('files', pair(row, 'files'), `${name} hasn’t granted Files.`),
 		grant('storage', pair(row, 'storage'), `${name} hasn’t granted Storage.`),
 		grant('terminal', pair(row, 'terminal'), `${name} hasn’t granted Terminal.`),
@@ -85,6 +94,29 @@ function guestAbilities(row: GuestFleetInput): FleetAbility[] {
 	]
 }
 
+function containerStatusWord(state: string): string {
+	if (state === 'running') return 'online'
+	if (state === 'frozen') return 'paused'
+	if (state === 'stopped' || !state) return 'offline'
+	if (state === 'error') return 'error'
+	return state.charAt(0).toUpperCase() + state.slice(1)
+}
+
+function containerAbilities(row: ContainerFleetInput): FleetAbility[] {
+	const name = row.name
+	const on = !!row.connector
+	const running = row.state === 'running'
+	return [
+		grant('apps', on && running, on ? `${name} is not running.` : `Install the connector on ${name} before apps can be installed there.`),
+		grant('vms', false, `${name} can’t host its own virtual machines.`),
+		grant('files', on, `Install the connector on ${name} before its files can be opened.`),
+		grant('storage', false, `Storage stays on the computer that hosts ${name}.`),
+		grant('terminal', on, `Install the connector on ${name} before a terminal can open there.`),
+		grant('desktop', false, `${name} is a system container and has no desktop.`),
+		grant('backups', on, `Install the connector on ${name} before folder backups can run there.`),
+	]
+}
+
 function serverAbilities(name: string, vms: boolean): FleetAbility[] {
 	return KEYS.map((key) => {
 		if (key === 'vms' && !vms) return grant(key, false, `${name} can’t run virtual machines right now.`)
@@ -93,14 +125,23 @@ function serverAbilities(name: string, vms: boolean): FleetAbility[] {
 }
 
 export function computerFleetInput(row: ComputerFleetInput): ComputerFleetInput {
-	return {id: row.id, name: row.name, online: row.online, allowed: row.allowed, on: row.on}
+	return {id: row.id, name: row.name, online: row.online, allowed: row.allowed, on: row.on, libvirt: row.libvirt === true}
 }
 
 export function guestFleetInput(row: GuestFleetInput): GuestFleetInput {
 	return {id: row.id, name: row.name, state: row.state, hostId: row.hostId, connector: !!row.connector}
 }
 
-export function fleetList(input: {server: ServerFleetInput; computers: readonly ComputerFleetInput[]; guests: readonly GuestFleetInput[]}): FleetMember[] {
+export function containerFleetInput(row: ContainerFleetInput): ContainerFleetInput {
+	return {id: row.id, name: row.name, state: row.state, hostId: row.hostId, connector: !!row.connector}
+}
+
+export function fleetList(input: {
+	server: ServerFleetInput
+	computers: readonly ComputerFleetInput[]
+	guests: readonly GuestFleetInput[]
+	containers?: readonly ContainerFleetInput[]
+}): FleetMember[] {
 	const serverName = input.server.name.trim() || 'This server'
 	const serverOnline = input.server.online !== false
 	const server: FleetMember = {
@@ -136,7 +177,20 @@ export function fleetList(input: {server: ServerFleetInput; computers: readonly 
 			abilities: guestAbilities(row),
 		}
 	})
-	const all = [server, ...computers, ...guests]
+	const containers: FleetMember[] = (input.containers ?? []).map((row) => {
+		const online = row.state === 'running'
+		return {
+			id: row.id,
+			kind: 'container',
+			name: row.name,
+			online,
+			entrypoint: false,
+			hostId: row.hostId || SERVER_FLEET_ID,
+			meta: `Container · ${containerStatusWord(row.state)}`,
+			abilities: containerAbilities(row),
+		}
+	})
+	const all = [server, ...computers, ...guests, ...containers]
 	return [...all.filter((m) => m.online).sort(byName), ...all.filter((m) => !m.online).sort(byName)]
 }
 

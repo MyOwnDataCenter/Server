@@ -7,9 +7,9 @@ import {join} from 'node:path'
 import {test} from 'node:test'
 
 import {createAssistant} from '../omarchyd/assistant.mjs'
-import {cardAction, threadItems} from '../web/src/assistant.ts'
+import {answeredBy, assistantKeyLabel, cardAction, threadItems} from '../web/src/assistant.ts'
 import {assistantActivity, setAssistantActivity} from '../web/src/assistantActivity.ts'
-import {appendLiveText, assistantIconBadge, finishLiveItems, insertLiveAction, liveBubbleMark, startLiveTurn} from '../web/src/assistantLive.ts'
+import {appendLiveText, assistantIconBadge, finishLiveItems, insertLiveAction, liveBubbleMark, noteLiveVia, startLiveTurn} from '../web/src/assistantLive.ts'
 import {
 	abortAssistantTurn,
 	assistantTurn,
@@ -246,6 +246,40 @@ test('signing out clears the previous person\'s assistant chat', () => {
 	assert.equal(activity.open, false)
 	assert.equal(activity.composing, false)
 	assert.equal(activity.successAt, 0)
+})
+
+test('a notice names the switch, and a speaker name is kept on the next bubble', () => {
+	const start = [
+		{id: 'user-1', kind: 'text', role: 'user', content: 'hi'},
+		{id: 'live-1', kind: 'text', role: 'assistant', content: '', streaming: true},
+	]
+	const noticed = noteLiveVia(start, 'live-1', 'Grok did not answer. This chat is using OpenAI.')
+	const kept = noteLiveVia(noticed, 'live-1', 'Answered by OpenAI', {keep: true})
+	assert.equal(kept.find((b) => b.id === 'live-1').via, 'Grok did not answer. This chat is using OpenAI.')
+	const named = noteLiveVia(start, 'live-1', 'Answered by OpenAI')
+	assert.equal(named.find((b) => b.id === 'live-1').via, 'Answered by OpenAI')
+	const spoken = named.map((b) => (b.id === 'live-1' ? {...b, content: 'First.'} : b))
+	const split = appendLiveText(spoken, {...startLiveTurn('live-1'), afterTool: true}, 'Second.')
+	assert.equal(split.items.find((b) => b.content === 'Second.').via, 'Answered by OpenAI')
+	const finished = finishLiveItems(named, 'live-1', true)
+	assert.equal(finished.find((b) => b.id === 'live-1').via, 'Answered by OpenAI')
+})
+
+test('a saved chat names the provider when that key is still listed', () => {
+	const items = threadItems({
+		messages: [
+			{role: 'user', content: 'hi', at: 1},
+			{role: 'assistant', content: 'hello', at: 2},
+		],
+	})
+	const blank = answeredBy(items, '')
+	assert.equal(blank.find((b) => b.kind === 'text' && b.role === 'assistant').via, undefined)
+	const named = answeredBy(items, 'Answered by Grok')
+	assert.equal(named.find((b) => b.kind === 'text' && b.role === 'assistant').via, 'Answered by Grok')
+	assert.equal(named.find((b) => b.kind === 'text' && b.role === 'user').via, undefined)
+	assert.equal(assistantKeyLabel({name: 'Backup', provider: 'openai'}), 'Backup')
+	assert.equal(assistantKeyLabel({name: '', provider: 'spacexai'}), 'Grok')
+	assert.equal(assistantKeyLabel(null), '')
 })
 
 test('reset aborts a registered approve controller and bumps the assistant epoch', () => {

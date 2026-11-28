@@ -33,6 +33,27 @@ test('swarmGaugeItems: CPU, memory and root storage; extra mounts are not rings'
 test('swarmGaugeItems: no metrics means no rings', () => {
 	assert.deepEqual(swarmGaugeItems(null), [])
 	assert.deepEqual(swarmGaugeItems({}), [])
+	assert.deepEqual(swarmGaugeItems({swap: {total: 1024, used: 1}}), [])
+})
+
+test('swarmGaugeItems: swap sits after memory only when the machine has swap space', () => {
+	assert.deepEqual(
+		swarmGaugeItems(metrics()).map((g) => g.k),
+		['CPU', 'Memory', 'Storage'],
+	)
+	assert.deepEqual(
+		swarmGaugeItems(metrics({swap: {total: 0, used: 0}})).map((g) => g.k),
+		['CPU', 'Memory', 'Storage'],
+	)
+	const items = swarmGaugeItems(metrics({swap: {total: 8 * 1024 ** 3, used: 2 * 1024 ** 3}}))
+	assert.deepEqual(
+		items.map((g) => g.k),
+		['CPU', 'Memory', 'Swap', 'Storage'],
+	)
+	const swap = items.find((g) => g.k === 'Swap')
+	assert.equal(swap.icon, 'swap')
+	assert.equal(Math.round(swap.p), 25)
+	assert.match(swap.sub, /of /)
 })
 
 test('swarmGaugeItems: one GPU is a GPU ring; two are GPU 0 and GPU 1', () => {

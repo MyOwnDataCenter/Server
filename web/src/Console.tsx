@@ -15,12 +15,14 @@ import * as RFBModule from '@novnc/novnc/lib/rfb.js'
 
 import {mutate, query, type Machine} from './api'
 import {HyprlandView, supportsWebCodecs, type HyprlandStatus, type HyprlandWindow} from './HyprlandView'
+import {isClipTarget, markClipTarget, unmarkClipTarget} from './clipPasteTarget'
 import {clipImage, clipText} from './clips'
 import {consoleShouldTakeFocus} from './consoleFocus'
 import {BTN, bindConsoleWheel, charKeySteps, consoleDisconnectAction, consoleFailureMessage, effectiveConsoleScale, handleConsoleWheel, keysymOfChar, mouseButtonFromEvent, PASTE_STEP_MS, pasteKeySequence, pasteKeySteps, pointToFb, readConsoleMetrics, resolveSuperKey, screenshotFilename, shouldSendConsoleInput, touchReleaseAction, type Pt, type SuperKey} from './consoleHelpers'
 import {overlayBackUsesHistory, popstateClosesOverlay} from './overlayHistory'
 import {Icon} from './icons'
 import {keysymFromEvent, setConsoleKeyHandler} from './desktop/hyprland/consoleBridge'
+import {useMenuFocus} from './focus'
 import {haptic, settleViewport, usePortalRoot, useScreenLock, useToast} from './ui'
 
 type RFBClass = typeof import('@novnc/novnc/lib/rfb.js').default
@@ -134,6 +136,9 @@ export function Console({machine, onClose, embedded, windowId}: {machine: Machin
 	const [fullscreen, setFullscreen] = useState(false)
 	const [barShown, setBarShown] = useState(true)
 	const [keysOpen, setKeysOpen] = useState(false)
+	const keysMenuRef = useRef<HTMLDivElement>(null)
+	// Focus moves into the Keys menu when it opens; arrows, Home and End move between items, Escape or Tab close it and focus goes back to the button.
+	useMenuFocus(keysOpen, keysMenuRef, () => setKeysOpen(false))
 	const [typing, setTyping] = useState<string | null>(null)
 	const [state, setState] = useState<State>('connecting')
 	const [message, setMessage] = useState('')
@@ -195,6 +200,11 @@ export function Console({machine, onClose, embedded, windowId}: {machine: Machin
 	const [mode, setModeState] = useState<Mode>(readMode)
 	const [zoomLabel, setZoomLabel] = useState(100)
 	const [keyboardOpen, setKeyboardOpen] = useState(false)
+	// Phones: once the keyboard is opened with the keyboard button it stays up until that button
+	// puts it away. Tapping or dragging on the screen used to close it (the tap took focus).
+	const keyboardStays = useRef(false)
+	const touchLostKeyboard = useRef(false)
+	const touching = useRef(false)
 	const view = useRef<View>({z: 1, x: 0, y: 0})
 	const cursor = useRef<Pt>({x: -1, y: -1}) // framebuffer coordinates
 	const mask = useRef(0)
@@ -471,10 +481,20 @@ export function Console({machine, onClose, embedded, windowId}: {machine: Machin
 		remoteClip.current = clean
 		r.clipboardPasteFrom(clean)
 	}
+	// A clip pasted as text goes to the screen used last, not to every open one.
+	const clipTarget = useRef({})
 	useEffect(() => {
+		const me = clipTarget.current
+		markClipTarget(me)
+		// Listening on the document, because the screen's own element can be swapped out.
+		const mark = (e: Event) => {
+			if (e.target instanceof Node && rootRef.current?.contains(e.target)) markClipTarget(me)
+		}
+		document.addEventListener('focusin', mark)
+		document.addEventListener('pointerdown', mark, true)
 		const onClipPaste = (e: Event) => {
 			const text = (e as CustomEvent<{text?: string}>).detail?.text
-			if (!text) return
+			if (!text || !isClipTarget(me)) return
 			const r = rfbRef.current
 			if (!r) return
 			const clean = text.replace(/\r\n?/g, '\n')
@@ -482,7 +502,12 @@ export function Console({machine, onClose, embedded, windowId}: {machine: Machin
 			r.clipboardPasteFrom(clean)
 		}
 		window.addEventListener('omarchy-clip-paste', onClipPaste)
-		return () => window.removeEventListener('omarchy-clip-paste', onClipPaste)
+		return () => {
+			window.removeEventListener('omarchy-clip-paste', onClipPaste)
+			document.removeEventListener('focusin', mark)
+			document.removeEventListener('pointerdown', mark, true)
+			unmarkClipTarget(me)
+		}
 	}, [])
 	const syncClipboard = () => {
 		if (!window.isSecureContext || !navigator.clipboard?.readText || !document.hasFocus()) return
@@ -1169,6 +1194,74 @@ export function Console({machine, onClose, embedded, windowId}: {machine: Machin
 		return bindConsoleWheel(el, (e) => onWheelRef.current(e))
 	}, [deskUi])
 
+	// Ask for the whole screen, not just what changed. A VNC server sends only the parts of the screen
+	// that change; when the remote screen's size changes (a monitor added or rescaled, a resolution
+	// change) the new area stays black until something is drawn there, and on a still desktop that can
+	// be never (half the picture black). The same after the phone was away and comes back. A full
+	// update request is part of the protocol and cheap: one picture.
+	useEffect(() => {
+		if (state !== 'connected' || directGpu) return
+		let last = ''
+		const full = (force = false) => {
+			const r = rfbRef.current as any
+			const w = r?._fbWidth
+			const h = r?._fbHeight
+			if (!r?._sock || !w || !h) return
+			const key = `${w}x${h}`
+			if (!force && key === last) return
+			const resized = last !== '' && key !== last
+			last = key
+			// The remote screen changed size: fit the new picture to this screen again (a phone kept
+			// the old fit, which showed part of the picture and black beside it).
+			if (resized || force) {
+				r._updateScale?.()
+				if (!deskUi) requestAnimationFrame(() => applyView(view.current))
+			}
+			try {
+				;(RFB as any).messages.fbUpdateRequest(r._sock, false, 0, 0, w, h)
+			} catch {
+				/* the connection is closing */
+			}
+		}
+		const first = window.setTimeout(() => full(true), 400)
+		const watch = window.setInterval(() => full(false), 1000)
+		const onVisible = () => document.visibilityState === 'visible' && full(true)
+		document.addEventListener('visibilitychange', onVisible)
+		return () => {
+			window.clearTimeout(first)
+			window.clearInterval(watch)
+			document.removeEventListener('visibilitychange', onVisible)
+		}
+	}, [state, directGpu])
+
+	// Touches on the screen keep the on-screen keyboard: the browser's own focus change on a tap is
+	// cancelled, and if the keyboard still went away during a touch, the end of that touch (a user
+	// gesture, so phones allow it) brings it back. Buttons and fields keep their normal behaviour.
+	useEffect(() => {
+		const root = rootRef.current
+		if (!root) return
+		const isControl = (t: EventTarget | null) => t instanceof Element && !!t.closest('button, a, input, textarea, select, [role="button"], [contenteditable="true"]')
+		const start = (e: TouchEvent) => {
+			touching.current = true
+			touchLostKeyboard.current = false
+			if (keyboardStays.current && document.activeElement === input.current && !isControl(e.target)) e.preventDefault()
+		}
+		const end = (e: TouchEvent) => {
+			if (e.touches.length) return
+			touching.current = false
+			if (keyboardStays.current && touchLostKeyboard.current && !isControl(e.target)) input.current?.focus({preventScroll: true})
+			touchLostKeyboard.current = false
+		}
+		root.addEventListener('touchstart', start, {passive: false})
+		root.addEventListener('touchend', end)
+		root.addEventListener('touchcancel', end)
+		return () => {
+			root.removeEventListener('touchstart', start)
+			root.removeEventListener('touchend', end)
+			root.removeEventListener('touchcancel', end)
+		}
+	}, [directGpu, state])
+
 	// ---- keyboard ----------------------------------------------------------------
 	const tapKey = (keysym: number) => {
 		const rfb = rfbRef.current
@@ -1236,8 +1329,13 @@ export function Console({machine, onClose, embedded, windowId}: {machine: Machin
 		haptic(8)
 		const el = input.current
 		if (!el) return
-		if (document.activeElement === el) el.blur()
-		else el.focus({preventScroll: true})
+		if (document.activeElement === el) {
+			keyboardStays.current = false
+			el.blur()
+		} else {
+			keyboardStays.current = true
+			el.focus({preventScroll: true})
+		}
 	}
 
 	const keys: {label: string; sym?: number; mod?: keyof typeof mods}[] = [
@@ -1263,7 +1361,7 @@ export function Console({machine, onClose, embedded, windowId}: {machine: Machin
 				className={`console${embedded ? ' embedded' : ''}${deskUi ? ' desk-ui' : ''}${fullscreen ? ' fs' : ''}`}
 				role="dialog"
 				aria-modal={!embedded}
-				aria-label={`${machine.name} direct GPU console`}
+				aria-label={`${machine.name} direct GPU desktop`}
 			>
 				<HyprlandView
 					mode={hyprTarget.mode}
@@ -1274,7 +1372,7 @@ export function Console({machine, onClose, embedded, windowId}: {machine: Machin
 					windows={hyprWindows}
 					onSelectTarget={(next) => setHyprTarget(next)}
 					onFallbackVnc={() => switchRenderMode('vnc')}
-					onClose={embedded ? undefined : onClose}
+					onClose={embedded ? undefined : back}
 				/>
 			</div>,
 			portalRoot,
@@ -1287,7 +1385,7 @@ export function Console({machine, onClose, embedded, windowId}: {machine: Machin
 			className={`console${embedded ? ' embedded' : ''}${deskUi ? ' desk-ui' : ''}${fullscreen ? ' fs' : ''}${barShown ? ' bar-shown' : ''}`}
 			role="dialog"
 			aria-modal={!embedded}
-			aria-label={`${machine.name} console`}
+			aria-label={`${machine.name} desktop`}
 >
 			{fullscreen && !barShown && <div className="ct-hotzone" onMouseEnter={() => setBarShown(true)} aria-hidden="true" />}
 			{deskUi ? (
@@ -1324,7 +1422,7 @@ export function Console({machine, onClose, embedded, windowId}: {machine: Machin
 						</button>
 					)}
 					<div className="ct-menu-wrap">
-						<button className={`ct-btn${keysOpen ? ' on' : ''}`} disabled={!live} onClick={() => setKeysOpen((o) => !o)} aria-expanded={keysOpen}>
+						<button className={`ct-btn${keysOpen ? ' on' : ''}`} disabled={!live} onClick={() => setKeysOpen((o) => !o)} aria-haspopup="menu" aria-expanded={keysOpen}>
 							<Icon name="keyboard" size={17} />
 							Keys
 							<Icon name="chevron-down" size={13} />
@@ -1332,7 +1430,7 @@ export function Console({machine, onClose, embedded, windowId}: {machine: Machin
 						{keysOpen && (
 							<>
 								<button className="ct-scrim" aria-label="Close" onClick={() => setKeysOpen(false)} />
-								<div className="ct-menu" role="menu">
+								<div ref={keysMenuRef} className="ct-menu" role="menu" aria-label="Keys" tabIndex={-1}>
 									{machine.id === 'desktop' &&
 										OMARCHY_COMBOS.map((k) => (
 											<button
@@ -1437,7 +1535,7 @@ export function Console({machine, onClose, embedded, windowId}: {machine: Machin
 				</header>
 			) : (
 			<header className="console-bar">
-				<button className="round-btn" aria-label="Close console" onClick={back}>
+				<button className="round-btn" aria-label="Close desktop" onClick={back}>
 					<Icon name="back" size={20} />
 				</button>
 				<div className="console-title">
@@ -1613,7 +1711,10 @@ export function Console({machine, onClose, embedded, windowId}: {machine: Machin
 				onCompositionEnd={onCompositionEnd}
 				onKeyDown={onKeyDown}
 				onFocus={() => setKeyboardOpen(true)}
-				onBlur={() => setKeyboardOpen(false)}
+				onBlur={() => {
+					if (touching.current && keyboardStays.current) touchLostKeyboard.current = true
+					setKeyboardOpen(false)
+				}}
 			/>}
 		</div>,
 		portalRoot,
@@ -1648,9 +1749,9 @@ function DesktopSignIn({onDone}: {onDone: () => void}) {
 				The Omarchy desktop is at its sign-in screen, so there’s nothing to show yet. Sign it in from here: this also clears a lockout after too many wrong passwords.
 			</span>
 			<input type="password" autoComplete="current-password" placeholder="Your password" value={password} onChange={(e) => setPassword(e.target.value)} aria-label="Your password" />
-			{error && <span className="desk-signin-error">{error}</span>}
+			{error && <span className="desk-signin-error" role="alert">{error}</span>}
 			<button className="btn primary small" disabled={busy || !password}>
-				{busy ? <span className="spinner" /> : 'Sign in to the desktop'}
+				{busy ? <><span className="spinner" /><span className="sr-only">Sign in to the desktop</span></> : 'Sign in to the desktop'}
 			</button>
 		</form>
 	)

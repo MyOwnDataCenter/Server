@@ -123,3 +123,25 @@ test('web api maps UNREACHABLE, BAD_RESPONSE, NOT_CONFIGURED, and HTML 502/503/5
 	assert.equal(warned.length, 3)
 	assert.match(warned[0], /127\.0\.0\.1:42241/)
 })
+
+test('createBackendClient treats an answer that stops part way like an unreachable server, not a raw error', async () => {
+	for (const make of [
+		() => Object.assign(new Error('The operation was aborted due to timeout'), {name: 'TimeoutError'}),
+		() => Object.assign(new TypeError('terminated'), {cause: {code: 'UND_ERR_SOCKET'}}),
+	]) {
+		const client = createBackendClient({
+			baseUrl: 'http://127.0.0.1:40086',
+			fetchImpl: async () => ({ok: true, status: 200, text: async () => Promise.reject(make())}),
+		})
+		await assert.rejects(
+			() => client.query('apps.list'),
+			(err) => {
+				assert.ok(err instanceof BackendError, String(err))
+				assert.equal(err.code, 'UNREACHABLE')
+				assert.equal(err.status, 502)
+				assert.equal(err.message, UNREACHABLE_MESSAGE)
+				return true
+			},
+		)
+	}
+})

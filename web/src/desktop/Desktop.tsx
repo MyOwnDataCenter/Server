@@ -1,5 +1,6 @@
 // Desktop mode: Ubuntu (GNOME) by default — top bar, dock, icons, floating windows, Activities.
 // Square tiles those same windows over the dock. Omarchy Super chords stay off until enabled.
+import {serverPower} from '../power'
 import {createContext, lazy, memo, Suspense, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode} from 'react'
 import {useAppTab} from '../appTab'
 import {createPortal} from 'react-dom'
@@ -7,10 +8,13 @@ import {useQuery, useQueryClient} from '@tanstack/react-query'
 
 import {SERVER_DESKTOP, logout, mutate, query, type Bootstrap, type Machine, type UserApp} from '../api'
 import {HyprlandView, supportsWebCodecs, type HyprlandApp, type HyprlandStatus, type HyprlandWindow} from '../HyprlandView'
+import {StreamProfilerSheet} from '../screens/StreamProfiler'
 import {AppSheet} from '../AppSheet'
 import {askApp, explainProbe} from '../openApp'
 import {appUrl, useAction, useApps, useBootstrap, useCpu, useMachines, useMemory, useNotifications, useUpdates, useUser} from '../data'
 import {useServerReachable} from '../connection'
+import {entrypointHost} from '../entrypointHost'
+import {isOwner} from '../isOwner'
 import {Icon, type IconName} from '../icons'
 import {Apps} from '../screens/Apps'
 import {OPEN_STORE, type StoreBinding} from '../fleet/openStore'
@@ -21,12 +25,16 @@ import {AssistantCharacterWidget} from '../character/widgets'
 import {hasOpenDialog, pickFocusTarget, useDialogFocus, useInert, useMenuFocus} from '../focus'
 import {ScreenErrorBoundary} from '../screenBoundary'
 import {queryClearsOnSignOut} from '../signOutQueries'
+import {ThemeModeButton} from '../theme/ThemeModeButton'
 import {AppIcon, AssistantIcon, InWindow, PortalRoot, StatChip, StoreIcon, TerminalIcon, VersionTag, customBackgroundUrl, omarchyBackgroundUrl, setLayoutPref, useConfirm, useOmarchyThemes, useToast, wallpaperUrl, type Prefs} from '../ui'
-import {SYSTEM_DOCK, WALLPAPERS, resetDeskConfig, solidOf, useDeskConfig, wallpaperSrc, type DeskConfig, type DeskIcon} from './config'
+import {resetDeskConfig, solidOf, useDeskConfig, withTerminals, type DeskConfig, type DeskIcon} from './config'
+import {placeableKeys} from './places'
+import {OPEN_TOAST_PLACE, toastDeskKind} from '../toasts/open'
 import {desktopIconKeyOpens, desktopIconKeysApply, iconSelectionClearsOnFocus} from './iconKeys'
 import {iconsInView} from './iconsInView'
 import {desktopMachineStatus, machineOpenAction} from './machineOpen'
 import {startAlreadyPending} from './startPending'
+import {dockLabel} from './dockLabel'
 import {extraWindowAction} from './extraWindow'
 import {ignoreRepeatedDesktopShortcut} from './shortcutRepeat'
 import {nextStarting, type StartingWatch} from './startingWatch'
@@ -36,15 +44,18 @@ import {injectConsoleKey, keysymFromEvent, lastMinimizedOn, releaseConsoleSuper,
 import {CAPTURE_KEY, ONBOARDING_KEY, canUseKeyboardLock, chipIntent, grabToggleReleasesKeyboardLock, keyboardLockApi, onCaptureModeChange, onFullscreenChange, releaseKeyboardLock, resolveMode, toggleLock, type GrabState} from './hyprland/grab'
 import {isSuper, resolveHyprKey, type Action} from './hyprland/keymap'
 import {Launcher} from './hyprland/Launcher'
-import {GAP, collapse, contains, firstLeaf, flipSplit, focusDir, insert as insertTile, isNode, moveWorkspace, reconcile, rects as tileRectsOf, remove as removeTile, swapDir, type Node} from './hyprland/layout'
+import {GAP, MIN_PANE, collapse, contains, dividers, firstLeaf, flipSplit, focusDir, insert as insertTile, isNode, moveWorkspace, ratioAt, reconcile, rects as tileRectsOf, remove as removeTile, setRatio, swapDir, type Divider, type Node, type Path} from './hyprland/layout'
 import {Onboarding} from './hyprland/Onboarding'
+import {restoreWindows} from './restoreWindows'
 import {loadWallpaper} from './wallpaperLoader'
+import {sameShellWindows} from './extraWindow'
 import {overviewEnterOpensApp} from './overviewEnter'
 import {OPEN_SETTINGS, SHOW_SHELL_KEY, rememberAppearanceFocus, rememberSettingsPage, settingsPayloadFor, settingsRemountKey} from './settingsPage'
 import {clampDragY, clampWindowRect} from './windowGeometry'
 import {nextMaximizeSnap} from './windowSnap'
 import {bindWindowScrollReset} from './winScroll'
 import {startMinuteClock} from './clock'
+import {sameWindowContent} from './windowContent'
 
 const HINT_KEY = 'omarchy-server:desk-hint-closed'
 
@@ -52,6 +63,7 @@ const Files = lazy(() => import('../screens/Files').then((m) => ({default: m.Fil
 const ShareSheet = lazy(() => import('../screens/Files').then((m) => ({default: m.ShareSheet})))
 const Store = lazy(() => import('../screens/Store').then((m) => ({default: m.Store})))
 const Machines = lazy(() => import('../screens/Machines').then((m) => ({default: m.Machines})))
+const Terminals = lazy(() => import('../fleet/Terminals').then((m) => ({default: m.Terminals})))
 const Home = lazy(() => import('../screens/Home').then((m) => ({default: m.Home})))
 const Clips = lazy(() => import('../screens/Clips').then((m) => ({default: m.Clips})))
 const More = lazy(() => import('../screens/More').then((m) => ({default: m.More})))
@@ -64,14 +76,14 @@ const Console = lazy(() => import('../Console').then((m) => ({default: m.Console
 function WinFallback() {
 	return (
 		<div className="win-empty">
-			<span className="spinner" aria-label="Loading" />
+			<span className="spinner" role="status" aria-label="Loading" />
 		</div>
 	)
 }
 
 // ---- model ---------------------------------------------------------------------------------
 type RailPayload = {address: string; title: string; appId?: string; class?: string; hasIcon?: boolean}
-type Kind = 'home' | 'files' | 'apps' | 'store' | 'terminal' | 'machines' | 'system' | 'settings' | 'personalize' | 'assistant' | 'console' | 'clips' | 'app' | 'rail'
+type Kind = 'home' | 'files' | 'apps' | 'store' | 'terminal' | 'machines' | 'terminals' | 'system' | 'settings' | 'personalize' | 'assistant' | 'console' | 'clips' | 'app' | 'rail'
 type Payload = {appId?: string; machineId?: string; name?: string; rail?: RailPayload; path?: string; tab?: string; page?: string; pageNonce?: number; term?: {id: string; name?: string; icon?: string}; input?: string; store?: StoreBinding}
 type Snap = 'max' | 'left' | 'right' | null
 type Rect = {x: number; y: number; w: number; h: number}
@@ -93,6 +105,7 @@ export const SYS: Record<SysKind, {title: string; icon?: IconName; bg?: string; 
 	store: {title: 'App Store', w: 1040, h: 720},
 	terminal: {title: 'Terminal', w: 860, h: 540},
 	machines: {title: 'Machines', icon: 'machine-filled', bg: 'linear-gradient(150deg,#5eead4,#0f766e 70%)', tone: 'var(--teal)', w: 1180, h: 760},
+	terminals: {title: 'Terminals', icon: 'terminal', bg: 'linear-gradient(150deg,#86efac,#15803d 70%)', tone: 'var(--green)', w: 980, h: 760},
 	system: {title: 'System', icon: 'activity-filled', bg: 'linear-gradient(150deg,#fdba74,#c2410c 70%)', tone: 'var(--peach)', w: 820, h: 720},
 	settings: {title: 'Settings', icon: 'settings', bg: 'linear-gradient(150deg,#cbd5e1,#475569 70%)', tone: 'var(--fg)', w: 760, h: 720},
 	personalize: {title: 'Appearance', icon: 'palette', bg: 'linear-gradient(150deg,#f9a8d4,#be185d 70%)', tone: 'var(--pink)', w: 880, h: 720},
@@ -157,10 +170,9 @@ export function SysIcon({kind, size = 44}: {kind: string; size?: number}) {
 }
 function FolderIcon({path, size}: {path: string; size: number}) {
 	const trash = path === '/Trash'
-	const home = path === '/Home'
 	return (
 		<span className="app-icon folder-icon sys-ico" style={{width: size, height: size, '--grad': trash ? 'linear-gradient(150deg,#a1a1aa,#52525b 70%)' : 'linear-gradient(150deg,#93c5fd,#3b82f6 70%)', '--tone': trash ? 'var(--muted)' : 'var(--blue)'} as CSSProperties}>
-			<Icon name={trash ? 'trash' : home ? 'home' : 'folder-filled'} size={size * 0.52} stroke={1.8} />
+			<Icon name={trash ? 'trash' : 'folder-filled'} size={size * 0.52} stroke={1.8} />
 		</span>
 	)
 }
@@ -201,7 +213,7 @@ export function useItems() {
 	const apps = useApps()
 	const machines = useMachines()
 	const user = useUser()
-	const owner = user.data?.role !== 'member'
+	const owner = isOwner(user.data)
 	const canRail = owner && supportsWebCodecs()
 	const hyprStatus = useQuery({
 		queryKey: ['hyprland.status'],
@@ -232,7 +244,7 @@ export function useItems() {
 	const railWindows = useMemo(() => railWinsQ.data ?? [], [railWinsQ.data])
 	const info = useCallback(
 		(key: string): ItemInfo => {
-			if (isSys(key)) return {key, label: SYS[key].title, icon: (s) => <SysIcon kind={key} size={s} />, missing: key === 'terminal' && !owner}
+			if (isSys(key)) return {key, label: SYS[key].title, icon: (s) => <SysIcon kind={key} size={s} />, missing: (key === 'terminal' || key === 'terminals') && !owner}
 			if (key.startsWith('app:')) {
 				const a = appList.find((x) => x.id === key.slice(4))
 				const up = !!a && (a.state === 'ready' || a.state === 'running')
@@ -279,7 +291,7 @@ export function useItems() {
 			}
 			if (key.startsWith('folder:')) {
 				const path = key.slice(7)
-				const label = path === '/Home' ? 'Home' : path === '/Trash' ? 'Trash' : path.slice(path.lastIndexOf('/') + 1)
+				const label = path === '/Home' ? 'Home folder' : path === '/Trash' ? 'Trash' : path.slice(path.lastIndexOf('/') + 1)
 				return {key, label, icon: (s) => <FolderIcon path={path} size={s} />}
 			}
 			return {key, label: key, icon: (s) => <SysIcon kind="window" size={s} />, missing: true}
@@ -384,7 +396,7 @@ export function Desktop({boot, prefs, setPrefs, onSignedOut, reopenAssistant}: {
 	const user = useUser()
 	const [cfg, setCfg] = useDeskConfig()
 	const {info, appList, machineList, railApps, railWindows, railReady, owner} = useItems()
-	const [wins, setWins] = useState<Win[]>(() => load<Win[]>(STORE_KEY, []).filter((w) => w.kind !== 'terminal' && w.kind !== 'console' && w.kind !== 'rail'))
+	const [wins, setWins] = useState<Win[]>(() => restoreWindows<Win>(load<unknown>(STORE_KEY, [])))
 	const [overview, setOverview] = useState<null | 'windows' | 'apps'>(null)
 	const [topMenu, setTopMenu] = useState<null | 'clock' | 'system'>(null)
 	const [menu, setMenu] = useState<Menu | null>(null)
@@ -415,6 +427,7 @@ export function Desktop({boot, prefs, setPrefs, onSignedOut, reopenAssistant}: {
 	const [launcher, setLauncher] = useState(false)
 	// Single shared desktop audio mute state: PipeWire @DEFAULT_MONITOR@ is global, so at most one RAIL window streams PCM audio.
 	const [railAudioMuted, setRailAudioMuted] = useState(false)
+	const [streamProfilerOpen, setStreamProfilerOpen] = useState(false)
 	const toggleRailMute = useCallback(() => {
 		setRailAudioMuted((m) => !m)
 	}, [])
@@ -663,7 +676,8 @@ export function Desktop({boot, prefs, setPrefs, onSignedOut, reopenAssistant}: {
 			const storedPayload = settingsPayload ?? payload
 			const key = keyOf(kind, storedPayload)
 			const multi = kind === 'files' || kind === 'terminal'
-			const existing = winsRef.current.filter((w) => w.key === key).sort((a, b) => b.z - a.z)[0]
+			const sameKey = winsRef.current.filter((w) => w.key === key)
+			const existing = (kind === 'terminal' ? sameShellWindows(sameKey, payload?.term) : sameKey).sort((a, b) => b.z - a.z)[0]
 			if (existing && !(multi && opts?.newWindow)) {
 				if (kind === 'personalize' && payload?.tab) update(existing.id, {payload})
 				if (kind === 'store') update(existing.id, {payload: storedPayload})
@@ -696,6 +710,15 @@ export function Desktop({boot, prefs, setPrefs, onSignedOut, reopenAssistant}: {
 		},
 		[focus, update, cfg.shell, captureWindowOpener],
 	)
+
+	useEffect(() => {
+		const onPlace = (event: Event) => {
+			const kind = toastDeskKind(String((event as CustomEvent<string>).detail ?? ''))
+			if (kind && isSys(kind)) open(kind)
+		}
+		window.addEventListener(OPEN_TOAST_PLACE, onPlace)
+		return () => window.removeEventListener(OPEN_TOAST_PLACE, onPlace)
+	}, [open])
 
 	const didReopenAssistant = useRef(false)
 	useEffect(() => {
@@ -754,14 +777,14 @@ export function Desktop({boot, prefs, setPrefs, onSignedOut, reopenAssistant}: {
 			launch,
 			openConsole,
 			openTerminal: (term, input) => {
-				const action = extraWindowAction('terminal', winsRef.current.some((w) => w.kind === 'terminal'))
+				const action = extraWindowAction('terminal', sameShellWindows(winsRef.current, term).length > 0)
 				open('terminal', term || input ? {...(term ? {term} : {}), ...(input ? {input} : {})} : undefined, {newWindow: action === 'open'})
 			},
 			close,
 			openItem: (key) => {
 				if (isSys(key)) {
 					if (key !== 'terminal') return open(key)
-					const action = extraWindowAction('terminal', winsRef.current.some((w) => w.kind === 'terminal'))
+					const action = extraWindowAction('terminal', sameShellWindows(winsRef.current, null).length > 0)
 					return open('terminal', undefined, {newWindow: action === 'open'})
 				}
 				if (key.startsWith('folder:')) return open('files', {path: key.slice(7)}, {newWindow: true})
@@ -831,7 +854,7 @@ export function Desktop({boot, prefs, setPrefs, onSignedOut, reopenAssistant}: {
 						mutate('machines.start', {id})
 							.then(() => {
 								const listUpdatedAt = qc.getQueryState<Machine[]>(['machines.list'])?.dataUpdatedAt ?? 0
-								toast(`Starting ${m.name}. Its console opens when it’s ready.`)
+								toast(`Starting ${m.name}. Desktop opens when it’s ready.`)
 								setStarting((s) => (s.some((w) => w.id === id) ? s : [...s, {id, listUpdatedAt}]))
 							})
 							.catch((e) => {
@@ -1037,7 +1060,7 @@ export function Desktop({boot, prefs, setPrefs, onSignedOut, reopenAssistant}: {
 	// -- dock --
 	const pinned = cfg.dock.items.filter((k) => !info(k).missing)
 	const runningKeys = [...new Set(wins.map(itemOfWin))]
-	const dockKeys = [...pinned, ...(cfg.dock.showRunning ? runningKeys.filter((k) => !pinned.includes(k)) : [])]
+	const dockKeys = withTerminals([...pinned, ...(cfg.dock.showRunning ? runningKeys.filter((k) => !pinned.includes(k)) : [])], owner)
 	const winsOf = (key: string) => wins.filter((w) => itemOfWin(w) === key)
 	const dockClick = (key: string) => {
 		setMenu(null)
@@ -1143,7 +1166,7 @@ export function Desktop({boot, prefs, setPrefs, onSignedOut, reopenAssistant}: {
 				},
 			})
 		items.push('sep')
-		items.push(cfg.dock.items.includes(key) ? {label: 'Remove from dock', icon: 'close', onClick: () => api.unpin(key)} : {label: 'Pin to dock', icon: 'star', onClick: () => api.pin(key)})
+		if (key !== 'terminals') items.push(cfg.dock.items.includes(key) ? {label: 'Remove from dock', icon: 'close', onClick: () => api.unpin(key)} : {label: 'Pin to dock', icon: 'star', onClick: () => api.pin(key)})
 		items.push(cfg.icons.some((i) => i.key === key) ? {label: 'Remove from desktop', icon: 'close', onClick: () => api.removeIcon(key)} : {label: 'Add to desktop', icon: 'plus', onClick: () => api.addIcon(key)})
 		if (key.startsWith('rail-app:')) {
 			// Scope bulk close strictly to explicitly associated RAIL browser wrappers for this app (never sweeping unmatched physical windows by class).
@@ -1192,23 +1215,7 @@ export function Desktop({boot, prefs, setPrefs, onSignedOut, reopenAssistant}: {
 
 	const power = async (kind: 'restart' | 'shutdown') => {
 		setTopMenu(null)
-		const ok = await confirm({
-			title: kind === 'restart' ? 'Restart your server?' : 'Shut down your server?',
-			body:
-				kind === 'restart'
-					? 'All apps and machines stop, then come back once this server has restarted. This takes a few minutes.'
-					: 'All apps and machines stop. You’ll need to turn the server back on yourself (for a VM, from its host).',
-			confirm: kind === 'restart' ? 'Restart' : 'Shut down',
-			danger: true,
-			icon: kind === 'restart' ? 'restart' : 'power',
-		})
-		if (!ok) return
-		try {
-			await mutate(`system.${kind}`)
-			toast(kind === 'restart' ? 'Your server is restarting' : 'Your server is shutting down')
-		} catch (e) {
-			toast((e as Error).message, true)
-		}
+		await serverPower(kind, confirm, toast)
 	}
 	const signOut = async () => {
 		setTopMenu(null)
@@ -1226,11 +1233,9 @@ export function Desktop({boot, prefs, setPrefs, onSignedOut, reopenAssistant}: {
 	}
 
 	// -- wallpaper + accent for the desktop (scoped to the desktop; the phone keeps its own) --
-	const wp = WALLPAPERS.find((w) => w.id === cfg.wallpaper)
 	const omarchy = useOmarchyThemes(cfg.wallpaper === 'omarchy')
-	const wallUrl = wp
-		? wallpaperSrc(wp.id)
-		: cfg.wallpaper === 'omarchy'
+	const wallUrl =
+		cfg.wallpaper === 'omarchy'
 			? omarchyBackgroundUrl(prefs.omarchyBackground, omarchy.data?.current)
 			: cfg.wallpaper === 'photo'
 				? (customBackgroundUrl(prefs.backgroundVersion) ?? wallpaperUrl(user.data?.wallpaper))
@@ -1250,13 +1255,14 @@ export function Desktop({boot, prefs, setPrefs, onSignedOut, reopenAssistant}: {
 			})
 			return {...c, icons: sorted.map((i, n) => ({...i, col: Math.floor(n / rows), row: n % rows}))}
 		})
+	// Appearance is its own window on the desktop so Settings can be focused without closing it.
 	const openAppearance = (tab?: string) => {
 		try {
 			if (tab) rememberAppearanceFocus(sessionStorage, tab)
 		} catch {
 			/* private */
 		}
-		open('settings', {page: 'appearance'})
+		open('personalize', tab ? {tab} : undefined)
 	}
 	const desktopMenu = (x: number, y: number, opener?: HTMLElement | null) =>
 		setMenu({
@@ -1338,7 +1344,7 @@ export function Desktop({boot, prefs, setPrefs, onSignedOut, reopenAssistant}: {
 			} catch {
 				/* private */
 			}
-			open('settings', {page: 'appearance'})
+			open('personalize')
 		}
 	}, [open])
 	useEffect(() => {
@@ -1489,6 +1495,8 @@ export function Desktop({boot, prefs, setPrefs, onSignedOut, reopenAssistant}: {
 				{!overview && !wins.some((w) => w.kind === 'assistant' && !w.min) && <AssistantCharacterWidget onOpen={() => open('assistant')} />}
 				<TopBar
 					boot={boot}
+					prefs={prefs}
+					setPrefs={setPrefs}
 					activeTitle={active ? winTitle(active, appList, machineList) : null}
 					overview={!!overview}
 					menu={topMenu}
@@ -1527,6 +1535,15 @@ export function Desktop({boot, prefs, setPrefs, onSignedOut, reopenAssistant}: {
 					winControls={
 						active?.kind === 'rail' && !overview ? (
 							<span className="top-win-ctrls" role="group" aria-label="Window controls">
+								<button
+									type="button"
+									className={`top-win-btn${streamProfilerOpen ? ' on' : ''}`}
+									aria-label="Stream profiles"
+									title="Stream profiles"
+									onClick={() => setStreamProfilerOpen(true)}
+								>
+									<Icon name="gpu" size={12} />
+								</button>
 								<button
 									type="button"
 									className={`top-win-btn${railAudioMuted ? ' muted' : ''}`}
@@ -1593,10 +1610,29 @@ export function Desktop({boot, prefs, setPrefs, onSignedOut, reopenAssistant}: {
 						hidden={hypr && (w.workspace ?? 1) !== hyprWs}
 						muted={railAudioMuted}
 						onToggleMute={toggleRailMute}
+						onOpenProfiles={w.kind === 'rail' ? () => setStreamProfilerOpen(true) : undefined}
 					>
 						<WindowContent win={w} prefs={prefs} setPrefs={setPrefs} onSignedOut={onSignedOut} owner={owner} muted={railAudioMuted || w.id !== primaryRailAudioId} onToggleMute={toggleRailMute} />
 					</WindowFrame>
 				))}
+
+				{hypr && !overview && (
+					<TileSplits
+						tree={isNode(trees[hyprWs]) ? trees[hyprWs] : null}
+						area={usable()}
+						hidden={hiddenIds(hyprWs, wins)}
+						blockers={wins.filter((w) => !w.min && onWs(w) && (w.float || w.snap === 'max')).map(rectOf)}
+						onRatio={(path, ratio) => {
+							const ws = hyprWsRef.current
+							setTrees((ts) => {
+								const cur = ts[ws] ?? null
+								const next = setRatio(cur, path, ratio)
+								return next === cur ? ts : {...ts, [ws]: next}
+							})
+						}}
+						onDragging={setDragging}
+					/>
+				)}
 
 				{preview && <div className="snap-preview" style={{left: preview.x, top: preview.y, width: preview.w, height: preview.h}} />}
 
@@ -1643,6 +1679,7 @@ export function Desktop({boot, prefs, setPrefs, onSignedOut, reopenAssistant}: {
 						railWindows={railWindows}
 						railReady={railReady}
 						owner={owner}
+						showTerminals={owner}
 						hasWindows={visible.length > 0}
 						windows={overviewWindows}
 						onPickWindow={(id) => {
@@ -1669,26 +1706,30 @@ export function Desktop({boot, prefs, setPrefs, onSignedOut, reopenAssistant}: {
 						onClose={() => setLauncher(false)}
 						onOpen={(key) => api.openItem(key)}
 						onMenu={(k, x, y, opener) => itemMenu(k, x, y, 'overview', opener)}
-						items={[
-							'files',
-							'apps',
-							'store',
-							'terminal',
-							'machines',
-							'system',
-							'settings',
-							'assistant',
-							'personalize',
-							...appList.map((a) => `app:${a.id}`),
-							...(railReady ? railApps.map((a) => `rail-app:${a.id}`) : []),
-							...(railReady ? railWindows.map((w) => `rail-win:${w.address}`) : []),
-							...machineList.map((m) => `machine:${m.id}`),
-						]
+						items={withTerminals(
+							[
+								'files',
+								'apps',
+								'store',
+								'terminal',
+								'machines',
+								'system',
+								'settings',
+								'assistant',
+								'personalize',
+								...appList.map((a) => `app:${a.id}`),
+								...(railReady ? railApps.map((a) => `rail-app:${a.id}`) : []),
+								...(railReady ? railWindows.map((w) => `rail-win:${w.address}`) : []),
+								...machineList.map((m) => `machine:${m.id}`),
+							],
+							true,
+						)
 							.map((key) => info(key))
 							.filter((it) => !it.missing)}
 					/>
 				)}
 				{superKeys && cheatsheet && <Cheatsheet onClose={() => setCheatsheet(false)} />}
+				<StreamProfilerSheet open={streamProfilerOpen} onClose={() => setStreamProfilerOpen(false)} />
 				{superKeys && onboard && (
 					<Onboarding
 						onDismiss={() => {
@@ -1711,7 +1752,6 @@ function Wall({url}: {url: string}) {
 	useEffect(
 		() =>
 			loadWallpaper(url, {
-				fallback: url.startsWith('/api/omarchy/') ? wallpaperSrc('valley') : undefined,
 				onLoad: (u) => setLayers((l) => [...l.filter((x) => x !== u).slice(-1), u]),
 			}),
 		[url],
@@ -2035,13 +2075,14 @@ function Dock(p: {
 								<button
 									data-key={k}
 									className={`dock-item${p.focusedKey === k ? ' focused' : ''}${count ? ' running' : ''}${drag?.key === k ? ' dragging' : ''}${bouncing === k ? ' bouncing' : ''}`}
-									aria-label={it.label}
+									aria-label={dockLabel(it.label, count, it.status, k.startsWith('machine:'))}
+									aria-current={p.focusedKey === k ? 'true' : undefined}
 									onPointerDown={(e) => {
 										tip.hide()
 										startDrag(k)(e)
 									}}
 									onClick={() => !suppressClick.current && open(k)}
-									{...tipProps(it.label + (it.status === 'stopped' ? ' · stopped' : ''))}
+									{...tipProps(it.label + (it.status === 'stopped' ? ` · ${k.startsWith('machine:') ? 'Offline' : 'stopped'}` : ''))}
 									onContextMenu={(e) => {
 										e.preventDefault()
 										tip.hide()
@@ -2067,6 +2108,7 @@ function Dock(p: {
 				<button
 					className={`dock-item show-apps-btn${p.showAppsOn ? ' focused' : ''}`}
 					aria-label="Show Applications"
+					aria-pressed={!!p.showAppsOn}
 					onPointerDown={tip.hide}
 					onClick={p.onShowApps}
 					{...tipProps('Show Applications')}
@@ -2283,7 +2325,7 @@ function DesktopIcons(p: {
 							if (!sel.has(i.key)) setSel(new Set([i.key]))
 							p.onItemMenu(i.key, e.clientX, e.clientY, e.currentTarget)
 						}}
-						title={it.status ? `${it.label} · ${it.status === 'running' ? 'running' : it.status === 'stopped' ? 'stopped' : 'busy'}` : it.label}
+						title={it.status ? `${it.label} · ${i.key.startsWith('machine:') ? (it.status === 'running' ? 'Online' : it.status === 'stopped' ? 'Offline' : 'busy') : it.status === 'running' ? 'running' : it.status === 'stopped' ? 'stopped' : 'busy'}` : it.label}
 					>
 						<span className="desk-icon-art">
 							{it.icon(56)}
@@ -2326,6 +2368,8 @@ const noteText = (n: string) => NOTIFICATION_TEXT[n] ?? n.replace(/[-_]/g, ' ').
 
 function TopBar(p: {
 	boot: Bootstrap
+	prefs: Prefs
+	setPrefs: (p: Prefs) => void
 	activeTitle: string | null
 	overview: boolean
 	menu: 'clock' | 'system' | null
@@ -2405,6 +2449,7 @@ function TopBar(p: {
 						{memPct}%
 					</StatChip>
 				)}
+				<ThemeModeButton prefs={p.prefs} setPrefs={p.setPrefs} className="top-mode" size={16} />
 				{(() => {
 					const count = notes.length + (updates.length > 0 ? 1 : 0)
 					const serverUpdate = notes.includes('update-available')
@@ -2480,7 +2525,7 @@ function TopBar(p: {
 						<span className={`dot ${online ? 'live' : 'down'}`} />
 						<span>
 							<b>{p.boot.server?.device ?? 'server'}</b>
-							<span className="mono muted">{p.boot.server?.host}</span>
+							<span className="mono muted">{entrypointHost(p.boot.server)}</span>
 							<span className="muted">
 								<VersionTag prefix="MODC " version={p.boot.touch.version} info={p.boot.server} />
 							</span>
@@ -2605,6 +2650,7 @@ function Overview({
 	railWindows,
 	railReady,
 	owner,
+	showTerminals,
 	hasWindows,
 	windows,
 	onPickWindow,
@@ -2622,6 +2668,7 @@ function Overview({
 	railWindows: HyprlandWindow[]
 	railReady: boolean
 	owner: boolean
+	showTerminals: boolean
 	hasWindows: boolean
 	windows: {id: string; title: string; rect: {left: number; top: number; width: number; height: number}}[]
 	onPickWindow: (id: string) => void
@@ -2636,14 +2683,7 @@ function Overview({
 	const layerRef = useRef<HTMLDivElement>(null)
 	useDialogFocus(true, layerRef, () => setMode(null), {initialFocus: ref})
 	const showApps = mode === 'apps' || q.trim() !== '' || !hasWindows
-	const webKeys = [
-		...SYSTEM_DOCK.filter((k) => k !== 'terminal' || owner),
-		'assistant',
-		'personalize',
-		...[...appList].sort((a, b) => (a.name ?? a.id).localeCompare(b.name ?? b.id)).map((a) => `app:${a.id}`),
-		...(owner ? [DESKTOP_KEY] : []),
-		...machineList.map((m) => `machine:${m.id}`),
-	]
+	const webKeys = withTerminals(placeableKeys(appList, machineList, owner), showTerminals)
 	const linuxKeys = railReady ? railApps.filter((a) => !a.terminal).map((a) => `rail-app:${a.id}`) : []
 	const keys = tab === 'web' ? webKeys : tab === 'linux' ? linuxKeys : [...webKeys, ...linuxKeys]
 	const items = keys.map(info).filter((x) => !q.trim() || x.label.toLowerCase().includes(q.trim().toLowerCase()))
@@ -2668,7 +2708,7 @@ function Overview({
 						placeholder={railReady ? 'Search web & native Linux apps…' : 'Type to search'}
 						aria-label="Search apps"
 						onKeyDown={(e) => {
-							if (overviewEnterOpensApp(e.key, showApps, items.length)) onOpen(items[0].key)
+							if (overviewEnterOpensApp(e.key, showApps, items.length, e.nativeEvent.isComposing)) onOpen(items[0].key)
 						}}
 					/>
 				</div>
@@ -2751,6 +2791,74 @@ function Overview({
 	)
 }
 
+function rectsOverlap(a: Rect, b: Rect) {
+	return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y
+}
+
+function TileSplits({
+	tree,
+	area,
+	hidden,
+	blockers,
+	onRatio,
+	onDragging,
+}: {
+	tree: Node | null
+	area: Rect
+	hidden: Iterable<string>
+	blockers: Rect[]
+	onRatio: (path: Path, ratio: number) => void
+	onDragging: (v: boolean) => void
+}) {
+	const list = dividers(tree, area, GAP, MIN_PANE, hidden).filter((d) => !blockers.some((b) => rectsOverlap(d.hit, b)))
+	const [heldKey, setHeldKey] = useState<string | null>(null)
+	const start = (d: Divider) => (e: React.PointerEvent<HTMLButtonElement>) => {
+		if (e.button !== 0) return
+		e.preventDefault()
+		e.stopPropagation()
+		const key = d.path.join('') || 'root'
+		setHeldKey(key)
+		onDragging(true)
+		try {
+			e.currentTarget.setPointerCapture(e.pointerId)
+		} catch {
+			/* capture is best-effort */
+		}
+		const move = (ev: PointerEvent) => {
+			onRatio(d.path, ratioAt(d, ev.clientX, ev.clientY))
+		}
+		const up = () => {
+			setHeldKey(null)
+			window.removeEventListener('pointermove', move)
+			window.removeEventListener('pointerup', up)
+			window.removeEventListener('pointercancel', up)
+			onDragging(false)
+		}
+		window.addEventListener('pointermove', move)
+		window.addEventListener('pointerup', up)
+		window.addEventListener('pointercancel', up)
+	}
+	return (
+		<>
+			{list.map((d) => {
+				const key = d.path.join('') || 'root'
+				const r = d.hit
+				return (
+					<button
+						key={key}
+						type="button"
+						tabIndex={-1}
+						className={`tile-split tile-split-${d.axis}${heldKey === key ? ' held' : ''}`}
+						aria-label={d.axis === 'h' ? 'Resize panes left and right' : 'Resize panes up and down'}
+						style={{left: r.x, top: r.y, width: r.w, height: r.h}}
+						onPointerDown={start(d)}
+					/>
+				)
+			})}
+		</>
+	)
+}
+
 // ---- a window ------------------------------------------------------------------------------------
 function winTitle(w: Win, appList: UserApp[], machineList: Machine[]) {
 	if (w.kind === 'app') {
@@ -2764,6 +2872,10 @@ function winTitle(w: Win, appList: UserApp[], machineList: Machine[]) {
 	}
 	if (w.kind === 'rail') return w.payload?.rail?.title || 'Linux App'
 	if (w.kind === 'terminal' && w.payload?.term) return `Terminal — ${w.payload.term.name ?? w.payload.term.id}`
+	if (w.kind === 'store') {
+		const name = w.payload?.store?.name?.trim()
+		return name ? `App Store for ${name}` : SYS.store.title
+	}
 	return SYS[w.kind].title
 }
 
@@ -2808,6 +2920,7 @@ function WindowFrame({
 	hidden,
 	muted,
 	onToggleMute,
+	onOpenProfiles,
 	children,
 }: {
 	win: Win
@@ -2828,6 +2941,7 @@ function WindowFrame({
 	hidden?: boolean
 	muted?: boolean
 	onToggleMute?: () => void
+	onOpenProfiles?: () => void
 	children: ReactNode
 }) {
 	const el = useRef<HTMLDivElement>(null)
@@ -2968,6 +3082,20 @@ function WindowFrame({
 									<i />
 									<i />
 								</span>
+							)}
+							{onOpenProfiles && (
+								<button
+									type="button"
+									className="rail-pill-btn"
+									aria-label="Stream profiles"
+									title="Stream profiles"
+									onClick={(e) => {
+										e.stopPropagation()
+										onOpenProfiles()
+									}}
+								>
+									<Icon name="gpu" size={12} />
+								</button>
 							)}
 							{onToggleMute && (
 								<button
@@ -3470,11 +3598,22 @@ const WindowContent = memo(
 				case 'store':
 					return <Store bound={win.payload?.store ?? null} onOpenInstalled={(a) => desk.launch(a)} />
 				case 'machines':
-					return <Machines windowId={win.id} onOpenApp={(a) => desk.launch(a)} onTerminal={() => desk.openTerminal()} />
+					return <Machines windowId={win.id} prefs={prefs} setPrefs={setPrefs} onOpenApp={(a) => desk.launch(a)} onTerminal={() => desk.openTerminal()} />
+				case 'terminals':
+					return owner ? <Terminals /> : <div className="win-empty">Only the server’s owner can open a terminal.</div>
 				case 'system':
 					return <More prefs={prefs} setPrefs={setPrefs} onSignedOut={onSignedOut} onSettings={() => desk.open('settings')} onClips={() => desk.open('clips')} />
 				case 'settings':
-					return <Settings key={settingsRemountKey(win.payload)} prefs={prefs} setPrefs={setPrefs} onSignedOut={onSignedOut} onBack={close} />
+					return (
+						<Settings
+							key={settingsRemountKey(win.payload)}
+							prefs={prefs}
+							setPrefs={setPrefs}
+							onSignedOut={onSignedOut}
+							onBack={close}
+							onOpenAppearance={() => desk.open('personalize')}
+						/>
+					)
 				case 'personalize':
 					return <Personalize tab={win.payload?.tab} prefs={prefs} setPrefs={setPrefs} onOpenThemes={() => desk.open('settings', {page: 'omarchy-themes'})} />
 				case 'assistant':
@@ -3529,13 +3668,7 @@ const WindowContent = memo(
 		)
 	},
 	(a, b) =>
-		a.win.id === b.win.id &&
-		a.win.kind === b.win.kind &&
-		a.win.payload?.tab === b.win.payload?.tab &&
-		a.win.payload?.page === b.win.payload?.page &&
-		a.win.payload?.pageNonce === b.win.payload?.pageNonce &&
-		a.win.payload?.rail?.address === b.win.payload?.rail?.address &&
-		a.win.payload?.rail?.title === b.win.payload?.rail?.title &&
+		sameWindowContent(a.win, b.win) &&
 		a.prefs === b.prefs &&
 		a.owner === b.owner &&
 		a.muted === b.muted,
@@ -3588,7 +3721,7 @@ function MachineConsoleWindow({machineId, windowId, onClose}: {machineId: string
 		return (
 			<div className="win-empty">
 				<MachineIcon m={m} size={64} />
-				<b>{m.name} isn’t running</b>
+				<b>{m.name} isn’t online</b>
 				<span>{m.state === 'starting' ? 'It’s starting. The desktop connects once it’s up.' : 'Start it from its desktop icon or from Machines.'}</span>
 			</div>
 		)

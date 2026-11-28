@@ -6,6 +6,9 @@ export type RequestOptions = {timeoutMs?: number; signal?: AbortSignal}
 
 // Long blocking server operations keep a generous timeout; normal RPCs and polling fail in 20 s.
 const SLOW_RPC = new Set([
+	'hermes.connect',
+	'hermes.connectRemote',
+	'hermes.disconnect',
 	'unraid.connect',
 	'unraid.scan',
 	'backups.configure',
@@ -16,6 +19,10 @@ const SLOW_RPC = new Set([
 	'backups.computerSnapshots',
 	'backups.setComputer',
 	'backups.computerFolders',
+	'backups.gdrive.authFinish',
+	'backups.gdrive.configure',
+	'backups.gdrive.test',
+	'backups.gdrive.connectExisting',
 	'storage.growSystem',
 	'system.replaceCertificate',
 	'system.desktopSignIn',
@@ -43,6 +50,8 @@ const SLOW_RPC = new Set([
 	'files.unarchive',
 	'files.move',
 	'files.delete',
+	'files.trash',
+	'files.restore',
 	'files.emptyTrash',
 	'appStore.addRepository',
 	'appStore.refresh',
@@ -59,6 +68,8 @@ const SLOW_RPC = new Set([
 	'machines.backup',
 	'machines.restoreBackup',
 	'machines.clone',
+	'machines.installConnector',
+	'containers.installConnector',
 	'wifi.connect',
 	'hardware.raid.addDevice',
 	'hardware.raid.addMirror',
@@ -70,6 +81,8 @@ const SLOW_RPC = new Set([
 	'clips.addFile',
 	'clips.fleetList',
 	'hyprland.launch',
+	'hyprland.profileRun',
+	'apps.setOidc',
 ])
 
 const RESTARTING_MESSAGE = 'My Own Data Center is restarting or not answering. Wait a moment and try again.'
@@ -275,11 +288,12 @@ export type UserApp = {
 	computerName?: string
 	/** Installed on another machine. It does not open through this server’s gateway. */
 	remote?: boolean
+	oidc?: {enabled: boolean; mode: 'auto' | 'assisted'}
 }
 
 export type UsageItem = {id: string; used: number; name?: string}
 export type CpuUsage = {threads: number; totalUsed: number; system: number; apps: UsageItem[]; machines: UsageItem[]}
-export type MemoryUsage = {size: number; totalUsed: number; system: number; apps: UsageItem[]; machines: UsageItem[]}
+export type MemoryUsage = {size: number; totalUsed: number; system: number; apps: UsageItem[]; machines: UsageItem[]; swap?: {total: number; used: number}}
 export type DiskUsage = {
 	size: number
 	totalUsed: number
@@ -295,7 +309,8 @@ export type DiskUsage = {
 	drives?: {name: string; folder: string; size: number; used: number; available: number}[]
 	drive?: {name: string; size: number; notInUse: number; steps: ('partition' | 'partition-not-last' | 'encryption' | 'filesystem')[]; partition: string | null; partitionNumber: number | null; encrypted: string | null; filesystem: string | null} | null
 }
-export type Temperature = {temperature: number | null; warning: string; reason?: 'virtual' | 'no-sensor'}
+export type ThermalSensor = {id: string; label: string; kind: 'processor' | 'video' | 'case' | 'drive' | 'board' | 'other'; celsius: number; stuck?: boolean; defaultOn?: boolean}
+export type Temperature = {temperature: number | null; warning: string; reason?: 'virtual' | 'no-sensor'; sensors?: ThermalSensor[]}
 export type GpuInfo = {
 	id: string
 	index: number
@@ -361,6 +376,9 @@ export type RegistryApp = {
 	caution?: string
 	releaseNotes?: string
 	installSize?: number
+	oidc?: {supported: boolean; mode: 'auto' | 'assisted'; note?: string}
+	/** Extra access ids from the listing or compose (detail fetch). Empty/absent on the compact list. */
+	permissions?: string[]
 }
 export type Registry = {url?: string; meta: {id: string; name: string}; apps: RegistryApp[]}[]
 
@@ -370,6 +388,7 @@ export type Machine = {
 	id: string
 	vmid?: number
 	name: string
+	hostId?: string
 	osId?: string
 	cores?: number
 	memoryGb?: number
@@ -401,6 +420,7 @@ export type InstallReview = {
 	/** Folders you choose a place for: inside the app, or a folder of yours (suggested under your home). */
 	folders?: {appId: string; appName: string; id: string; label: string; detail: string; suggest: string | null}[]
 	home?: string
+	oidc?: {supported: boolean; mode: 'auto' | 'assisted'; note?: string; issuerUrl: string; defaultOn: boolean}
 }
 
 export type OsImage = {
@@ -429,7 +449,7 @@ export type ActiveSession = {
 	client: {type: 'native'; id?: string; platform?: string; deviceClass?: string; appVersion?: string} | {type: 'browser'; userAgent?: string}
 }
 
-export type AssistantProvider = 'spacexai' | 'openai' | 'anthropic' | 'openai-compatible' | 'chatgpt'
+export type AssistantProvider = 'spacexai' | 'openai' | 'anthropic' | 'openai-compatible' | 'chatgpt' | 'hermes'
 // Which endpoint the assistant streams from: /chat/completions or /responses.
 export type AssistantApi = 'chat' | 'responses'
 // How hard a reasoning model thinks; '' leaves the model's default.
@@ -452,6 +472,9 @@ export type AssistantKey = {
 	sharedWith: string[]
 	systemDefault: boolean
 	mine: boolean
+	// The owner's one offered provider, shown to other accounts without their name, address, or key.
+	offered?: boolean
+	declined?: boolean
 	// Sign in with ChatGPT: the account, and whether the sign-in still has a refresh token.
 	account?: string | null
 	signedIn?: boolean

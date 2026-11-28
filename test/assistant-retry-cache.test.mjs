@@ -125,7 +125,7 @@ test('a chat turn survives a 429 and an overloaded stream, and shows the answer 
 		const out = await asst.runTurn({userId: 'owner', role: 'owner', message: 'hi', emit: (e) => events.push(e)})
 		assert.equal(calls.length, 3)
 		assert.equal(waits[0], 1000)
-		assert.deepEqual(events.map((e) => e.event), ['text', 'done'])
+		assert.deepEqual(events.map((e) => e.event), ['speaker', 'text', 'done'])
 		const saved = JSON.parse(await readFile(join(dataDir, 'assistant', 'conversations', `${out.conversationId}.json`), 'utf8'))
 		assert.deepEqual(saved.messages.map((m) => m.content), ['hi', 'Hello'])
 	} finally {

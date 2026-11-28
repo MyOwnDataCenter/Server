@@ -1,6 +1,6 @@
 {
   "name": "omarchy-server",
-  "version": "0.9.76",
+  "version": "0.9.108",
   "description": "Your Omarchy machine as a home server you open in a browser.",
   "private": true,
   "type": "module",
@@ -16,10 +16,11 @@
     "build": "vite build",
     "typecheck": "tsc --noEmit -p web",
     "start": "node server/cli.mjs",
-    "test": "node --experimental-strip-types --test --test-concurrency=1 test/*.test.mjs"
+    "test": "node --experimental-strip-types --import ./test/retry-rm.mjs --test --test-concurrency=1 test/*.test.mjs"
   },
   "dependencies": {
     "express": "^4.21.2",
+    "qrcode-generator": "2.0.4",
     "ws": "^8.22.2",
     "yaml": "^2.9.1"
   },
@@ -38,7 +39,6 @@
     "mammoth": "^1.13.0",
     "marked": "^18.2.0",
     "pdfjs-dist": "^6.5.438",
-    "qrcode-generator": "^2.0.4",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "typescript": "^5.6.3",

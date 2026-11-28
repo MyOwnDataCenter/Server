@@ -152,3 +152,34 @@ test('a valid swarm.json still loads its computers', async () => {
 		await rm(root, {recursive: true, force: true})
 	}
 })
+
+// remote-apps.json lists the apps installed on joined computers. A damaged file is not an empty list:
+// removing a computer must not overwrite it.
+const twoComputers = JSON.stringify({
+	agents: [
+		{id: 'aabbccddeeff', name: 'Study PC', keyHash: 'ab', allowed: {}, on: {}, enrolledAt: 1},
+		{id: '112233445566', name: 'Garage PC', keyHash: 'cd', allowed: {}, on: {}, enrolledAt: 2},
+	],
+})
+
+test('a damaged remote-apps.json is left unchanged when a computer is removed', async (t) => {
+	const logs = logsOf(t)
+	const root = await mkdtemp(join(os.tmpdir(), 'omarchyd-remote-apps-bad-'))
+	try {
+		await writeFile(join(root, 'swarm.json'), twoComputers)
+		const file = join(root, 'remote-apps.json')
+		await writeFile(file, '{"apps": [')
+		const swarm = createConnector({dataDir: root, tlsDir: root})
+		try {
+			assert.deepEqual(await swarm.remoteApps(), [])
+			await swarm.procedures['swarm.remove'].run({id: 'aabbccddeeff'})
+			assert.equal(await readFile(file, 'utf8'), '{"apps": [')
+			assert.ok(logs.some((l) => /remote-apps\.json/.test(l)), 'the damaged file is reported')
+		} finally {
+			swarm.close()
+		}
+	} finally {
+		await rm(root, {recursive: true, force: true})
+	}
+})
+

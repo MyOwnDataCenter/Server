@@ -13,7 +13,7 @@ function modifiedLabel(mtime: number | null): string {
 }
 
 // A joined computer's home folder. Listing uses the connector. This is not the server file browser.
-export function ComputerFolder({id, rel, grid, onOpen, favoriteOf, onToggleFavorite, onMove, onCopy, onClip}: {id: string; rel: string; grid: boolean; onOpen: (rel: string) => void; favoriteOf?: (rel: string) => boolean; onToggleFavorite?: (rel: string) => void; onMove?: (rel: string) => void; onCopy?: (rel: string) => void; onClip?: (rel: string) => void}) {
+export function ComputerFolder({id, rel, grid, onOpen, favoriteOf, onToggleFavorite, onMove, onCopy}: {id: string; rel: string; grid: boolean; onOpen: (rel: string) => void; favoriteOf?: (rel: string) => boolean; onToggleFavorite?: (rel: string) => void; onMove?: (rel: string) => void; onCopy?: (rel: string) => void}) {
 	const listing = useQuery({
 		queryKey: ['swarm.files.list', id, rel],
 		queryFn: () => query<{path: string; entries: Entry[]; truncated?: boolean}>('swarm.files.list', {id, path: rel}),
@@ -42,7 +42,6 @@ export function ComputerFolder({id, rel, grid, onOpen, favoriteOf, onToggleFavor
 			actions: [
 				...(onMove ? [{id: 'move', label: 'Move', onClick: () => onMove(next)}] : []),
 				...(onCopy ? [{id: 'copy', label: 'Copy', onClick: () => onCopy(next)}] : []),
-				...(onClip && !entry.dir ? [{id: 'clip', label: 'Clip', onClick: () => onClip(next)}] : []),
 			],
 		}
 	})

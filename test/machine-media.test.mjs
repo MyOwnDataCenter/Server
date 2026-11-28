@@ -116,6 +116,8 @@ test('Omarchy install: one disk, a boot partition and Btrfs with the usual subvo
 	assert.notEqual(boot.obj_id, root.obj_id)
 
 	assert.deepEqual(omarchyCredentials({username: 'chris', hash: '$6$x'}), {users: [{username: 'chris', enc_password: '$6$x', sudo: true}]})
+	assert.deepEqual(cfg.packages, ['qemu-guest-agent'])
+	assert.deepEqual(cfg.services, ['qemu-guest-agent'])
 })
 
 test('Windows disc labels', () => {
@@ -152,6 +154,19 @@ test('Windows answer file: names are cleaned, text is escaped and the password i
 	for (const bypass of ['BypassTPMCheck', 'BypassSecureBootCheck', 'BypassRAMCheck', 'BypassNRO']) assert.match(xml, new RegExp(bypass))
 	assert.equal(xml.match(/<component /g).length, xml.match(/<\/component>/g).length, 'every component is closed')
 	assert.equal(xml.match(/<settings /g).length, 3)
+	assert.doesNotMatch(xml, /FirstLogonCommands/)
+})
+
+test('a Windows answer file does not install the connector', () => {
+	const none = windowsAnswerFile({computerName: 'pc', username: 'chris', password: 'hunter2 secret'})
+	assert.doesNotMatch(none, /FirstLogonCommands/)
+	assert.doesNotMatch(none, /AutoLogon/)
+	assert.doesNotMatch(none, /install\.ps1/)
+	assert.doesNotMatch(none, /powershell/i)
+	assert.ok(!none.includes('hunter2'), 'password not in plain text')
+	const passwords = [...none.matchAll(/<Password><Value>([^<]+)<\/Value><PlainText>false<\/PlainText><\/Password>/g)].map((m) => m[1])
+	assert.equal(passwords.length, 1)
+	for (const b64 of passwords) assert.equal(Buffer.from(b64, 'base64').toString('utf16le'), 'hunter2 secretPassword')
 })
 
 test('a catalog entry whose commands isn’t a list is ignored, not a crash', () => {

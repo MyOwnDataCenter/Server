@@ -107,3 +107,13 @@ export function folderListError(error: unknown): string | null {
 export function computerSnapshotRows<T>(rows: readonly T[] | null | undefined): readonly T[] {
 	return rows ? [...rows] : []
 }
+
+/**
+ * Has the Google sign-in that this sheet started finished? When the server was already signed in
+ * (the person chose "Switch Google account"), the old sign-in still reports connected, so only a
+ * different account counts. Signing in as the same account again is finished by pasting the code.
+ */
+export function gdriveSignInFinished(status: {connected: boolean; email?: string}, before: {connected: boolean; email?: string}): boolean {
+	if (!status.connected) return false
+	return !before.connected || (status.email ?? '') !== (before.email ?? '')
+}

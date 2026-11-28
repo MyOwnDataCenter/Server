@@ -1,4 +1,4 @@
-export const SYNCED_PREF_KEYS = ['theme', 'accent', 'customBrandHsl', 'omarchyBackground', 'solidColor', 'assistantLook'] as const
+export const SYNCED_PREF_KEYS = ['theme', 'darkTheme', 'lightTheme', 'pictureTheme', 'accent', 'customBrandHsl', 'omarchyBackground', 'solidColor', 'assistantLook', 'statView', 'machinesCompact', 'statPicks', 'tempPicks', 'tempUnit', 'dismissedTutorials'] as const
 export const PREFS_REV_KEY = 'omarchy-server:prefs:rev'
 export const PREFS_DIRTY_KEY = 'omarchy-server:prefs:dirty'
 

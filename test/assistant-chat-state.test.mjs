@@ -178,7 +178,7 @@ test('a step left running across a restart is marked interrupted and reports its
 		await a2.keys.add(OWNER, {provider: 'openai', api: 'chat', apiKey: 'sk-test-1234', model: 'm'})
 		const events = []
 		await a2.runTurn({userId: 'owner', role: 'owner', conversationId: chat.id, message: 'what happened?', emit: (e) => events.push(e)})
-		assert.deepEqual(events.map((e) => e.event), ['text', 'done'])
+		assert.deepEqual(events.map((e) => e.event), ['speaker', 'text', 'done'])
 		const sentTool = seen[0].messages.find((m) => m.role === 'tool' && m.tool_call_id === 'call_1')
 		assert.ok(sentTool)
 		assert.match(sentTool.content, /Interrupted/i)
@@ -211,11 +211,11 @@ test('an existing chat falls back to another usable key when its remembered key 
 
 		// Case 1: owner deletes the key the chat started with and adds another.
 		const first = await run(OWNER, {message: 'hi'})
-		assert.deepEqual(first.events.map((e) => e.event), ['text', 'done'])
+		assert.deepEqual(first.events.map((e) => e.event), ['speaker', 'text', 'done'])
 		const k2 = await asst.keys.add(OWNER, {provider: 'openai', api: 'chat', apiKey: 'sk-bbbb2222', model: 'm'})
 		await asst.keys.remove(OWNER, k1.id)
 		const second = await run(OWNER, {conversationId: first.conversationId, message: 'again'})
-		assert.deepEqual(second.events.map((e) => e.event), ['text', 'done'])
+		assert.deepEqual(second.events.map((e) => e.event), ['speaker', 'text', 'done'])
 		assert.equal(auths.at(-1), 'Bearer sk-bbbb2222')
 		assert.equal((await asst.conversations.get('owner', first.conversationId)).keyId, k2.id)
 
@@ -223,14 +223,14 @@ test('an existing chat falls back to another usable key when its remembered key 
 		const explicit = await run(OWNER, {conversationId: first.conversationId, keyId: k1.id, message: 'explicit'})
 		assert.deepEqual(explicit.events, [{event: 'error', data: {message: 'That key isn’t available', conversationId: first.conversationId}}])
 
-		// Case 2: owner stops sharing a key with a member who still has another key.
-		await asst.keys.update(OWNER, {id: k2.id, sharedWith: ['sam']})
+		// Case 2: owner withdraws the offer from a member who still has another key.
+		await asst.keys.update(OWNER, {id: k2.id, systemDefault: true})
 		const samChat = await run(SAM, {message: 'hello from sam'})
-		assert.deepEqual(samChat.events.map((e) => e.event), ['text', 'done'])
+		assert.deepEqual(samChat.events.map((e) => e.event), ['speaker', 'text', 'done'])
 		const kSam = await asst.keys.add(SAM, {provider: 'openai', api: 'chat', apiKey: 'sk-sams3333', model: 'm'})
-		await asst.keys.update(OWNER, {id: k2.id, sharedWith: []})
+		await asst.keys.clearDefault(OWNER)
 		const samNext = await run(SAM, {conversationId: samChat.conversationId, message: 'still there?'})
-		assert.deepEqual(samNext.events.map((e) => e.event), ['text', 'done'])
+		assert.deepEqual(samNext.events.map((e) => e.event), ['speaker', 'text', 'done'])
 		assert.equal(auths.at(-1), 'Bearer sk-sams3333')
 		assert.equal((await asst.conversations.get('sam', samChat.conversationId)).keyId, kSam.id)
 

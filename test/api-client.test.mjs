@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import {afterEach, test} from 'node:test'
+import {afterEach, mock, test} from 'node:test'
 
 import {ApiError, DEFAULT_TIMEOUT_MS, SLOW_TIMEOUT_MS, getBootstrap, login, mutate, post, query} from '../web/src/api.ts'
 
@@ -142,5 +142,28 @@ test('non-JSON or non-object 200 responses throw INVALID_RESPONSE ApiError', asy
 				return true
 			})
 		}
+	}
+})
+
+test('moving to Trash and restoring may take minutes (a drive copy), so they get the long time limit', async () => {
+	mock.timers.enable({apis: ['setTimeout']})
+	try {
+		globalThis.fetch = (input, init) =>
+			new Promise((_, reject) => init.signal.addEventListener('abort', () => reject(init.signal.reason), {once: true}))
+		const results = {}
+		const watch = (name, p) => p.then(() => (results[name] = 'done'), (e) => (results[name] = e instanceof ApiError ? e.code : 'other'))
+		const all = [
+			watch('short', mutate('apps.restart', {appId: 'immich'})),
+			watch('trash', mutate('files.trash', {path: '/External/Movies'})),
+			watch('restore', mutate('files.restore', {path: '/Trash/files/Movies'})),
+		]
+		mock.timers.tick(DEFAULT_TIMEOUT_MS + 1000)
+		await new Promise((r) => setImmediate(r))
+		assert.deepEqual(results, {short: 'TIMEOUT'})
+		mock.timers.tick(SLOW_TIMEOUT_MS)
+		await Promise.all(all)
+		assert.deepEqual(results, {short: 'TIMEOUT', trash: 'TIMEOUT', restore: 'TIMEOUT'})
+	} finally {
+		mock.timers.reset()
 	}
 })

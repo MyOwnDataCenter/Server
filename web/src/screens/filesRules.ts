@@ -61,7 +61,10 @@ const NICE: Record<string, string> = {
 export function nice(msg: string): string {
   const notDir = /^\[not-a-directory:(.*)\]$/.exec(msg);
   if (notDir) return `${notDir[1]} is a file, not a folder`;
-  return NICE[msg] ?? msg.replace(/^\[|\]$/g, "").replace(/-/g, " ");
+  if (NICE[msg]) return NICE[msg];
+  // Only a bare code like [no-space] is turned into words; a real error text keeps its hyphens.
+  const code = /^\[([\w-]+)\]$/.exec(msg);
+  return code ? code[1].replace(/-/g, " ") : msg;
 }
 
 export const PHONE_FILES_PATH_KEY = "omarchy-server:files-path";

@@ -84,6 +84,8 @@ export type AssistantEvent =
 	| {event: 'text'; data: {text: string}}
 	| {event: 'tool'; data: {name: string; state: string}}
 	| {event: 'action'; data: AssistantAction}
+	| {event: 'notice'; data: {message: string}}
+	| {event: 'speaker'; data: {name: string; provider: string}}
 	| {event: 'done'; data: {conversationId: string}}
 	| {event: 'error'; data: {message: string; conversationId?: string}}
 
@@ -141,8 +143,32 @@ export type AssistantConversation = AssistantConversationSummary & {
 }
 
 export type AssistantItem =
-	| {id: string; kind: 'text'; role: 'user' | 'assistant'; content: string; streaming?: boolean}
+	| {id: string; kind: 'text'; role: 'user' | 'assistant'; content: string; streaming?: boolean; via?: string}
 	| {id: string; kind: 'card'; action: AssistantAction}
+
+const SERVICE_LABEL: Record<string, string> = {
+	spacexai: 'Grok',
+	openai: 'OpenAI',
+	anthropic: 'Anthropic',
+	'openai-compatible': 'Custom',
+	chatgpt: 'ChatGPT',
+	hermes: 'Hermes',
+}
+
+// A saved key's own name, or the service when the offer hides that name.
+export function assistantKeyLabel(key: {name?: string; provider?: string} | null | undefined): string {
+	const name = typeof key?.name === 'string' ? key.name.trim() : ''
+	if (name) return name
+	const provider = typeof key?.provider === 'string' ? key.provider : ''
+	return SERVICE_LABEL[provider] || provider
+}
+
+// Stamp assistant bubbles with the provider line. An empty line leaves history unlabeled.
+export function answeredBy(items: AssistantItem[], line: string): AssistantItem[] {
+	const via = line.trim()
+	if (!via) return items
+	return items.map((b) => (b.kind === 'text' && b.role === 'assistant' ? {...b, via} : b))
+}
 
 export function threadItems(conv: {messages?: AssistantChatMessage[]; actions?: AssistantAction[]}): AssistantItem[] {
 	const byId = new Map<string, AssistantAction>()

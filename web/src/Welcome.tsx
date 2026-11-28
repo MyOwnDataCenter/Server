@@ -3,30 +3,34 @@
 // skipped, and everything here can be changed later in Settings › Appearance.
 // Shown under the same condition the old layout question used, so a device that already set up
 // never sees it again.
-import {useState} from 'react'
+import {useRef, useState} from 'react'
 import {createPortal} from 'react-dom'
 
 import {openSettingsPage} from './desktop/settingsPage'
 import {useUser} from './data'
+import {useDialogFocus} from './focus'
+import {isOwner} from './isOwner'
 import {Icon, type IconName} from './icons'
 import {ScreenLayoutCards} from './LayoutPicker'
-import {detectDesktop, haptic, setLayoutPref, THEMES, type LayoutPref, type Prefs} from './ui'
+import {ThemeChooser} from './ThemeChooser'
+import {detectDesktop, haptic, setLayoutPref, type LayoutPref, type Prefs} from './ui'
 
 type Step = 'hello' | 'layout' | 'theme' | 'assistant' | 'tour'
 const STEPS: Step[] = ['hello', 'layout', 'theme', 'assistant', 'tour']
-
-const PICKABLE_THEMES = THEMES.filter((t) => t.id !== 'custom')
 
 const TOUR: {icon: IconName; title: string; body: string; owner?: boolean}[] = [
 	{icon: 'store', title: 'Apps', body: 'Install apps from the App Store and open them from Home or the dock.'},
 	{icon: 'folder', title: 'Files', body: 'Your files and shared folders, with uploads, previews and Trash.'},
 	{icon: 'machine', title: 'Machines', body: 'Virtual machines and the other computers in your swarm.', owner: true},
-	{icon: 'sparkle', title: 'Assistant', body: 'Ask about your server, or have it do things for you. It always asks before changing anything.'},
+	{icon: 'sparkle', title: 'Assistant', body: 'Ask about your server, or have it do things for you. You choose the providers and their order. Hermes can act on this server when its row is first.'},
 	{icon: 'settings', title: 'Settings', body: 'Appearance, storage, backups, your account and signed-in devices.'},
 ]
 
 export function Welcome({name, owner, prefs, setPrefs, onDone}: {name?: string; owner: boolean; prefs: Prefs; setPrefs: (p: Prefs) => void; onDone: () => void}) {
 	const [step, setStep] = useState<Step>('hello')
+	// Focus moves into the setup, Tab stays inside it, and focus goes back to where it was when it closes.
+	const dialogRef = useRef<HTMLDivElement>(null)
+	useDialogFocus(true, dialogRef)
 	const [detected] = useState(() => detectDesktop())
 	const [layout, setLayout] = useState<LayoutPref | null>(null)
 	const index = STEPS.indexOf(step)
@@ -56,7 +60,7 @@ export function Welcome({name, owner, prefs, setPrefs, onDone}: {name?: string; 
 	const first = name?.trim().split(/\s+/)[0]
 
 	return createPortal(
-		<div className="layout-chooser welcome" role="dialog" aria-modal="true" aria-labelledby="welcome-title">
+		<div ref={dialogRef} className="layout-chooser welcome" role="dialog" aria-modal="true" aria-labelledby="welcome-title" tabIndex={-1}>
 			<div className="layout-card glass welcome-card">
 				<div className="welcome-top">
 					<span className="welcome-dots" aria-label={`Step ${index + 1} of ${STEPS.length}`}>
@@ -88,44 +92,22 @@ export function Welcome({name, owner, prefs, setPrefs, onDone}: {name?: string; 
 					<>
 						<h2 id="welcome-title">Choose a theme</h2>
 						<p>Colours for My Own Data Center. You can also use your own photo later.</p>
-						<div className="welcome-themes" role="radiogroup" aria-label="Theme">
-							{PICKABLE_THEMES.map((t) => (
-								<button
-									key={t.id}
-									type="button"
-									role="radio"
-									aria-checked={prefs.theme === t.id}
-									className={`welcome-theme${prefs.theme === t.id ? ' on' : ''}`}
-									style={{background: t.bg, color: t.fg}}
-									onClick={() => {
-										haptic(6)
-										setPrefs({...prefs, theme: t.id})
-									}}
-								>
-									<span>{t.name}</span>
-									<span className="dots">
-										{t.dots.map((d) => (
-											<i key={d} style={{background: d}} />
-										))}
-									</span>
-								</button>
-							))}
-						</div>
+						<ThemeChooser prefs={prefs} setPrefs={setPrefs} modeSwitch />
 					</>
 				)}
 
 				{step === 'assistant' && (
 					<>
-						<h2 id="welcome-title">Set up your assistant?</h2>
-						<p>The assistant answers questions about your server and can do things for you. It always asks before changing anything. It needs an AI provider: sign in with ChatGPT, or add an API key.</p>
+						<h2 id="welcome-title">Set up the assistant</h2>
+						<p>The assistant answers questions about your server and can do things for you. Add the providers you want, in the order chat should try them.{owner ? ' Hermes is there too, and it answers when its row is first.' : ''} Change that any time in Settings › Assistant.</p>
 						<div className="welcome-choices">
 							<button type="button" className="welcome-choice" onClick={assistantNow}>
 								<span className="welcome-ico">
 									<Icon name="sparkle" size={20} />
 								</span>
 								<span>
-									<b>Set it up now</b>
-									<span>Opens Settings › Assistant to connect a provider.</span>
+									<b>Set up providers</b>
+									<span>ChatGPT, Grok, OpenAI, Anthropic, or a model on this server.</span>
 								</span>
 							</button>
 							<button type="button" className="welcome-choice" onClick={next}>
@@ -168,7 +150,7 @@ export function Welcome({name, owner, prefs, setPrefs, onDone}: {name?: string; 
 					) : (
 						<span />
 					)}
-					<button type="button" className="btn primary" onClick={next}>
+					<button type="button" className="btn primary" data-autofocus onClick={next}>
 						{index === 0 ? 'Get started' : index === STEPS.length - 1 ? 'Done' : 'Next'}
 					</button>
 				</div>
@@ -181,5 +163,5 @@ export function Welcome({name, owner, prefs, setPrefs, onDone}: {name?: string; 
 /** The welcome setup for whoever is signed in (inside the signed-in app, where the account is known). */
 export function WelcomeForUser(props: {prefs: Prefs; setPrefs: (p: Prefs) => void; onDone: () => void}) {
 	const user = useUser()
-	return <Welcome name={user.data?.name} owner={user.data?.role !== 'member'} {...props} />
+	return <Welcome name={user.data?.name} owner={isOwner(user.data)} {...props} />
 }

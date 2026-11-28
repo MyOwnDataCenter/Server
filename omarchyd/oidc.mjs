@@ -412,6 +412,7 @@ export function createOidc({dataDir, accounts, audit = null, now = () => Date.no
 			redirectUris: [...c.redirectUris],
 			scopes: [...(c.scopes ?? ALLOWED_SCOPES)],
 			createdAt: c.createdAt,
+			...(c.managedAppId ? {managedAppId: c.managedAppId} : {}),
 		}
 	}
 
@@ -875,6 +876,7 @@ export function createOidc({dataDir, accounts, audit = null, now = () => Date.no
 		const updated = await updateState((cur) => {
 			const existing = cur.clients.find((c) => c.id === id)
 			if (!existing) throw new RpcError('NOT_FOUND', 'OIDC client not found')
+			if (existing.managedAppId) throw new RpcError('BAD_REQUEST', 'This client is managed by the App Store: change SSO settings from that app’s sheet instead')
 			const name = input?.name !== undefined ? String(input.name).trim() : existing.name
 			if (!name || name.length > 80) throw new RpcError('BAD_REQUEST', 'Enter an app name (1–80 characters)')
 			const redirectUris = input?.redirectUris !== undefined ? normalizeRedirectUris(input.redirectUris) : existing.redirectUris
@@ -893,19 +895,100 @@ export function createOidc({dataDir, accounts, audit = null, now = () => Date.no
 		await updateState((cur) => {
 			const existing = cur.clients.find((c) => c.id === id)
 			if (!existing) throw new RpcError('NOT_FOUND', 'OIDC client not found')
+			if (existing.managedAppId) throw new RpcError('BAD_REQUEST', 'This client is managed by the App Store: toggle SSO off and back on in that app’s sheet to rotate credentials')
 			if (existing.publicClient) throw new RpcError('BAD_REQUEST', 'Public PKCE clients don’t have a client secret')
-			const nextClient = {...existing, secretHash: sha256Hex(clientSecret)}
+			const nextClient = {
+				...existing,
+				secretHash: sha256Hex(clientSecret),
+			}
 			return {...cur, clients: cur.clients.map((c) => (c.id === id ? nextClient : c))}
 		})
 		await audit?.record({action: 'oidc.rotateSecret', target: id, ok: true})
 		return {id, clientSecret}
 	}
 
+	async function ensureAppClient({appId, name, redirectUris, existingSecret = ''} = {}) {
+		await ensureReady()
+		const cleanAppId = String(appId ?? '').trim()
+		if (!cleanAppId) throw new RpcError('BAD_REQUEST', 'Missing appId')
+		const cleanName = String(name ?? cleanAppId).trim().slice(0, 80) || cleanAppId
+		const uris = normalizeRedirectUris(redirectUris)
+		const candidateSecret = typeof existingSecret === 'string' && existingSecret.startsWith('omarchy_oidc_') ? existingSecret : ''
+		const res = await updateState((cur) => {
+			const existing = cur.clients.find((c) => c.managedAppId === cleanAppId)
+			if (existing) {
+				// Never persist plaintext secrets in oidc.json: reuse caller's compose secret if it matches secretHash, else rotate.
+				const reuse = Boolean(candidateSecret && existing.secretHash && safeEqual(sha256Hex(candidateSecret), existing.secretHash))
+				const secret = reuse ? candidateSecret : `omarchy_oidc_${randomBytes(24).toString('base64url')}`
+				const {managedSecret: _drop, ...cleanExisting} = existing
+				const updated = {
+					...cleanExisting,
+					name: cleanName,
+					redirectUris: uris,
+					requirePkce: true,
+					secretHash: sha256Hex(secret),
+				}
+				return {
+					state: {...cur, clients: cur.clients.map((c) => (c.id === existing.id ? updated : c))},
+					value: {client: publicClientView(updated), clientSecret: secret, issuerUrl: cur.issuerUrl, created: false},
+				}
+			}
+			const id = `oidc_${randomBytes(12).toString('hex')}`
+			const secret = `omarchy_oidc_${randomBytes(24).toString('base64url')}`
+			const record = {
+				id,
+				name: cleanName,
+				managedAppId: cleanAppId,
+				publicClient: false,
+				requirePkce: true,
+				secretHash: sha256Hex(secret),
+				redirectUris: uris,
+				scopes: [...ALLOWED_SCOPES],
+				createdAt: now(),
+			}
+			return {
+				state: {...cur, clients: [...cur.clients, record]},
+				value: {client: publicClientView(record), clientSecret: secret, issuerUrl: cur.issuerUrl, created: true},
+			}
+		})
+		if (res.created) await audit?.record({action: 'oidc.ensureAppClient', target: cleanAppId, ok: true, detail: {clientId: res.client.id}})
+		return res
+	}
+
+	async function getAppClient(appId) {
+		await ensureReady()
+		const cleanAppId = String(appId ?? '').trim()
+		const found = state.clients.find((c) => c.managedAppId === cleanAppId)
+		if (!found) return null
+		return {
+			client: publicClientView(found),
+			issuerUrl: state.issuerUrl,
+		}
+	}
+
+	async function removeAppClient(appId) {
+		await ensureReady()
+		const cleanAppId = String(appId ?? '').trim()
+		const removedIds = await updateState((cur) => {
+			const matching = cur.clients.filter((c) => c.managedAppId === cleanAppId).map((c) => c.id)
+			if (!matching.length) return {state: cur, value: []}
+			return {state: {...cur, clients: cur.clients.filter((c) => c.managedAppId !== cleanAppId)}, value: matching}
+		})
+		for (const id of removedIds) {
+			for (const [k, v] of codes) if (v.clientId === id) codes.delete(k)
+			for (const [k, v] of accessTokens) if (v.clientId === id) accessTokens.delete(k)
+		}
+		if (removedIds.length) await audit?.record({action: 'oidc.removeAppClient', target: cleanAppId, ok: true})
+		return removedIds.length > 0
+	}
+
 	async function deleteClient(input = {}) {
 		await ensureReady()
 		const id = String(input?.id ?? '').trim()
 		await updateState((cur) => {
-			if (!cur.clients.some((c) => c.id === id)) throw new RpcError('NOT_FOUND', 'OIDC client not found')
+			const existing = cur.clients.find((c) => c.id === id)
+			if (!existing) throw new RpcError('NOT_FOUND', 'OIDC client not found')
+			if (existing.managedAppId) throw new RpcError('BAD_REQUEST', 'This client is managed by the App Store: disable SSO from that app’s sheet instead')
 			return {...cur, clients: cur.clients.filter((c) => c.id !== id)}
 		})
 		for (const [k, v] of codes) if (v.clientId === id) codes.delete(k)
@@ -923,6 +1006,9 @@ export function createOidc({dataDir, accounts, audit = null, now = () => Date.no
 	return {
 		handleHttp,
 		reset,
+		ensureAppClient,
+		getAppClient,
+		removeAppClient,
 		procedures: {
 			'oidc.status': {kind: 'query', run: status},
 			'oidc.setConfig': {kind: 'mutation', run: setConfig},

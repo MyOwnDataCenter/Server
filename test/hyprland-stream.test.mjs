@@ -10,7 +10,7 @@ import {test} from 'node:test'
 import {fileURLToPath} from 'node:url'
 
 import {openAccounts} from '../omarchyd/accounts.mjs'
-import {backpressureBudgets, createFrameReader, createHyprland, isPcmSilent, parseDesktopEntry} from '../omarchyd/hyprland.mjs'
+import {backpressureBudgets, createFrameReader, createHyprland, isPcmSilent, parseDesktopEntry, scoreProfileCandidate} from '../omarchyd/hyprland.mjs'
 import {startOmarchyd} from '../omarchyd/server.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
@@ -150,9 +150,10 @@ test('hyprland status, windows, strict dispatch allowlist, and WebSocket H.264 s
 		await hypr.procedures['hyprland.dispatch'].run({action: 'resize', address: '0x55a1b2c3d4e0', width: 1280, height: 720})
 		await hypr.procedures['hyprland.dispatch'].run({action: 'moveToRail', address: '0x55a1b2c3d4e0'})
 		assert.deepEqual(dispatched, [['dispatch', 'focuswindow', 'address:0x55a1b2c3d4e0']])
-		assert.ok(luaDispatched.some((x) => x.includes('hl.dsp.workspace.change_id({id = 2})')))
-		assert.ok(luaDispatched.some((x) => x.includes('hl.dsp.window.resize({window = "address:0x55a1b2c3d4e0", x = 1280, y = 720, exact = true})')))
-		assert.ok(luaDispatched.some((x) => x.includes('hl.dsp.window.move({window = "address:0x55a1b2c3d4e0", workspace = "11"')))
+		assert.ok(luaDispatched.some((x) => x.includes('hl.dsp.focus({workspace = 2})')))
+		assert.ok(luaDispatched.some((x) => x.includes('hl.dsp.window.float({window = "address:0x55a1b2c3d4e0", action = "set"})')))
+		assert.ok(luaDispatched.some((x) => x.includes('hl.dsp.window.resize({window = "address:0x55a1b2c3d4e0", x = 1280, y = 720, relative = false})')))
+		assert.ok(luaDispatched.some((x) => x.includes('hl.dsp.window.move({window = "address:0x55a1b2c3d4e0", workspace = 11, silent = true})')))
 		await assert.rejects(() => hypr.procedures['hyprland.dispatch'].run({action: 'exec', command: 'id'}), /Unsupported/)
 		await assert.rejects(() => hypr.procedures['hyprland.dispatch'].run({action: 'focus', address: '0x12;rm -rf /'}), /Invalid window address/)
 
@@ -1094,6 +1095,82 @@ test('stream control state preserves saved 4:4:4 preference on non-4:4:4 clients
 	assert.equal(rbB.tier, 'high')
 	assert.equal(rbB.chroma444Pref, true)
 	assert.equal(rbB.codec, 'h264')
+
+	// Case C (profiled stream): Handshake requests hevc444 with null overrides, fallback meta confirms h264, then tier-only reconfig is rejected -> confirmed codec stays h264 while nullable overrides remain null
+	const {
+		applyMetaToProfiledStreamState,
+		applyReconfigUnsupportedToProfiledStreamState,
+	} = await import('../web/src/hyprlandStreamState.mjs')
+	let profiledCfg = {codec: 'hevc444', bitrate: 100000, quality: 12, tierOverride: null, chromaOverride: null, codecFallback: null}
+	const profiledMeta = applyMetaToProfiledStreamState(profiledCfg, 'h264_python')
+	profiledCfg = profiledMeta.appliedCfg
+	assert.equal(profiledMeta.actualCodec, 'h264')
+	assert.equal(profiledCfg.codec, 'h264')
+	assert.equal(profiledCfg.tierOverride, null)
+	assert.equal(profiledCfg.chromaOverride, null)
+	const rbC = applyReconfigUnsupportedToProfiledStreamState(profiledCfg)
+	assert.equal(rbC.codec, 'h264')
+	assert.equal(rbC.tierOverride, null)
+	assert.equal(rbC.chromaOverride, null)
+	assert.equal(rbC.codecFallback, null)
+})
+
+test('adaptive WAN RTT/jitter smoothing preserves LAN defaults and expands cushions on high-RTT/jitter links', async () => {
+	const {
+		createRttStats,
+		updateRttStats,
+		computeAudioJitterBudget,
+		computeVideoDropPolicy,
+		classifyNetworkQuality,
+	} = await import('../web/src/hyprlandStreamState.mjs')
+
+	let st = createRttStats()
+	assert.equal(classifyNetworkQuality(st), 'unknown')
+	assert.deepEqual(computeAudioJitterBudget({...st, mode: 'opus'}), {targetSec: 0.025, minLeadSec: 0.004, maxLeadSec: 0.14})
+	assert.deepEqual(computeAudioJitterBudget({...st, mode: 'pcm'}), {targetSec: 0.035, minLeadSec: 0.005, maxLeadSec: 0.16})
+	assert.deepEqual(computeVideoDropPolicy(st), {queueThreshold: 4, sustainMs: 80, hardCap: 12})
+
+	// Invalid samples are ignored without mutating state
+	assert.equal(updateRttStats(st, -5), st)
+	assert.equal(updateRttStats(st, Number.NaN), st)
+	assert.equal(updateRttStats(st, 15000), st)
+
+	// LAN samples keep exact low-latency baseline
+	let lan = updateRttStats(st, 2.0)
+	lan = updateRttStats(lan, 2.4)
+	assert.equal(classifyNetworkQuality(lan), 'lan')
+	assert.deepEqual(computeAudioJitterBudget({...lan, mode: 'opus'}), {targetSec: 0.025, minLeadSec: 0.004, maxLeadSec: 0.14})
+	assert.deepEqual(computeVideoDropPolicy(lan), {queueThreshold: 4, sustainMs: 80, hardCap: 12})
+
+	// Moderate direct WAN link
+	let wan = updateRttStats(st, 28)
+	wan = updateRttStats(wan, 30)
+	assert.equal(classifyNetworkQuality(wan), 'wan')
+	const wanAudio = computeAudioJitterBudget({...wan, mode: 'opus'})
+	assert.ok(wanAudio.targetSec > 0.025 && wanAudio.targetSec < 0.06, `expected moderate WAN cushion, got ${wanAudio.targetSec}`)
+	const wanDrop = computeVideoDropPolicy(wan)
+	assert.equal(wanDrop.hardCap, 14)
+	assert.ok(wanDrop.sustainMs > 80 && wanDrop.sustainMs <= 200)
+
+	// Relayed / DERP high-RTT + jitter link expands cushion and burst tolerance while clamping safely
+	let derp = updateRttStats(st, 45)
+	derp = updateRttStats(derp, 62)
+	derp = updateRttStats(derp, 41)
+	assert.equal(classifyNetworkQuality(derp), 'high-jitter')
+	const derpOpus = computeAudioJitterBudget({...derp, mode: 'opus'})
+	const derpPcm = computeAudioJitterBudget({...derp, mode: 'pcm'})
+	assert.ok(derpOpus.targetSec >= 0.05 && derpOpus.targetSec <= 0.12, `expected 50-120ms Opus cushion, got ${derpOpus.targetSec}`)
+	assert.ok(derpPcm.targetSec >= 0.06 && derpPcm.targetSec <= 0.14, `expected 60-140ms PCM cushion, got ${derpPcm.targetSec}`)
+	assert.ok(derpOpus.maxLeadSec >= derpOpus.targetSec + 0.12)
+	const derpDrop = computeVideoDropPolicy(derp)
+	assert.equal(derpDrop.hardCap, 16)
+	assert.ok(derpDrop.sustainMs >= 120 && derpDrop.sustainMs <= 200)
+
+	// Extreme RTT clamps safely to upper bounds
+	const extreme = {rttMs: 500, jitterMs: 80, samples: 10}
+	assert.equal(computeAudioJitterBudget({...extreme, mode: 'opus'}).targetSec, 0.12)
+	assert.equal(computeAudioJitterBudget({...extreme, mode: 'pcm'}).targetSec, 0.14)
+	assert.equal(computeVideoDropPolicy(extreme).sustainMs, 200)
 })
 
 test('parseDesktopEntry extracts metadata and skips hidden/non-app entries', () => {
@@ -1162,6 +1239,7 @@ test('RAIL .desktop scanner, jailed icons, clipboard bridge, icon/SSE auth, and 
 		let spawnMode = 'ok'
 		let moveOffRailOnWake = false
 		let moveOffRailOnLuaResize = false
+		let openOnPhysical = false
 		const mutatedAddrs = []
 		let betaLaunchSeq = 0
 		const clients = [{address: '0x55a1b2c3d4e0', title: 'Demo', class: 'demo', workspace: {id: 1}, at: [0, 0], size: [640, 480], mapped: true}]
@@ -1196,8 +1274,14 @@ test('RAIL .desktop scanner, jailed icons, clipboard bridge, icon/SSE auth, and 
 					if (target) target.workspace = {id: 1}
 					return {ok: false, stdout: '', stderr: 'eval unsupported'}
 				}
-				if (cmd === 'hyprctl' && /float|resize|movewindowpixel/.test(args.join(' '))) {
+				if (cmd === 'hyprctl' && /float|resize|movewindowpixel|window\.move/.test(args.join(' '))) {
 					mutatedAddrs.push(args.join(' '))
+				}
+				// A window that opened on the physical display, sent to RAIL-1's workspace.
+				const moveTo = /window\.move\(\{window = "address:(0x[0-9a-f]+)", workspace = (\d+), silent = true/.exec(args.join(' '))
+				if (cmd === 'hyprctl' && moveTo) {
+					const target = clients.find((c) => c.address === moveTo[1])
+					if (target) target.workspace = {id: Number(moveTo[2])}
 				}
 				if (cmd === 'wl-copy') {
 					if (failCopy) return {ok: false, stdout: '', stderr: 'wl-copy failed'}
@@ -1240,7 +1324,7 @@ test('RAIL .desktop scanner, jailed icons, clipboard bridge, icon/SSE auth, and 
 									? '0x55a1000000bb'
 									: `0x55a1000000b${seq}`
 						setTimeout(() => {
-							clients.push({address: addr, title: `Beta Main ${seq}`, class: 'beta-app', workspace: {id: 11}, at: [0, 0], size: [900, 600], mapped: true, floating: !moveOffRailOnWake})
+							clients.push({address: openOnPhysical ? '0x55a1000000ee' : addr, title: `Beta Main ${seq}`, class: 'beta-app', workspace: {id: openOnPhysical ? 1 : 11}, at: [0, 0], size: [900, 600], mapped: true, floating: !moveOffRailOnWake})
 						}, 40)
 					}
 				}
@@ -1318,6 +1402,16 @@ test('RAIL .desktop scanner, jailed icons, clipboard bridge, icon/SSE auth, and 
 			`must not float/resize/move window after it moved off RAIL-1, saw: ${mutatedAddrs.join('; ')}`,
 		)
 
+		// An app whose window opens on the physical display (focus left RAIL-1, or it reused a running
+		// process) is still found, and brought to RAIL-1, instead of the launch giving up after 15 s.
+		mutatedAddrs.length = 0
+		openOnPhysical = true
+		const physicalRes = await hypr.procedures['hyprland.launch'].run({id: 'beta'})
+		openOnPhysical = false
+		assert.equal(physicalRes.window?.address, '0x55a1000000ee')
+		assert.equal(physicalRes.window?.workspace, 11)
+		assert.ok(mutatedAddrs.some((m) => m.includes('window.move') && m.includes('0x55a1000000ee') && m.includes('workspace = 11')), mutatedAddrs.join('; '))
+
 		// If Lua resize fails and the window leaves RAIL-1 before the legacy resizewindowpixel fallback runs, fallback must NOT dispatch
 		mutatedAddrs.length = 0
 		moveOffRailOnLuaResize = true
@@ -1325,9 +1419,9 @@ test('RAIL .desktop scanner, jailed icons, clipboard bridge, icon/SSE auth, and 
 		moveOffRailOnLuaResize = false
 		assert.equal(movedOnLuaRes.window, null)
 		assert.equal(
-			mutatedAddrs.some((s) => s.includes('0x55a1000000dd') && (s.includes('resizewindowpixel') || s.includes('movewindowpixel'))),
+			mutatedAddrs.some((s) => s.includes('0x55a1000000dd') && (s.includes('resizewindowpixel') || s.includes('movewindowpixel') || s.includes('window.move'))),
 			false,
-			`must not send legacy resizewindowpixel/movewindowpixel after window left RAIL-1 during failed Lua resize, saw: ${mutatedAddrs.join('; ')}`,
+			`must not send legacy resizewindowpixel or window move after window left RAIL-1 during failed Lua resize, saw: ${mutatedAddrs.join('; ')}`,
 		)
 
 		// Synchronous 8-launch cap must reject the 9th concurrent launch immediately before any await
@@ -1502,6 +1596,366 @@ test('RAIL .desktop scanner, jailed icons, clipboard bridge, icon/SSE auth, and 
 		if (sock2Server2) await new Promise((resolve) => sock2Server2.close(resolve))
 	} finally {
 		if (d) await d.close()
+		await rm(root, {recursive: true, force: true})
+	}
+})
+
+test('scoreProfileCandidate ranks 60 FPS HEVC above stuttery 10-bit and rewards WAN-sized streams on high RTT', () => {
+	const failed = scoreProfileCandidate({ok: false, fps: 0, targetFps: 60, p95Ms: 999, codec: 'hevc', quality: 20, bitrate: 16000}, {rttMs: 46})
+	assert.equal(failed, 0)
+
+	const hevc60Wan = scoreProfileCandidate(
+		{ok: true, fps: 59.8, targetFps: 60, p95Ms: 17.4, keyKb: 320, codec: 'hevc', quality: 20, bitrate: 16000},
+		{rttMs: 46},
+	)
+	const hevc10Slow = scoreProfileCandidate(
+		{ok: true, fps: 42.9, targetFps: 60, p95Ms: 26.5, keyKb: 490, codec: 'hevc10', quality: 21, bitrate: 16000},
+		{rttMs: 46},
+	)
+	const h26460Wan = scoreProfileCandidate(
+		{ok: true, fps: 59.9, targetFps: 60, p95Ms: 17.1, keyKb: 390, codec: 'h264', quality: 21, bitrate: 16000},
+		{rttMs: 46},
+	)
+	const bloatedWan = scoreProfileCandidate(
+		{ok: true, fps: 59.8, targetFps: 60, p95Ms: 17.4, keyKb: 720, codec: 'hevc', quality: 20, bitrate: 34000},
+		{rttMs: 60},
+	)
+	const ultraLanOnLan = scoreProfileCandidate(
+		{ok: true, fps: 60.5, targetFps: 60, p95Ms: 17.3, keyKb: 1550, codec: 'hevc', quality: 14, bitrate: 80000},
+		{rttMs: 3},
+	)
+	const lowBitrateOnLan = scoreProfileCandidate(
+		{ok: true, fps: 60.5, targetFps: 60, p95Ms: 17.3, keyKb: 300, codec: 'hevc', quality: 21, bitrate: 16000},
+		{rttMs: 3},
+	)
+
+	assert.ok(hevc60Wan > hevc10Slow + 20, `locked 60 FPS HEVC (${hevc60Wan}) must beat 42.9 FPS HEVC10 (${hevc10Slow})`)
+	assert.ok(hevc60Wan > h26460Wan, `HEVC (${hevc60Wan}) should beat H.264 (${h26460Wan}) at matched FPS`)
+	assert.ok(hevc60Wan > bloatedWan, `WAN-sized stream (${hevc60Wan}) should beat oversized bitrate/keyframe (${bloatedWan}) on high RTT`)
+	assert.ok(ultraLanOnLan > lowBitrateOnLan, `Ultra LAN 80 Mbps QP 14 (${ultraLanOnLan}) must beat 16 Mbps QP 21 (${lowBitrateOnLan}) on low-RTT LAN`)
+})
+
+test('stream profiler runs benchmarks safely, handles encoder fallback, serializes concurrent saves, and rejects corrupted stores', async () => {
+	const root = await mkdtemp(join(os.tmpdir(), 'omarchy-hypr-prof-'))
+	try {
+		await writeFile(join(root, 'wayland-1'), '')
+		await mkdir(join(root, 'hypr', 'sig123'), {recursive: true})
+		await writeFile(join(root, 'hypr', 'sig123', '.socket.sock'), '')
+		const fakeBin = join(root, 'fake-capture')
+		await writeFile(fakeBin, '#!/bin/sh\n')
+
+		let modeScenario = 'bench-ok'
+		const spawnedCodecArgs = []
+		const hypr = createHyprland({
+			dataDir: join(root, 'data'),
+			home: root,
+			runtimeDir: root,
+			captureBin: fakeBin,
+			vaapiDevice: join(root, 'wayland-1'),
+			async exec(cmd, args) {
+				if (cmd === 'hyprctl' && args[0] === 'monitors') {
+					return {ok: true, stdout: JSON.stringify([{id: 1, name: 'RAIL-1', x: 0, y: 0, width: 3840, height: 2160, scale: 1, refreshRate: 60, dpmsStatus: true, activeWorkspace: {id: 11}, solitaryBlockedBy: []}]), stderr: ''}
+				}
+				if (cmd === 'hyprctl' && args[0] === 'clients') return {ok: true, stdout: '[]', stderr: ''}
+				return {ok: true, stdout: 'ok', stderr: ''}
+			},
+			spawnImpl(_cmd, args) {
+				const codecIdx = args.indexOf('--codec')
+				const reqCodec = codecIdx >= 0 ? args[codecIdx + 1] : 'h264'
+				spawnedCodecArgs.push(reqCodec)
+				const ch = Object.assign(new EventEmitter(), {
+					stdin: new PassThrough(),
+					stdout: new PassThrough(),
+					stderr: new PassThrough(),
+					killed: false,
+					exitCode: null,
+					kill(sig) {
+						if (this.killed) return
+						this.killed = true
+						setImmediate(() => {
+							if (this.exitCode !== null) return
+							this.exitCode = 0
+							this.emit('exit', 0, sig || null)
+							this.emit('close', 0, sig || null)
+						})
+					},
+				})
+				if (modeScenario === 'bench-ok' || modeScenario === 'bench-fallback-h264') {
+					const reportedEnc = modeScenario === 'bench-fallback-h264' ? 'h264_vaapi_dmabuf' : `${reqCodec}_vaapi_dmabuf`
+					setImmediate(() => {
+						ch.stdout.write(framePacket(1, Buffer.from(JSON.stringify({width: 1920, height: 1080, fps: 60, encoder: reportedEnc, codec: 'hev1'}))))
+						let count = 0
+						const iv = setInterval(() => {
+							if (ch.killed || ch.exitCode !== null) {
+								clearInterval(iv)
+								return
+							}
+							const pl = Buffer.concat([Buffer.from([count === 0 ? 1 : 0]), Buffer.alloc(8), Buffer.alloc(1200)])
+							ch.stdout.write(framePacket(2, pl))
+							count++
+						}, 14)
+						ch.once('exit', () => clearInterval(iv))
+					})
+				} else if (modeScenario === 'bench-fail') {
+					setImmediate(() => {
+						ch.stdout.write(framePacket(3, Buffer.from(JSON.stringify({error: 'VA-API busy'}))))
+					})
+				} else if (modeScenario === 'bench-late-error') {
+					setImmediate(() => {
+						ch.stdout.write(framePacket(1, Buffer.from(JSON.stringify({width: 1920, height: 1080, fps: 60, encoder: `${reqCodec}_vaapi_dmabuf`, codec: 'hev1'}))))
+						let count = 0
+						const iv = setInterval(() => {
+							if (ch.killed || ch.exitCode !== null) {
+								clearInterval(iv)
+								return
+							}
+							if (count < 8) {
+								const pl = Buffer.concat([Buffer.from([count === 0 ? 1 : 0]), Buffer.alloc(8), Buffer.alloc(1200)])
+								ch.stdout.write(framePacket(2, pl))
+								count++
+							} else {
+								clearInterval(iv)
+								ch.stdout.write(framePacket(3, Buffer.from(JSON.stringify({error: 'GPU hang mid-stream'}))))
+							}
+						}, 16)
+						ch.once('exit', () => clearInterval(iv))
+					})
+				} else if (modeScenario === 'bench-early-crash') {
+					setImmediate(() => {
+						ch.stdout.write(framePacket(1, Buffer.from(JSON.stringify({width: 1920, height: 1080, fps: 60, encoder: `${reqCodec}_vaapi_dmabuf`, codec: 'hev1'}))))
+						let count = 0
+						const iv = setInterval(() => {
+							if (ch.killed || ch.exitCode !== null) {
+								clearInterval(iv)
+								return
+							}
+							if (count < 8) {
+								const pl = Buffer.concat([Buffer.from([count === 0 ? 1 : 0]), Buffer.alloc(8), Buffer.alloc(1200)])
+								ch.stdout.write(framePacket(2, pl))
+								count++
+							} else {
+								clearInterval(iv)
+								ch.exitCode = 1
+								ch.emit('exit', 1, null)
+								ch.emit('close', 1, null)
+							}
+						}, 16)
+						ch.once('exit', () => clearInterval(iv))
+					})
+				} else if (modeScenario === 'bench-burst-stall') {
+					// Even after a 950 ms cold startup delay, a 24-frame burst followed by silence must observe the full 750 ms window and fail
+					setTimeout(() => {
+						if (ch.killed || ch.exitCode !== null) return
+						ch.stdout.write(framePacket(1, Buffer.from(JSON.stringify({width: 1920, height: 1080, fps: 60, encoder: `${reqCodec}_vaapi_dmabuf`, codec: 'hev1'}))))
+						let count = 0
+						const iv = setInterval(() => {
+							if (ch.killed || ch.exitCode !== null || count >= 24) {
+								clearInterval(iv)
+								return
+							}
+							const pl = Buffer.concat([Buffer.from([count === 0 ? 1 : 0]), Buffer.alloc(8), Buffer.alloc(1200)])
+							ch.stdout.write(framePacket(2, pl))
+							count++
+						}, 16)
+						ch.once('exit', () => clearInterval(iv))
+					}, 950)
+				}
+				return ch
+			},
+		})
+
+		const ran = await hypr.procedures['hyprland.profileRun'].run({
+			deviceId: 'mac-studio-chrome',
+			deviceName: 'macOS · Chrome',
+			deviceHint: 'Chrome · macOS · 5120x2880',
+			clientCodecs: ['hevc', 'h264'],
+			clientRttMs: 46,
+			saveAsActive: true,
+		})
+		assert.ok(ran.winner && ran.winner.id === 'mac-studio-chrome')
+		assert.equal(ran.winner.codec, 'hevc')
+		assert.equal(ran.winner.fps, 60)
+		assert.ok(ran.winner.measuredFps >= 35, `sustained benchmark FPS should stay high, got ${ran.winner.measuredFps}`)
+		assert.equal(ran.activeByDevice['mac-studio-chrome'], 'mac-studio-chrome')
+
+		// Unmeasured RTT (undefined) must NOT fabricate measuredRttMs: 20 on the saved profile
+		const noRtt = await hypr.procedures['hyprland.profileRun'].run({
+			deviceId: 'no-rtt-dev',
+			clientCodecs: ['hevc444'],
+			saveAsActive: true,
+		})
+		assert.equal(noRtt.rttMs, null)
+		assert.equal(noRtt.winner?.codec, 'hevc444', 'hevc444-only client on non-LAN RTT must benchmark RTT-appropriate hevc444 and never inject h264')
+		assert.equal(noRtt.winner?.measuredRttMs, undefined, 'unmeasured RTT must not be stored as fabricated 20 ms')
+		assert.ok(spawnedCodecArgs.at(-1) === 'hevc444', 'must only spawn advertised hevc444 codec')
+
+		await assert.rejects(
+			() => hypr.procedures['hyprland.profileRun'].run({deviceId: 'none-dev', clientCodecs: [], clientRttMs: 20}),
+			/no supported WebCodecs/i,
+		)
+
+		// Fatal error packet AFTER 8 good frames must fail the candidate (never persist as winner)
+		modeScenario = 'bench-late-error'
+		const lateErrRun = await hypr.procedures['hyprland.profileRun'].run({
+			deviceId: 'late-err-dev',
+			clientCodecs: ['hevc'],
+			clientRttMs: 20,
+			saveAsActive: true,
+		})
+		assert.equal(lateErrRun.winner, null, 'worker emitting fatal error after good frames must be rejected')
+		assert.equal(lateErrRun.results[0]?.ok, false)
+
+		// Unexpected early exit AFTER 8 good frames must fail the candidate
+		modeScenario = 'bench-early-crash'
+		const crashRun = await hypr.procedures['hyprland.profileRun'].run({
+			deviceId: 'crash-dev',
+			clientCodecs: ['hevc'],
+			clientRttMs: 20,
+			saveAsActive: true,
+		})
+		assert.equal(crashRun.winner, null, 'worker exiting prematurely before benchmark window must be rejected')
+		assert.equal(crashRun.results[0]?.ok, false)
+
+		// 24-frame burst followed by silence through the 750ms window must FAIL (never win/activate even as sole codec!)
+		modeScenario = 'bench-burst-stall'
+		const stallRun = await hypr.procedures['hyprland.profileRun'].run({
+			deviceId: 'mac-studio-chrome',
+			clientCodecs: ['h264'],
+			clientRttMs: 20,
+			saveAsActive: true,
+		})
+		assert.equal(stallRun.winner, null, 'stalled encoder must not win or replace existing active profile')
+		assert.equal(stallRun.results[0]?.ok, false, 'stalled encoder candidate must be marked ok=false')
+		assert.equal(stallRun.activeByDevice['mac-studio-chrome'], 'mac-studio-chrome')
+
+		modeScenario = 'bench-fallback-h264'
+		const unadvertisedFallback = await hypr.procedures['hyprland.profileRun'].run({
+			deviceId: 'hevc-only-dev',
+			deviceName: 'HEVC Only',
+			clientCodecs: ['hevc'],
+			clientRttMs: 20,
+			saveAsActive: true,
+		})
+		assert.equal(unadvertisedFallback.winner, null, 'must not activate unadvertised fallback codec')
+
+		const advertisedFallback = await hypr.procedures['hyprland.profileRun'].run({
+			deviceId: 'fallback-dev',
+			deviceName: 'Fallback',
+			clientCodecs: ['hevc', 'h264'],
+			clientRttMs: 20,
+			saveAsActive: true,
+		})
+		assert.equal(advertisedFallback.winner?.codec, 'h264')
+		assert.ok(advertisedFallback.winner?.name.includes('H.264'), `fallback winner label must reflect actual codec H.264, got ${advertisedFallback.winner?.name}`)
+
+		modeScenario = 'bench-fail'
+		const failedRun = await hypr.procedures['hyprland.profileRun'].run({
+			deviceId: 'mac-studio-chrome',
+			clientCodecs: ['hevc'],
+			clientRttMs: 46,
+			saveAsActive: true,
+		})
+		assert.equal(failedRun.winner, null)
+		assert.equal(failedRun.activeByDevice['mac-studio-chrome'], 'mac-studio-chrome')
+
+		// Strict validation on profileSave: reject invalid string IDs, non-string numeric IDs, and unsupported codecs
+		await hypr.procedures['hyprland.profileSave'].run({profile: {id: '7', name: 'String Seven', codec: 'hevc', fps: 60, bitrate: 20000}})
+		await assert.rejects(
+			() => hypr.procedures['hyprland.profileSave'].run({profile: {id: 7, name: 'Numeric Seven', codec: 'h264', fps: 60, bitrate: 16000}}),
+			/Invalid profile ID/,
+		)
+		await assert.rejects(
+			() => hypr.procedures['hyprland.profileSave'].run({profile: {id: null, name: 'Null ID', codec: 'h264', fps: 60, bitrate: 16000}}),
+			/Invalid profile ID/,
+		)
+		await assert.rejects(
+			() => hypr.procedures['hyprland.profileSave'].run({id: '   ', codec: 'h264', fps: 60, bitrate: 16000}),
+			/Invalid profile ID/,
+		)
+		await assert.rejects(
+			() => hypr.procedures['hyprland.profileSave'].run({profile: {id: 'ok-id', name: 'Null Dev', codec: 'h264', fps: 60, bitrate: 16000}, deviceId: null}),
+			/Invalid device ID/,
+		)
+		await assert.rejects(
+			() => hypr.procedures['hyprland.profileSave'].run({profile: {id: 'ok-id', name: 'Empty Dev', codec: 'h264', fps: 60, bitrate: 16000}, deviceId: ''}),
+			/Invalid device ID/,
+		)
+		assert.equal(
+			(await hypr.procedures['hyprland.profiles'].run()).profiles.find((p) => p.id === '7')?.name,
+			'String Seven',
+			'numeric id: 7 must not overwrite existing string id "7"',
+		)
+		await assert.rejects(
+			() => hypr.procedures['hyprland.profileSave'].run({profile: {id: '../bad/id', name: 'Bad', codec: 'hevc', fps: 60, bitrate: 20000}}),
+			/Invalid profile ID/,
+		)
+		await assert.rejects(
+			() => hypr.procedures['hyprland.profileSave'].run({profile: {id: 'bad-codec', name: 'Bad', codec: 'av1', fps: 60, bitrate: 20000}}),
+			/Unsupported video codec/,
+		)
+
+		// Factory reset clears saved profiles and prevents an in-flight profileRun from persisting stale data
+		modeScenario = 'bench-ok'
+		const inFlight = hypr.procedures['hyprland.profileRun'].run({
+			deviceId: 'pre-reset-dev',
+			clientCodecs: ['hevc'],
+			clientRttMs: 20,
+			saveAsActive: true,
+		})
+		await new Promise((r) => setTimeout(r, 80))
+		await hypr.resetProfiles()
+		const afterResetRun = await inFlight
+		assert.equal(afterResetRun.winner, null, 'in-flight profileRun interrupted by factory reset must not save a winner')
+		const postResetStore = await hypr.procedures['hyprland.profiles'].run()
+		assert.equal(postResetStore.profiles.length, 0, 'resetProfiles must leave saved profiles empty')
+
+		await Promise.all([
+			hypr.procedures['hyprland.profileSave'].run({
+				profile: {id: 'lan-a', name: 'LAN Ultra', codec: 'hevc', fps: 60, bitrate: 120000, quality: 12, compression: 7},
+				deviceId: 'dev-a',
+				activate: true,
+			}),
+			hypr.procedures['hyprland.profileSave'].run({
+				profile: {id: 'lan-b', name: 'LAN B', codec: 'h264', fps: 60, bitrate: 20000, quality: 20, compression: 7},
+				deviceId: 'dev-b',
+				activate: true,
+			}),
+		])
+		const listed = await hypr.procedures['hyprland.profiles'].run()
+		const lanA = listed.profiles.find((p) => p.id === 'lan-a')
+		assert.ok(lanA && listed.profiles.some((p) => p.id === 'lan-b'))
+		assert.equal(lanA.bitrate, 120000)
+		assert.equal(lanA.quality, 12)
+		assert.equal(listed.activeByDevice['dev-a'], 'lan-a')
+		assert.equal(listed.activeByDevice['dev-b'], 'lan-b')
+
+		// Malformed JSON, wrong-shape JSON, and invalid activeByDevice/defaultProfileId references must fail strict reads & list RPC
+		await writeFile(
+			join(root, 'data', 'hyprland-profiles.json'),
+			JSON.stringify({
+				profiles: [{id: '7', name: 'Seven', codec: 'h264', fps: 60, bitrate: 20000, quality: 20, compression: 7}],
+				activeByDevice: {laptop: 7},
+				defaultProfileId: '7',
+			}),
+		)
+		await assert.rejects(() => hypr.procedures['hyprland.profiles'].run(), /corrupted/i)
+		await assert.rejects(
+			() => hypr.procedures['hyprland.profileSave'].run({profile: {id: 'should-fail', name: 'X', codec: 'h264', fps: 60, bitrate: 16000}}),
+			/corrupted/i,
+		)
+		await writeFile(join(root, 'data', 'hyprland-profiles.json'), '{"profiles":"not-an-array"}')
+		await assert.rejects(
+			() => hypr.procedures['hyprland.profileSave'].run({profile: {id: 'should-fail', name: 'X', codec: 'h264', fps: 60, bitrate: 16000}}),
+			/corrupted/i,
+		)
+		await writeFile(join(root, 'data', 'hyprland-profiles.json'), '{not-valid-json')
+		await assert.rejects(
+			() => hypr.procedures['hyprland.profileSave'].run({profile: {id: 'should-fail', name: 'X', codec: 'h264', fps: 60, bitrate: 16000}}),
+			/corrupted/i,
+		)
+
+		hypr.close()
+	} finally {
 		await rm(root, {recursive: true, force: true})
 	}
 })

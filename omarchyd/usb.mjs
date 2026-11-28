@@ -129,8 +129,12 @@ export async function listHostUsb({
 const USB_SERIAL = /^[A-Za-z0-9._:-]{1,128}$/
 const xml = (s) => String(s).replace(/[<>&'"]/g, (c) => ({'<': '&lt;', '>': '&gt;', '&': '&amp;', "'": '&apos;', '"': '&quot;'})[c])
 
+// libvirt matches the serial text exactly, so any plain printable serial is written as it is (a space or
+// a + is common). Only text that XML would have to escape is left out.
+const hostdevSerial = (serial) => typeof serial === 'string' && /^[\x21-\x7e]([\x20-\x7e]{0,126}[\x21-\x7e])?$/.test(serial) && !/[<>&'"]/.test(serial)
+
 export function hostdevXml({vendorId, productId, serial}) {
-	const ser = serial && USB_SERIAL.test(serial) ? `<serial>${xml(serial)}</serial>` : ''
+	const ser = hostdevSerial(serial) ? `<serial>${xml(serial)}</serial>` : ''
 	return `<hostdev mode='subsystem' type='usb' managed='yes'><source startupPolicy='optional'><vendor id='0x${vendorId}'/><product id='0x${productId}'/>${ser}</source></hostdev>`
 }
 
@@ -254,7 +258,16 @@ export function createUsb({enumerate = listHostUsb, guests = {bindings: () => []
 		const needsRestart = running && !live
 		return {needsRestart, ...(needsRestart ? {message: `Restart ${current.name} to apply`} : {})}
 	}
+	// An app or a machine was removed with sticks attached: take their udev rules out too, unless
+	// another guest still holds a stick with the same serial.
+	async function release(devices) {
+		const held = new Set((await guests.bindings()).flatMap((g) => (g.devices ?? []).map((d) => d.serial).filter(Boolean)))
+		for (const serial of new Set((devices ?? []).map((d) => d?.serial))) {
+			if (serial && USB_SERIAL.test(serial) && !held.has(serial)) await helper('usb-forget', [serial]).catch(() => {})
+		}
+	}
 	return {
+		release,
 		procedures: {
 			'usb.list': {kind: 'query', run: list},
 			'usb.attach': {kind: 'mutation', run: attach},

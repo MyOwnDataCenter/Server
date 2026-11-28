@@ -79,6 +79,8 @@ export function omarchyConfiguration({host, diskSizeGb, timezone = 'UTC'}) {
 		ntp: true,
 		swap: true,
 		timezone,
+		packages: ['qemu-guest-agent'],
+		services: ['qemu-guest-agent'],
 		locale_config: {kb_layout: 'us', sys_enc: 'UTF-8', sys_lang: 'en_US.UTF-8'},
 	}
 }

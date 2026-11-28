@@ -85,30 +85,93 @@ function Card({on, suits, art, title, body, onClick, readme}: {on: boolean; suit
 }
 
 /** How this device shows My Own Data Center: Automatic, Desktop, or Phone & tablet. */
-export function ScreenLayoutCards({value, detected, onPick, label = 'Screen layout'}: {value: LayoutPref | null; detected: boolean; onPick: (p: LayoutPref) => void; label?: string}) {
+export function ScreenLayoutCards({
+	value,
+	detected,
+	onPick,
+	label = 'Screen layout',
+	compact,
+}: {
+	value: LayoutPref | null
+	detected: boolean
+	onPick: (p: LayoutPref) => void
+	label?: string
+	compact?: boolean
+}) {
 	const pick = (p: LayoutPref) => {
 		haptic(6)
 		onPick(p)
 	}
 	return (
-		<div className="lp-cards" role="radiogroup" aria-label={label}>
-			<Card on={value === 'desktop'} suits={detected} art={<ArtDesktop />} title="Desktop" body="Windows, a dock and Activities, like a computer. Best with a mouse or trackpad." onClick={() => pick('desktop')} />
-			<Card on={value === 'phone'} suits={!detected} art={<ArtPhone />} title="Phone & tablet" body="Big touch targets and a bar along the bottom. Best for touch." onClick={() => pick('phone')} />
-			<Card on={value === 'auto'} art={<ArtAuto />} title="Automatic" body={`Desktop on a big screen with a mouse, Phone otherwise. Here: ${detected ? 'Desktop' : 'Phone & tablet'}.`} onClick={() => pick('auto')} />
+		<div className={`lp-cards${compact ? ' lp-compact' : ''}`} role="radiogroup" aria-label={label}>
+			<Card
+				on={value === 'desktop'}
+				suits={detected}
+				art={<ArtDesktop />}
+				title="Desktop"
+				body={compact ? 'Windows and a dock.' : 'Windows, a dock and Activities, like a computer. Best with a mouse or trackpad.'}
+				onClick={() => pick('desktop')}
+			/>
+			<Card
+				on={value === 'phone'}
+				suits={!detected}
+				art={<ArtPhone />}
+				title="Phone & tablet"
+				body={compact ? 'Pages made for touch.' : 'Big touch targets and a bar along the bottom. Best for touch.'}
+				onClick={() => pick('phone')}
+			/>
+			<Card
+				on={value === 'auto'}
+				art={<ArtAuto />}
+				title="Automatic"
+				body={
+					compact
+						? `Follows this screen. Now: ${detected ? 'Desktop' : 'Phone'}.`
+						: `Desktop on a big screen with a mouse, Phone otherwise. Here: ${detected ? 'Desktop' : 'Phone & tablet'}.`
+				}
+				onClick={() => pick('auto')}
+			/>
 		</div>
 	)
 }
 
 /** Shape is corners and, on the desktop, how windows are arranged. Round floats. Square tiles. */
-export function DesktopStyleCards<T extends string>({value, onPick, floating, tiling, onSquareReadme}: {value: T; onPick: (v: T) => void; floating: T; tiling: T; onSquareReadme?: () => void}) {
+export function DesktopStyleCards<T extends string>({
+	value,
+	onPick,
+	floating,
+	tiling,
+	onSquareReadme,
+	compact,
+}: {
+	value: T
+	onPick: (v: T) => void
+	floating: T
+	tiling: T
+	onSquareReadme?: () => void
+	compact?: boolean
+}) {
 	const pick = (v: T) => {
 		haptic(6)
 		onPick(v)
 	}
 	return (
-		<div className="lp-cards lp-cards-2" role="radiogroup" aria-label="Shape">
-			<Card on={value === floating} art={<ArtDesktop stayRound />} title="Round" body="Rounded corners. Floating windows, a dock, and Activities." onClick={() => pick(floating)} />
-			<Card on={value === tiling} art={<ArtHyprland />} title="Square" body="Square corners. Tiled windows over a dock, and workspaces 1–9." onClick={() => pick(tiling)} readme={onSquareReadme} />
+		<div className={`lp-cards lp-cards-2${compact ? ' lp-compact' : ''}`} role="radiogroup" aria-label="Shape">
+			<Card
+				on={value === floating}
+				art={<ArtDesktop stayRound />}
+				title="Round"
+				body={compact ? 'Rounded. Windows float.' : 'Rounded corners. Floating windows, a dock, and Activities.'}
+				onClick={() => pick(floating)}
+			/>
+			<Card
+				on={value === tiling}
+				art={<ArtHyprland />}
+				title="Square"
+				body={compact ? 'Square. Windows tile.' : 'Square corners. Tiled windows over a dock, and workspaces 1–9.'}
+				onClick={() => pick(tiling)}
+				readme={onSquareReadme}
+			/>
 		</div>
 	)
 }

@@ -1,5 +1,6 @@
 // A browser that stops reading must not make the server queue its desktop frames or shell output
-// without limit (#571): the bridge to it is closed once more than 1 MiB is waiting.
+// without limit (#571). A screen's source is paused while the browser is behind (a big burst is
+// normal) and dropped only when the browser reads nothing for a while; a shell is cut off at 1 MiB.
 import assert from 'node:assert/strict'
 import {spawnSync} from 'node:child_process'
 import {EventEmitter} from 'node:events'
@@ -38,7 +39,7 @@ describe('desktop and VM screens', () => {
 			pump()
 		})
 		await new Promise((r) => vnc.listen(0, '127.0.0.1', r))
-		d = await startOmarchyd({port: 0, dataDir: join(root, 'd'), home: root, desktopVncPort: vnc.address().port, desktopVncSocket: join(root, 'no-such.sock')})
+		d = await startOmarchyd({port: 0, dataDir: join(root, 'd'), home: root, desktopVncPort: vnc.address().port, viewerStallMs: 1500, desktopVncSocket: join(root, 'no-such.sock')})
 		const login = await (await fetch(`${d.url}/trpc/user.loginNative`, {method: 'POST', headers: {'content-type': 'application/json'}, body: JSON.stringify({userId: 'owner', password: 'correct horse', client: {id: 's'}})})).json()
 		auth = {authorization: `Bearer ${login.result.data.accessToken}`, 'content-type': 'application/json'}
 	})
@@ -48,16 +49,20 @@ describe('desktop and VM screens', () => {
 		await rm(root, {recursive: true, force: true})
 	})
 
-	test('a viewer that stops reading is cut off instead of the frames queueing in memory', async () => {
+	test('a viewer that stops reading holds the screen back, then is cut off, instead of the frames queueing in memory', async () => {
 		const res = await (await fetch(`${d.url}/trpc/user.createWebSocketTicket`, {method: 'POST', headers: auth, body: JSON.stringify({target: 'machines'})})).json()
 		const ws = new WebSocket(`${d.url.replace('http', 'ws')}/machines/console?machineId=desktop&ticket=${res.result.data}`, ['binary'])
 		ws.on('error', () => {})
 		await new Promise((r, j) => (ws.once('message', r), ws.once('error', j)))
 		ws._socket.pause()
+		await wait(700)
+		assert.equal(closed, false, 'a short wait is not a stall')
+		const held = written
+		assert.ok(held < 64 * 1024 * 1024, `the server stopped taking frames (${held} bytes written)`)
 		for (let i = 0; i < 40 && !closed; i++) await wait(100)
 		ws.terminate()
-		assert.equal(closed, true, 'the source was dropped')
-		assert.ok(written < 300 * 1024 * 1024, `the server stopped taking frames (${written} bytes written)`)
+		assert.equal(closed, true, 'the source was dropped once the viewer read nothing for the stall time')
+		assert.ok(written < 64 * 1024 * 1024, `the server stopped taking frames (${written} bytes written)`)
 	})
 })
 

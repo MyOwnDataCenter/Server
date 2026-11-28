@@ -219,7 +219,7 @@ test('AppViewer uses useDialogFocus with tabIndex={-1} and aria-modal="true"', (
 
 test('FileViewer uses useDialogFocus with tabIndex={-1} and modal stack guard', () => {
 	const src = readFileSync(join(rootDir, 'web/src/screens/viewer/FileViewer.tsx'), 'utf8')
-	assert.match(src, /useDialogFocus\(!!f, dialogRef, close/)
+	assert.match(src, /useDialogFocus\(!!f, dialogRef, \(\) => void close\(\)/)
 	assert.match(src, /ref=\{dialogRef\}[\s\S]*?role="dialog"[\s\S]*?aria-modal="true"[\s\S]*?tabIndex=\{-1\}/)
 	assert.match(src, /if \(!isTop\(\)/)
 })
@@ -289,15 +289,17 @@ test('liveRegionText and checkLiveText route status vs alert text and keep persi
 	assert.deepEqual(checkLiveText({ok: true, message: 'Connected'}), {status: 'Connected', alert: ''})
 	assert.deepEqual(checkLiveText({ok: false, message: 'Invalid key'}), {status: '', alert: 'Invalid key'})
 
-	const ui = readFileSync(join(rootDir, 'web/src/ui.tsx'), 'utf8')
-	assert.match(ui, /<div className="sr-only" role="status" aria-live="polite" aria-atomic="true">\s*\{live\.status\}\s*<\/div>/)
-	assert.match(ui, /<div className="sr-only" role="alert" aria-live="assertive" aria-atomic="true">\s*\{live\.alert\}\s*<\/div>/)
-	assert.match(ui, /className=\{`toast\$\{toast\.error \? ' error' : ''\}`\} aria-hidden="true"/)
+	// Toasts are spoken from two regions that stay mounted. A problem never replaces the status region.
+	const toasts = readFileSync(join(rootDir, 'web/src/toasts/account.tsx'), 'utf8')
+	assert.match(toasts, /liveRegionText\(announced/)
+	assert.match(toasts, /<div className="sr-only" role="status" aria-live="polite" aria-atomic="true">\s*\{live\.status\}\s*<\/div>/)
+	assert.match(toasts, /<div className="sr-only" role="alert" aria-live="assertive" aria-atomic="true">\s*\{live\.alert\}\s*<\/div>/)
+	assert.doesNotMatch(toasts, /role=\{[^}]*\? 'alert' : 'status'\}/)
 
 	const settings = readFileSync(join(rootDir, 'web/src/screens/Settings.tsx'), 'utf8')
 	assert.match(settings, /<div role="status" aria-live="polite" aria-atomic="true">/)
 	assert.match(settings, /<div role="alert" aria-live="assertive" aria-atomic="true">/)
-	assert.match(settings, /<CheckLine check=\{k\.check \?\? null\} \/>/)
+	assert.match(settings, /<CheckLine check=\{k\.check \?\? null\}/)
 })
 
 test('fieldAria wires aria-describedby and aria-invalid and shared Field replaces duplicates', () => {

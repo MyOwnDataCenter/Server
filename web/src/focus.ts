@@ -234,7 +234,7 @@ export function nextMenuIndex(count: number, current: number, key: string): numb
 
 export function getMenuItems(container: ContainerLike): FocusableLike[] {
 	if (!container.querySelectorAll) return []
-	return Array.from(container.querySelectorAll('[role="menuitem"]:not([disabled])')).filter(
+	return Array.from(container.querySelectorAll('[role="menuitem"]:not([disabled]), [role="menuitemradio"]:not([disabled])')).filter(
 		(el) => el.getAttribute?.('aria-disabled') !== 'true' && isElementFocusable(el),
 	)
 }

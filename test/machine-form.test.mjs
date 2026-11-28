@@ -31,6 +31,8 @@ test('disk floors match the server and the cap is 4096', () => {
 	assert.deepEqual(diskRange({familyId: 'custom', platform: 'linux'}, 1), {min: 4, max: 4096})
 	assert.deepEqual(diskRange({familyId: 'omarchy', platform: 'linux'}, 25), {min: 25, max: 4096})
 	assert.deepEqual(diskRange({familyId: 'omarchy', platform: 'linux'}, 10), {min: 20, max: 4096})
+	assert.deepEqual(diskRange({id: 'cachyos-desktop-amd64', familyId: 'cachyos', platform: 'linux', manualSetup: true}, 10), {min: 20, max: 4096})
+	assert.deepEqual(diskRange({id: 'local:mint.iso', familyId: 'custom', platform: 'linux', manualSetup: true}, 1), {min: 4, max: 4096})
 	assert.deepEqual(diskRange({familyId: 'windows-11', platform: 'windows'}, 64), {min: 64, max: 4096})
 	assert.deepEqual(diskRange({familyId: 'windows-xp', platform: 'windows'}, 2), {min: 64, max: 4096})
 	assert.equal(diskRange({familyId: 'debian', platform: 'linux'}, 10).max, 4096)

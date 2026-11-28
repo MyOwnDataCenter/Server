@@ -19,11 +19,11 @@ const there = (p) => stat(p).then(() => true, () => false)
 
 async function freePort() {
 	for (let i = 0; i < 40; i++) {
-		const candidate = 30_000 + Math.floor(Math.random() * 3_000)
+		const candidate = 29_000 + Math.floor(Math.random() * 3_768)
 		const ok = await new Promise((resolve) => {
 			const s = net.createServer()
 			s.once('error', () => resolve(false))
-			s.listen(candidate, '127.0.0.1', () => s.close(() => resolve(true)))
+			s.listen(candidate, '0.0.0.0', () => s.close(() => resolve(true)))
 		})
 		if (ok) return candidate
 	}

@@ -5,13 +5,14 @@ import {useQuery, useQueryClient} from '@tanstack/react-query'
 import {ApiError, mutate, query, type AssistantAction, type AssistantKey, type InstallReview} from '../api'
 import {BeforeInstall} from '../beforeInstall'
 import {installNeedsReview, type ReviewInstallInput} from '../installReview'
-import {cardAction, markReopenAssistant, streamAssistant, threadItems, type AssistantConversation, type AssistantConversationSummary, type AssistantItem, type AssistantStreamBody} from '../assistant'
+import {answeredBy, assistantKeyLabel, cardAction, markReopenAssistant, streamAssistant, threadItems, type AssistantConversation, type AssistantConversationSummary, type AssistantItem, type AssistantStreamBody} from '../assistant'
 import {useUser} from '../data'
 import {Icon} from '../icons'
+import {isOwner} from '../isOwner'
 import {AppIcon, Sheet, SheetHeader} from '../ui'
 import {useDesktop} from '../desktop/Desktop'
 import {setAssistantActivity, useAssistantAnimationState} from '../assistantActivity'
-import {appendLiveText, canDecideAssistantAction, canSendAssistantMessage, canStartAssistantFollow, finishLiveItems, insertLiveAction, isApprovalRequestError, liveBubbleMark, resolveFailedDecision, startLiveTurn} from '../assistantLive'
+import {appendLiveText, canDecideAssistantAction, canSendAssistantMessage, canStartAssistantFollow, finishLiveItems, insertLiveAction, isApprovalRequestError, liveBubbleMark, noteLiveVia, resolveFailedDecision, startLiveTurn} from '../assistantLive'
 import {
 	abortAssistantTurn,
 	assistantEpoch,
@@ -217,9 +218,9 @@ export function Assistant({onClose, onSettings, prefs, setPrefs, active = true}:
 	const focused = useRef(false)
 	const user = useUser()
 	const qc = useQueryClient()
-	const member = user.data?.role === 'member'
+	const member = !isOwner(user.data)
 	const keys = useQuery({queryKey: ['assistant.keys', undefined], queryFn: () => query<AssistantKey[]>('assistant.keys'), retry: false, staleTime: 15_000})
-	const hasKeys = (keys.data?.length ?? 0) > 0
+	const hasKeys = (keys.data ?? []).some((k) => !k.offered || !k.declined)
 	const convs = useQuery({
 		queryKey: ['assistant.conversations', undefined],
 		queryFn: () => query<AssistantConversationSummary[]>('assistant.conversations'),
@@ -327,8 +328,9 @@ export function Assistant({onClose, onSettings, prefs, setPrefs, active = true}:
 		}
 		if (!thread.isSuccess) return
 		setTurnConversationId(thread.data.id)
-		setTurnItems(threadItems(thread.data))
-	}, [items, streaming, keys.isSuccess, hasKeys, convs.isError, convs.isSuccess, convs.data, convs.error, thread.isError, thread.isSuccess, thread.data, thread.error])
+		const label = assistantKeyLabel((keys.data ?? []).find((k) => k.id === thread.data.keyId))
+		setTurnItems(answeredBy(threadItems(thread.data), label ? `Answered by ${label}` : ''))
+	}, [items, streaming, keys.isSuccess, hasKeys, keys.data, convs.isError, convs.isSuccess, convs.data, convs.error, thread.isError, thread.isSuccess, thread.data, thread.error])
 
 	useEffect(() => {
 		const el = threadRef.current
@@ -366,6 +368,12 @@ export function Assistant({onClose, onSettings, prefs, setPrefs, active = true}:
 					turn = {...turn, afterTool: true}
 					const name = prettyTool(e.data.name)
 					setTurnActivity(e.data.state === 'error' ? `Couldn’t check ${name}` : `Checked ${name}`)
+				} else if (e.event === 'notice') {
+					const message = e.data.message?.trim()
+					if (message) setTurnItems((bs) => noteLiveVia(bs, turn.liveId, message))
+				} else if (e.event === 'speaker') {
+					const name = e.data.name?.trim()
+					if (name) setTurnItems((bs) => noteLiveVia(bs, turn.liveId, `Answered by ${name}`, {keep: true}))
 				} else if (e.event === 'action') {
 					sawAction = true
 					const action = cardAction(e.data)
@@ -639,7 +647,7 @@ export function Assistant({onClose, onSettings, prefs, setPrefs, active = true}:
 			)}
 			{loading && (
 				<div className="assistant-thread">
-					<span className="spinner" aria-label="Loading" />
+					<span className="spinner" role="status" aria-label="Loading" />
 				</div>
 			)}
 			{keys.isSuccess && !hasKeys && (
@@ -648,9 +656,10 @@ export function Assistant({onClose, onSettings, prefs, setPrefs, active = true}:
 						<span className="big">
 							<Icon name="sparkle" size={30} />
 						</span>
-						<b>Sign in with ChatGPT, or add an API key, to talk to the assistant.</b>
-						{member && <span>Sign in with your own ChatGPT, add your own key, or ask the owner to share one.</span>}
-						<button type="button" className="btn primary small" onClick={() => (haptic(6), onSettings())}>
+						<b>Add a provider to talk to the assistant.</b>
+						<span>ChatGPT, Grok, OpenAI, Anthropic, or a model on this server.</span>
+						{member && <span>If the owner offered a provider, it is listed in Settings. You can refuse it there.</span>}
+						<button type="button" className="btn primary" onClick={() => (haptic(6), onSettings())}>
 							Settings → Assistant
 						</button>
 					</div>
@@ -660,6 +669,10 @@ export function Assistant({onClose, onSettings, prefs, setPrefs, active = true}:
 				<>
 					<div
 						className="assistant-thread"
+						role="log"
+						aria-live="polite"
+						aria-relevant="additions"
+						aria-label="Conversation"
 						ref={threadRef}
 						onScroll={(e) => {
 							const el = e.currentTarget
@@ -690,7 +703,8 @@ export function Assistant({onClose, onSettings, prefs, setPrefs, active = true}:
 										<div key={b.id} className="assistant-msg">
 											{/* The character beside its replies; only the one being written moves. */}
 											<AssistantCharacter id={look.character} state={b.streaming ? faceState : 'idle'} size={28} animate={look.animate && !!b.streaming} intensity={look.intensity} />
-											<div className={`bubble ${b.role}${b.streaming ? ' live' : ''}`}>
+											<div className={`bubble ${b.role}${b.streaming ? ' live' : ''}`} aria-busy={b.streaming ? true : undefined}>
+												{b.via && <p className="assistant-via">{b.via}</p>}
 												<BubbleMarkdown text={b.content} />
 												<LiveMark streaming={b.streaming} content={b.content} />
 											</div>
@@ -701,7 +715,11 @@ export function Assistant({onClose, onSettings, prefs, setPrefs, active = true}:
 										</div>
 									),
 								)}
-								{activity && <p className="assistant-activity">{activity}</p>}
+								{activity && (
+									<p className="assistant-activity" role="status">
+										{activity}
+									</p>
+								)}
 								{turnError && (
 									<div className="error" role="alert">
 										<Icon name="alert" size={18} />

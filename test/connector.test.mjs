@@ -147,6 +147,13 @@ describe('local swarm', {skip: !hasPython && 'python3 is needed'}, () => {
 		assert.equal(p.abilities.storage, true)
 	})
 
+	test('pairing can allow virtual machines', async () => {
+		const on = await pair({terminal: false, desktop: false, manage: false, vms: true})
+		assert.equal(on.abilities.vms, true)
+		const off = await pair({terminal: true})
+		assert.equal(off.abilities.vms, false)
+	})
+
 	test('a computer joins with the code (once), with what both sides allow', async () => {
 		const p = await pair({terminal: true, desktop: true, manage: true})
 		await trust(p.ca)
@@ -155,12 +162,22 @@ describe('local swarm', {skip: !hasPython && 'python3 is needed'}, () => {
 		assert.equal(name, os.hostname())
 		const cfg = JSON.parse(await readFile(join(agentHome, '.config/omarchy-connector/config.json'), 'utf8'))
 		assert.equal((await stat(join(agentHome, '.config/omarchy-connector/config.json'))).mode & 0o777, 0o600)
-		assert.deepEqual(cfg.abilities, {terminal: true, desktop: false, manage: true, storage: false, backup: false, services: false, files: false})
+		assert.deepEqual(cfg.abilities, {terminal: true, desktop: false, manage: true, storage: false, backup: false, services: false, files: false, vms: false})
 		// The same code again: refused.
 		await assert.rejects(runAgent(['enroll', server(), p.token, 'terminal']), /isn’t valid any more|already used|expired/)
 		const [a] = await q('swarm.list')
-		assert.deepEqual(a.allowed, {terminal: true, desktop: false, manage: true, storage: false, backup: false, services: false, files: false})
+		assert.deepEqual(a.allowed, {terminal: true, desktop: false, manage: true, storage: false, backup: false, services: false, files: false, vms: false})
 		assert.equal(a.online, false)
+	})
+
+	test('setAbilities cannot grant vms that was not allowed at join', async () => {
+		const [a] = await q('swarm.list')
+		assert.equal(a.allowed.vms, false)
+		await assert.rejects(call('swarm.setAbilities', {id: a.id, vms: true}), /wasn’t allowed vms/)
+	})
+
+	test('swarm.vms.status refuses an unknown computer', async () => {
+		await assert.rejects(q('swarm.vms.status', {id: 'abcdefabcdef'}), /isn’t in your swarm/)
 	})
 
 	test('it connects, says what it is, and reports every few seconds', async () => {
@@ -467,7 +484,7 @@ describe('swarm close reasons', () => {
 			agentWs.terminate()
 			c.close()
 			await new Promise((r) => server.close(r))
-			await rm(dataDir, {recursive: true, force: true})
+			await rm(dataDir, {recursive: true, force: true, maxRetries: 5, retryDelay: 20})
 		}
 	}
 	async function browserSocket() {
@@ -603,6 +620,99 @@ describe('swarm close reasons', () => {
 				vnc.serverSide.terminate()
 				await pty.close()
 				await vnc.close()
+			}
+		})
+	})
+
+	test('removing a computer ends its open terminal at once and says it was removed (#738)', async () => {
+		const allowed = {...abilities, terminal: true}
+		await withAgent({name: 'Study PC', allowed, on: {...allowed}}, async ({c, id, agentWs}) => {
+			const pty = await browserSocket()
+			try {
+				const opened = new Promise((resolve) => {
+					const onMsg = (d, isBinary) => {
+						if (isBinary) return
+						if (JSON.parse(String(d)).op !== 'open') return
+						agentWs.off('message', onMsg)
+						resolve()
+					}
+					agentWs.on('message', onMsg)
+				})
+				c.openChannel(id, 'pty', pty.serverSide, {cols: 80, rows: 24})
+				await opened
+				const closed = closedAs(pty.client)
+				const started = Date.now()
+				await c.procedures['swarm.remove'].run({id})
+				const got = await Promise.race([closed, new Promise((resolve) => setTimeout(() => resolve(null), 300))])
+				assert.ok(got, `the terminal was still open ${Date.now() - started} ms after the computer was removed`)
+				assert.equal(got.reason.toString('utf8'), 'This computer was removed from the swarm')
+				const binaries = []
+				agentWs.on('message', (d, isBinary) => isBinary && binaries.push(d))
+				try {
+					pty.serverSide.send(Buffer.from([1, 2, 3, 4]))
+				} catch {}
+				await new Promise((r) => setTimeout(r, 50))
+				assert.equal(binaries.length, 0)
+			} finally {
+				pty.client.terminate()
+				pty.serverSide.terminate()
+				await pty.close()
+			}
+		})
+	})
+
+	test('vms allowed at join can be switched off and back on', async () => {
+		const allowed = {terminal: false, desktop: false, manage: false, storage: false, backup: false, services: false, files: false, vms: true}
+		await withAgent({name: 'pc', allowed, on: {...allowed}}, async ({c, id}) => {
+			await c.procedures['swarm.setAbilities'].run({id, vms: false})
+			let row = (await c.procedures['swarm.list'].run()).find((a) => a.id === id)
+			assert.equal(row.on.vms, false)
+			await c.procedures['swarm.setAbilities'].run({id, vms: true})
+			row = (await c.procedures['swarm.list'].run()).find((a) => a.id === id)
+			assert.equal(row.on.vms, true)
+		})
+	})
+
+	test('a guest console channel asks for vms and passes the guest id', async () => {
+		const allowed = {...abilities, vms: true, desktop: false}
+		await withAgent({name: 'pc', allowed, on: {...allowed}}, async ({c, id, agentWs}) => {
+			const bad = await browserSocket()
+			try {
+				const badClosed = closedAs(bad.client)
+				c.openChannel(id, 'vnc', bad.serverSide, {guest: '../etc'})
+				const badGot = await badClosed
+				assert.equal(badGot.code, 1011)
+			} finally {
+				await bad.close()
+			}
+			const browser = await browserSocket()
+			try {
+				const opened = new Promise((r) => agentWs.on('message', function onOpen(d) {
+					const m = JSON.parse(String(d))
+					if (m.op === 'open') (agentWs.off('message', onOpen), r(m))
+				}))
+				c.openChannel(id, 'vnc', browser.serverSide, {guest: 'abcd1234'})
+				const open = await opened
+				assert.equal(open.kind, 'vnc')
+				assert.equal(open.guest, 'abcd1234')
+			} finally {
+				// An open socket keeps the browser's server from finishing close, so the failure never reports.
+				browser.client.terminate()
+				browser.serverSide.terminate()
+				await browser.close()
+			}
+		})
+		const desktopOnly = {...abilities, desktop: true, vms: false}
+		await withAgent({name: 'pc', allowed: desktopOnly, on: {...desktopOnly}}, async ({c, id}) => {
+			const browser = await browserSocket()
+			try {
+				const closed = closedAs(browser.client)
+				c.openChannel(id, 'vnc', browser.serverSide, {guest: 'abcd1234'})
+				const got = await closed
+				assert.equal(got.code, 1011)
+				assert.equal(got.reason.toString('utf8'), 'Virtual machines isn’t switched on for pc')
+			} finally {
+				await browser.close()
 			}
 		})
 	})

@@ -4,7 +4,9 @@ import {useMutation, useQuery, useQueryClient} from '@tanstack/react-query'
 import {mutate, query} from '../api'
 import {Icon} from '../icons'
 import {Field, Row, Segmented, Sheet, SheetHeader, useConfirm, useToast} from '../ui'
+import {hostnameAddress} from './hostnameHint'
 import {TailscaleSheet} from './Tailscale'
+import {wifiRowValue} from './wifiRow'
 
 function useQ<T>(path: string, input?: unknown, opts: {enabled?: boolean; refetchInterval?: number | false} = {}) {
 	return useQuery({queryKey: [path, input], queryFn: () => query<T>(path, input), retry: false, staleTime: 15_000, ...opts})
@@ -79,7 +81,7 @@ function HostnameSheet({open, current, onClose}: {open: boolean; current: string
 				spellCheck={false}
 				value={name}
 				onChange={(e) => setName(e.target.value)}
-				hint={valid ? `Reachable at http://${name.trim().toLowerCase()}.local` : undefined}
+				hint={valid ? `Reachable at ${hostnameAddress(name.trim().toLowerCase())}` : undefined}
 				error={!valid ? 'Letters, numbers and dashes only.' : undefined}
 				autoFocus
 			/>
@@ -175,9 +177,9 @@ function ResetSheet({open, onClose, onDone}: {open: boolean; onClose: () => void
 			disabled={!password || typed !== 'RESET'}
 			onSubmit={() => save.mutate({path: 'system.factoryReset', input: {password}, done: 'Your server is resetting'}, {onSuccess: onDone})}
 		>
-			<div className="error" style={{marginBottom: 16}}>
+			<div className="error" role="alert" style={{marginBottom: 16}}>
 				<Icon name="alert" size={18} />
-				Every app and its data, every machine and its disks, and all My Own Data Center accounts and settings are permanently deleted, and it goes back to first-time setup. This can’t be undone. Your own files, storage pools and the Omarchy desktop are left as they are.
+				Every app and its data, every machine and its disks, and all My Own Data Center accounts and settings are permanently deleted. Afterwards you make the first account again in a Terminal on the server; the sign-in page shows the command. This can’t be undone. Your own files, storage pools and the Omarchy desktop are left as they are.
 			</div>
 			<Field id="reset-pw" label="Your password" type="password" autoComplete="current-password" value={password} onChange={(e) => setPassword(e.target.value)} />
 			<Field id="reset-type" label="Type RESET to confirm" autoCapitalize="characters" autoCorrect="off" value={typed} onChange={(e) => setTyped(e.target.value)} />
@@ -200,7 +202,7 @@ export function ServerNetwork() {
 			<div className="glass group">
 				<Row icon="network" color="var(--teal)" label="Device name" value={hostname.data ? `${hostname.data}.local` : ''} onClick={() => setSheet('hostname')} />
 				<Row icon="networking" color="var(--blue)" label="IP address" value={(ips.data ?? []).join(', ') || '–'} />
-				{wifiSupported.data && <Row icon="wifi" color="var(--blue)" label="Wi-Fi" value={wifi.data?.status === 'connected' ? wifi.data.ssid : 'Off'} onClick={() => setSheet('wifi')} />}
+				{wifiSupported.data && <Row icon="wifi" color="var(--blue)" label="Wi-Fi" value={wifiRowValue(wifi.data)} onClick={() => setSheet('wifi')} />}
 				<Row icon="networking" color="var(--purple, #8b5cf6)" label="Tailscale" value={tsValue} onClick={() => setSheet('tailscale')} />
 			</div>
 			<HostnameSheet open={sheet === 'hostname'} current={hostname.data ?? ''} onClose={() => setSheet(null)} />

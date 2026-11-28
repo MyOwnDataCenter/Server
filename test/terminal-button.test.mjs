@@ -33,7 +33,7 @@ test('Terminal opens from the server screen, not the Apps page', async () => {
 	const swarm = await read('../web/src/swarm/Swarm.tsx')
 	assert.match(swarm, /pin=\{<PinButton pin=\{\{kind: 'machine'/)
 	const shell = await read('../web/src/App.tsx')
-	assert.match(shell, /<Machines onOpenApp=\{\(a\) => setAppId\(a\.id\)\} onTerminal=\{openTerminal\}/)
+	assert.match(shell, /<Machines prefs=\{prefs\} setPrefs=\{setPrefs\} onOpenApp=\{\(a\) => setAppId\(a\.id\)\} onTerminal=\{openTerminal\}/)
 	assert.doesNotMatch(shell, /<Apps onOpenApp=\{\(a\) => setAppId\(a\.id\)\} onTerminal=/)
 	const appsWindow = await read('../web/src/desktop/Desktop.tsx')
 	assert.match(appsWindow, /<Apps onOpenApp=\{\(a\) => setAppId\(a\.id\)\} onStore=\{\(\) => desk\.open\('store'\)\} \/>/)

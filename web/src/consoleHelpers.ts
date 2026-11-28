@@ -29,7 +29,7 @@ export type LocalDateLike = Pick<Date, 'getFullYear' | 'getMonth' | 'getDate' | 
 
 // Build a screenshot filename keeping Unicode letters and using local wall-clock time.
 export function screenshotFilename(name: string, now: LocalDateLike = new Date()): string {
-	const base = name.normalize('NFC').replace(/[^\p{L}\p{N}\p{M}._-]+/gu, '-').replace(/^[-.]+|[-.]+$/g, '') || 'console'
+	const base = name.normalize('NFC').replace(/[^\p{L}\p{N}\p{M}._-]+/gu, '-').replace(/^[-.]+|[-.]+$/g, '') || 'desktop'
 	const pad = (n: number) => String(n).padStart(2, '0')
 	const stamp = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}-${pad(now.getHours())}-${pad(now.getMinutes())}-${pad(now.getSeconds())}`
 	return `${base}-${stamp}.png`

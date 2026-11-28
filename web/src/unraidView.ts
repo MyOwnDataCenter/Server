@@ -94,3 +94,8 @@ export function formatTotalSize(sizes: (number | null | undefined)[]): string {
 	if (!unknown) return formatBytes(sum)
 	return sum > 0 ? `at least ${formatBytes(sum)}` : 'size unknown'
 }
+
+/** The SSH port as typed. Blank is the default, 22. Text that is not a number stays NaN so the server refuses it instead of quietly using 22. */
+export function typedSshPort(text: string): number {
+	return text.trim() === '' ? 22 : Number(text)
+}

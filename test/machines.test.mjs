@@ -182,7 +182,7 @@ describe('omarchyd machines', () => {
 				'/catalog.json': JSON.stringify({
 					version: 1,
 					images: [
-						{id: 'testos-amd64', familyId: 'debian', name: 'TestOS', variantName: 'Server', version: '1', arch: 'amd64', kind: 'cloud', url: 'https://fixture.test/img/test.qcow2', checksums: {url: 'https://fixture.test/img/SHA256SUMS', algorithm: 'sha256'}, sizeMb: 1, adminGroup: 'sudo'},
+						{id: 'testos-amd64', familyId: 'debian', name: 'TestOS', variantName: 'Server', version: '1', arch: 'amd64', kind: 'cloud', url: 'https://fixture.test/img/test.qcow2', checksums: {url: 'https://fixture.test/img/SHA256SUMS', algorithm: 'sha256'}, sizeMb: 1, adminGroup: 'sudo', cloudInit: {packages: ['task-gnome-desktop'], commands: [['systemctl', 'set-default', 'graphical.target']], graphical: true}},
 						{id: 'bados-amd64', familyId: 'debian', name: 'BadOS', version: '1', arch: 'amd64', kind: 'cloud', url: 'https://fixture.test/img/bad.qcow2', checksums: {url: 'https://fixture.test/img/SHA256SUMS', algorithm: 'sha256'}, sizeMb: 1},
 						{id: 'omarchy-9-amd64', familyId: 'omarchy', name: 'Omarchy', version: '9', arch: 'amd64', kind: 'iso', install: 'omarchy', url: 'https://fixture.test/img/omarchy.iso', sha256: createHash('sha256').update(image).digest('hex'), sizeMb: 1},
 						{id: 'insecure', name: 'Plain HTTP', version: '1', arch: 'amd64', kind: 'cloud', url: 'http://fixture.test/x.img', checksums: {url: 'https://fixture.test/s', algorithm: 'sha256'}},
@@ -265,6 +265,14 @@ describe('omarchyd machines', () => {
 		assert.match(seen.xml, /<backend type='passt'\/>/)
 		assert.match(seen.xml, /<graphics type='vnc' socket='[^']+vnc\.sock'\/>/)
 		assert.match(seen.xml, /<domain type='kvm'>/)
+		assert.match(seen.xml, /<channel type='unix'><target type='virtio' name='org.qemu.guest_agent.0'\/>/)
+		assert.match(seen.userData, /qemu-guest-agent/)
+		assert.match(seen.userData, /python3/)
+		assert.match(seen.userData, /\["systemctl","enable","--now","qemu-guest-agent"\]/)
+		assert.match(seen.userData, /task-gnome-desktop/)
+		assert.match(seen.userData, /power_state/)
+		assert.ok(!/\b[0-9a-f]{64}\b/.test(seen.userData), 'pairing fingerprint is not written into cloud-init')
+		assert.equal((await q('machines.details', {id})).options.agent, true)
 		assert.equal((await stat(join(data, 'machines/vms', id, 'disk.qcow2'))).size, image.length)
 		assert.equal((await q('machines.osImages'))[0].state, 'downloaded')
 		await assert.rejects(call('machines.create', {...spec, name: 'box', osId: 'testos-amd64'}), /already exists/)
@@ -327,7 +335,12 @@ describe('omarchyd machines', () => {
 		assert.equal(creds.users[0].username, 'chris')
 		assert.match(creds.users[0].enc_password, /^\$6\$/)
 		assert.ok(!seen.media['user_credentials.json'].includes('hunter2'))
-		assert.equal(JSON.parse(seen.media['user_configuration.json']).hostname, 'omarchy')
+		const omCfg = JSON.parse(seen.media['user_configuration.json'])
+		assert.equal(omCfg.hostname, 'omarchy')
+		assert.deepEqual(omCfg.packages, ['qemu-guest-agent'])
+		assert.deepEqual(omCfg.services, ['qemu-guest-agent'])
+		assert.equal((await q('machines.details', {id: om})).cloudInit.username, 'chris')
+		await assert.rejects(call('machines.updateCloudInit', {id: om, username: 'chris', hostname: 'omarchy', password: 'secret'}), /doesn’t use cloud-init/)
 		assert.match(seen.xml, /<os firmware='efi'>/)
 		assert.match(seen.xml, /omarchy-9-amd64\.iso'\/><target dev='sda' bus='sata'\/><boot order='2'\/>/)
 		assert.match(seen.xml, /disk\.qcow2'\/><target dev='vda' bus='virtio'\/><boot order='1'\/>/)
@@ -415,6 +428,7 @@ describe('omarchyd machines', () => {
 	test('options: notes, protection, guest agent, boot menu', async () => {
 		await call('machines.updateOptions', {id, notes: 'Web <server>', protection: true, agent: true, bootMenu: true, onBoot: true, startupOrder: 2, startupDelay: 10})
 		assert.match(seen.xml, /<description>Web &lt;server&gt;<\/description>/)
+		assert.equal((await q('machines.list')).find((x) => x.id === id).notes, 'Web <server>', 'the list carries the notes, so the assistant can search them (#1110)')
 		assert.match(seen.xml, /org\.qemu\.guest_agent\.0/)
 		assert.match(seen.xml, /<bootmenu enable='yes'/)
 		await assert.rejects(call('machines.uninstall', {id}), /protected/)
@@ -422,12 +436,13 @@ describe('omarchyd machines', () => {
 		assert.equal((await q('machines.details', {id})).name, 'Box', 'a rejected request does not rename the machine')
 		await call('machines.updateOptions', {id, protection: false, agent: false, bootMenu: false, onBoot: false, notes: ''})
 		assert.ok(!seen.xml.includes('guest_agent'))
+		assert.equal('notes' in (await q('machines.list')).find((x) => x.id === id), false, 'no notes, no field')
 	})
 
 	test('drives: add a SCSI disk, grow it live, CD/DVD media, boot order; removing needs a shut-down machine', async () => {
 		const {diskId} = await call('machines.addDisk', {id, sizeGb: 8, bus: 'scsi', cache: 'writeback'})
 		assert.equal(diskId, 'disk1')
-		assert.match(seen.xml, /<controller type='scsi' model='virtio-scsi'\/>/)
+		assert.match(seen.xml, /<controller type='scsi' model='virtio-scsi'><driver iothread='1'\/><\/controller>/)
 		assert.match(seen.xml, /cache='writeback' discard='unmap'\/><source file='[^']+disk1\.qcow2'\/><target dev='sdb' bus='scsi'\/>/)
 		await assert.rejects(call('machines.resizeDisk', {id, diskId, sizeGb: 4}), /only grow/)
 		await call('machines.resizeDisk', {id, diskId, sizeGb: 16})
@@ -461,6 +476,11 @@ describe('omarchyd machines', () => {
 		assert.match(seen.userData, /chpasswd:[\s\S]*password: '\$6\$/)
 		assert.match(seen.userData, /hostname: web-1/)
 		assert.ok(!seen.userData.includes('new secret pw'))
+		assert.match(seen.userData, /qemu-guest-agent/)
+		assert.match(seen.userData, /python3/)
+		assert.ok(!seen.userData.includes('task-gnome-desktop'), 'a later cloud-init edit must not replay catalog desktop packages')
+		assert.ok(!seen.userData.includes('power_state'), 'a later cloud-init edit must not replay graphical power_state')
+		assert.ok(!seen.userData.includes('enable-linger'), 'a later cloud-init edit must not replay linger')
 		assert.deepEqual((await q('machines.details', {id})).cloudInit, {username: 'chris', hostname: 'web-1', sshKeys: [key]})
 	})
 
@@ -1659,12 +1679,16 @@ test('on an ARM server (Omarchy on Apple Silicon) a machine is an aarch64 "virt"
 		assert.doesNotMatch(xml, /x86_64|q35|<apic\/>|bus='sata'|bus='ide'/)
 		assert.match(xml, /disk\.qcow2'\/><target dev='vda' bus='virtio'\/>/)
 		assert.match(xml, /seed\.iso'\/><target dev='sda' bus='scsi'\/>/)
-		assert.match(xml, /<controller type='scsi' model='virtio-scsi'\/>/)
+		// Disk I/O runs on its own thread, not QEMU's main loop: the virtio disk and the SCSI controller use it, the CD drive does not.
+		assert.match(xml, /<vcpu>2<\/vcpu>\n  <iothreads>1<\/iothreads>/)
+		assert.match(xml, /<driver name='qemu' type='qcow2' discard='unmap' iothread='1'\/><source file='[^']*disk\.qcow2'\/>/)
+		assert.match(xml, /<controller type='scsi' model='virtio-scsi'><driver iothread='1'\/><\/controller>/)
+		assert.match(xml, /device='cdrom'><driver name='qemu' type='raw'\/>/)
 		assert.match(xml, /<video><model type='virtio'\/><\/video>/)
-		// Only ARM images are offered on an ARM server.
+		// The catalog query keeps both architectures. The form filters to the host.
 		const images = await machines.procedures['machines.osImages'].run()
-		assert.ok(images.length > 0 && images.every((i) => i.arch === 'arm64'))
-		assert.ok(images.some((i) => i.id === 'ubuntu-24.04-server-arm64'))
+		assert.ok(images.some((i) => i.arch === 'arm64' && i.id === 'ubuntu-24.04-server-arm64'))
+		assert.ok(images.some((i) => i.arch === 'amd64'))
 	} finally {
 		await rm(root, {recursive: true, force: true})
 	}
@@ -1674,7 +1698,7 @@ test('an x86 server’s machines are unchanged', async () => {
 	const {readFile: rf} = await import('node:fs/promises')
 	const catalog = JSON.parse(await rf(new URL('../omarchyd/machine-catalog.json', import.meta.url), 'utf8'))
 	const ids = catalog.images.map((i) => i.id)
-	for (const id of ['ubuntu-26.04-desktop-amd64', 'debian-13-server-amd64', 'omarchy-4.0.4-amd64']) assert.ok(ids.includes(id))
+	for (const id of ['ubuntu-26.04-desktop-amd64', 'debian-13-server-amd64', 'debian-12-server-amd64', 'ubuntu-22.04-server-amd64', 'opensuse-leap-16.1-amd64', 'rocky-10-server-amd64', 'omarchy-4.5.0-amd64', 'cachyos-desktop-amd64', 'linuxmint-22.3-cinnamon-amd64']) assert.ok(ids.includes(id))
 	for (const i of catalog.images.filter((x) => x.arch === 'arm64')) {
 		assert.match(i.url, /arm64/)
 		assert.equal(i.firmware, 'efi')

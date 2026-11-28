@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "about": "Operating systems this server can create machines from, with one tap. Every download comes from its publisher and must match a checksum: either the publisher's own checksum list (entries that track 'latest') or a sha256 pinned here (versioned files). Cloud images set themselves up with cloud-init; desktops add their desktop on first start. Omarchy installs itself from its official ISO.",
+  "about": "Operating systems this server can create machines from, with one tap. Every download comes from its publisher and must match a checksum: either the publisher's own checksum list (entries that track 'latest') or a sha256 pinned here (versioned files). Cloud images set themselves up with cloud-init, and the connector is installed once the guest agent answers. Desktops add their desktop on first start. Omarchy installs itself from its official ISO. CachyOS and Linux Mint boot their own installers; the connector is added after that desktop is up.",
   "images": [
     {
       "id": "ubuntu-26.04-desktop-amd64",
@@ -127,16 +127,94 @@
       "cloudInit": {"shell": "/bin/ash", "adminGroup": "wheel", "packages": ["sudo"]}
     },
     {
-      "id": "omarchy-4.0.4-amd64",
+      "id": "omarchy-4.5.0-amd64",
       "familyId": "omarchy",
       "name": "Omarchy",
-      "version": "4.0.4",
+      "version": "4.5.0",
       "arch": "amd64",
       "kind": "iso",
       "install": "omarchy",
-      "url": "https://iso.omarchy.org/omarchy-4.0.4.iso",
-      "sha256": "ddeded2758c48318d201dfdac905ecb28f570441883f0c052ea3cd5d05acf92d",
-      "sizeMb": 6186
+      "url": "https://iso.omarchy.org/omarchy-4.5.0-x86.iso",
+      "sha256": "5d6288bc57f96f6231719830457582c846a2291985201c36a9a7d1216978b00f",
+      "sizeMb": 6541
+    },
+    {
+      "id": "cachyos-desktop-amd64",
+      "familyId": "cachyos",
+      "name": "CachyOS",
+      "variantName": "Desktop",
+      "version": "261122",
+      "arch": "amd64",
+      "kind": "iso",
+      "install": "manual",
+      "url": "https://cdn.cachyos.org/ISO/desktop/261122/cachyos-desktop-linux-261122.iso",
+      "sha256": "d9472167efbfa45a0600aa03e6e60c3a919092d6ee7a0f256c8b92ae6a767376",
+      "sizeMb": 3231
+    },
+    {
+      "id": "linuxmint-22.3-cinnamon-amd64",
+      "familyId": "linuxmint",
+      "name": "Linux Mint",
+      "variantName": "Cinnamon",
+      "version": "22.3",
+      "arch": "amd64",
+      "kind": "iso",
+      "install": "manual",
+      "url": "https://mirror.csclub.uwaterloo.ca/linuxmint/stable/22.3/linuxmint-22.3-cinnamon-64bit.iso",
+      "sha256": "a081ab202cfda17f6924128dbd2de8b63518ac0531bcfe3f1a1b88097c459bd4",
+      "sizeMb": 3092
+    },
+    {
+      "id": "opensuse-leap-16.1-amd64",
+      "familyId": "opensuse",
+      "name": "openSUSE Leap",
+      "variantName": "Server",
+      "version": "16.1",
+      "arch": "amd64",
+      "kind": "cloud",
+      "url": "https://download.opensuse.org/distribution/leap/16.1/appliances/Leap-16.1-Minimal-VM.x86_64-Cloud.qcow2",
+      "checksums": {"url": "https://download.opensuse.org/distribution/leap/16.1/appliances/Leap-16.1-Minimal-VM.x86_64-Cloud.qcow2.sha256", "algorithm": "sha256"},
+      "sizeMb": 342,
+      "adminGroup": "wheel"
+    },
+    {
+      "id": "rocky-10-server-amd64",
+      "familyId": "rocky",
+      "name": "Rocky Linux",
+      "variantName": "Server",
+      "version": "10",
+      "arch": "amd64",
+      "kind": "cloud",
+      "url": "https://dl.rockylinux.org/pub/rocky/10/images/x86_64/Rocky-10-GenericCloud-Base-10.3-20261112.0.x86_64.qcow2",
+      "sha256": "68eae06d402c8b19e7dca06e85bdc43a3476089afa3ee20d93d0d43cf9871e9e",
+      "sizeMb": 568,
+      "adminGroup": "wheel"
+    },
+    {
+      "id": "debian-12-server-amd64",
+      "familyId": "debian",
+      "name": "Debian",
+      "variantName": "Server",
+      "version": "12",
+      "arch": "amd64",
+      "kind": "cloud",
+      "url": "https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-genericcloud-amd64.qcow2",
+      "checksums": {"url": "https://cloud.debian.org/images/cloud/bookworm/latest/SHA512SUMS", "algorithm": "sha512"},
+      "sizeMb": 350,
+      "adminGroup": "sudo"
+    },
+    {
+      "id": "ubuntu-22.04-server-amd64",
+      "familyId": "ubuntu",
+      "name": "Ubuntu",
+      "variantName": "Server",
+      "version": "22.04 LTS",
+      "arch": "amd64",
+      "kind": "cloud",
+      "url": "https://cloud-images.ubuntu.com/releases/jammy/release/ubuntu-22.04-server-cloudimg-amd64.img",
+      "checksums": {"url": "https://cloud-images.ubuntu.com/releases/jammy/release/SHA256SUMS", "algorithm": "sha256"},
+      "sizeMb": 718,
+      "adminGroup": "sudo"
     },
     {
       "id": "ubuntu-26.04-desktop-arm64",

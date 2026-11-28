@@ -4,7 +4,7 @@
 // installer through a pipe with stand-in commands: the stand-in pacman reads all of its input.
 import assert from 'node:assert/strict'
 import {spawnSync} from 'node:child_process'
-import {chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile} from 'node:fs/promises'
+import {chmod, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile} from 'node:fs/promises'
 import os from 'node:os'
 import {dirname, join} from 'node:path'
 import {test} from 'node:test'
@@ -26,9 +26,17 @@ test('piped into bash, a package step that reads its input does not skip the res
 	const dir = await mkdtemp(join(os.tmpdir(), 'install-pipe-'))
 	try {
 		const bin = join(dir, 'bin')
+		const tools = join(dir, 'tools')
 		const home = join(dir, 'home')
 		await mkdir(bin, {recursive: true})
+		await mkdir(tools, {recursive: true})
 		await mkdir(home, {recursive: true})
+		// Real tools the script needs, and not this machine's omarchy. Finding omarchy skips
+		// pacman -Syu and asks for a terminal, which is not the pipe this test is checking.
+		for (const name of ['sed', 'systemctl', 'uname', 'awk', 'sort', 'wc', 'mkdir', 'cat']) {
+			await symlink(`/usr/bin/${name}`, join(tools, name))
+		}
+		await symlink(process.execPath, join(tools, 'node'))
 		const stub = async (name, body) => {
 			await writeFile(join(bin, name), `#!/bin/bash\n${body}\n`)
 			await chmod(join(bin, name), 0o755)
@@ -38,10 +46,10 @@ test('piped into bash, a package step that reads its input does not skip the res
 		await stub('id', '[ "$1" = -u ] && { echo 1000; exit; }; exec /usr/bin/id "$@"')
 		// Stop at the download: reaching it is the point.
 		await stub('git', 'echo "GIT $*"; exit 7')
-		const out = spawnSync('bash', [], {
+		const out = spawnSync('/usr/bin/bash', [], {
 			input: script,
 			encoding: 'utf8',
-			env: {PATH: `${bin}:${dirname(process.execPath)}:/usr/bin:/bin`, HOME: home, USER: 'tester'},
+			env: {PATH: `${bin}:${tools}`, HOME: home, USER: 'tester'},
 			// No terminal here, as on a machine without one: the steps read nothing instead.
 			detached: true,
 			timeout: 30_000,

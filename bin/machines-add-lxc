@@ -1,0 +1,120 @@
+#!/usr/bin/env bash
+# machines-add-lxc: set this server up to run containers (LXC) from My Own Data Center's Machines page.
+#
+# Run it once, as yourself (not with sudo); it asks for your password where it needs to. It's safe to
+# run again: each step is skipped when it's already done.
+#
+# What it sets up, and why:
+#   - Incus, the manager that runs the containers and downloads its library of Linux systems.
+#   - An ID range for root in /etc/subuid and /etc/subgid, so containers run unprivileged (their root
+#     is an ordinary user on this server).
+#   - Incus's services, started now and at every boot, so containers set to start with the server do.
+#   - A storage pool and default profile, if there isn't one yet.
+#   - Your account in the `incus` group: Incus's per-user mode, which gives you your own walled-off
+#     space for containers. Never `incus-admin`, which would be the same as root.
+set -euo pipefail
+
+say() { printf '\033[1m%s\033[0m\n' "$*"; }
+ok() { printf '  \033[32m✓\033[0m %s\n' "$*"; }
+step() { printf '  … %s\n' "$*"; }
+fail() {
+	printf '  \033[31m✗\033[0m %s\n' "$*" >&2
+	exit 1
+}
+
+if [ "$(id -u)" -eq 0 ]; then
+	echo "Run machines-add-lxc as yourself, not with sudo. It asks for your password when it needs it." >&2
+	exit 1
+fi
+if ! command -v pacman >/dev/null; then
+	echo "machines-add-lxc sets up Arch-based servers (like Omarchy). Install Incus with your system's packages instead." >&2
+	exit 1
+fi
+USER_NAME=$(id -un)
+
+say "Setting up containers for $USER_NAME"
+sudo -v
+
+if pacman -Qi incus >/dev/null 2>&1; then
+	ok "Incus is installed"
+else
+	step "Installing Incus"
+	sudo pacman -S --needed --noconfirm incus acl
+	ok "Installed Incus"
+fi
+
+for f in /etc/subuid /etc/subgid; do
+	if grep -q '^root:' "$f" 2>/dev/null; then
+		ok "$f has an ID range for root"
+	else
+		echo 'root:1000000:1000000000' | sudo tee -a "$f" >/dev/null
+		ok "Added an ID range for root to $f"
+	fi
+done
+
+# incus.service starts Incus at boot (and the containers set to start with the server);
+# incus-user.socket is the per-user door into it. Started without waiting on systemd, then checked
+# with a time limit, so a daemon that can't start says why instead of leaving this hanging.
+step "Starting Incus"
+sudo systemctl enable incus.socket incus.service incus-user.socket >/dev/null 2>&1
+sudo systemctl start --no-block incus.socket incus.service incus-user.socket
+if ! timeout 120 sudo incus admin waitready --timeout=110 >/dev/null 2>&1; then
+	echo
+	sudo systemctl --no-pager --lines=0 status incus.service >&2 || true
+	sudo journalctl -u incus.service -b --no-pager -n 30 >&2 || true
+	fail "Incus didn't start within 2 minutes. The lines above say why; send them over."
+fi
+ok "Incus is running, and starts at every boot"
+
+if timeout 30 sudo incus storage show default >/dev/null 2>&1; then
+	ok "Storage is ready"
+else
+	step "Creating storage and the default profile"
+	timeout 120 sudo incus admin init --minimal || fail "Couldn't create storage (incus admin init --minimal)."
+	ok "Created storage and the default profile"
+fi
+
+if id -nG "$USER_NAME" | tr ' ' '\n' | grep -qx incus || getent group incus | cut -d: -f4 | tr ',' '\n' | grep -qx "$USER_NAME"; then
+	ok "$USER_NAME can use containers"
+else
+	step "Adding $USER_NAME to the incus group"
+	sudo usermod -aG incus "$USER_NAME"
+	ok "Added $USER_NAME to the incus group"
+fi
+
+# The group only reaches My Own Data Center's processes after the next sign-in or restart. Give this
+# account its own permission on Incus's per-user door too (exactly what the group grants, nothing
+# more), now and each time the socket is created, so containers work straight away.
+SOCKET=/var/lib/incus/unix.socket.user
+DROPIN=/etc/systemd/system/incus-user.socket.d/modc-$USER_NAME.conf
+if [ ! -f "$DROPIN" ]; then
+	step "Letting $USER_NAME reach Incus without a restart"
+	sudo mkdir -p "$(dirname "$DROPIN")"
+	printf '[Socket]\nExecStartPost=/usr/bin/setfacl -m u:%s:rw %s\n' "$USER_NAME" "$SOCKET" | sudo tee "$DROPIN" >/dev/null
+	sudo systemctl daemon-reload
+fi
+command -v setfacl >/dev/null || sudo pacman -S --needed --noconfirm acl
+for _ in 1 2 3 4 5 6 7 8 9 10; do [ -S "$SOCKET" ] && break; sleep 1; done
+sudo setfacl -m "u:$USER_NAME:rw" "$SOCKET"
+# Reaching the socket also needs passing through its folder.
+sudo setfacl -m "u:$USER_NAME:x" /var/lib/incus
+if incus info >/dev/null 2>&1; then
+	ok "$USER_NAME can reach Incus now"
+else
+	fail "Incus is set up, but this account still can't reach it. Send over what \`incus info\` prints."
+fi
+
+# Omarchy turns on its firewall (ufw). Containers need it to let them reach this server for an
+# address (DHCP) and DNS, and out to the internet.
+if command -v ufw >/dev/null && timeout 20 sudo ufw status 2>/dev/null | grep -q '^Status: active'; then
+	step "Opening the firewall for the containers' network"
+	# Incus's per-user networks are named incusbr-<your user id>; the default one incusbr0.
+	for br in "incusbr-$(id -u)" incusbr0; do
+		sudo ufw allow in on "$br" >/dev/null
+		sudo ufw route allow in on "$br" >/dev/null
+		sudo ufw route allow out on "$br" >/dev/null
+	done
+	ok "The firewall lets containers get an address and reach the internet"
+fi
+
+say "Done. Open Machines → this server → Containers in My Own Data Center."

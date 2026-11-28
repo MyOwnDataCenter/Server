@@ -11,6 +11,7 @@ import {execFile} from 'node:child_process'
 import {randomBytes} from 'node:crypto'
 import {readFile, readdir, rename, rm, mkdir} from 'node:fs/promises'
 import {join} from 'node:path'
+import {stoppedMessage} from './exec-error.mjs'
 
 export const CATALOG_URLS = ['https://plugins.omarchy.org/catalog.json', 'https://raw.githubusercontent.com/omacom/omarchy-plugin-marketplace/main/site/catalog.json']
 export const SITE = 'https://plugins.omarchy.org'
@@ -20,7 +21,7 @@ const ID = /^[A-Za-z0-9][A-Za-z0-9._-]*$/
 
 const execRun = (cmd, args, opts = {}) =>
 	new Promise((resolve, reject) =>
-		execFile(cmd, args, {timeout: 120_000, maxBuffer: 8 << 20, ...opts}, (e, out, err) => (e ? reject(new Error(String(err || e.message).trim().split('\n').pop())) : resolve(String(out)))),
+		execFile(cmd, args, {timeout: 120_000, maxBuffer: 8 << 20, ...opts}, (e, out, err) => (e ? reject(new Error(stoppedMessage(cmd, e, opts.timeout ?? 120_000) ?? String(err || e.message).trim().split('\n').pop())) : resolve(String(out)))),
 	)
 
 // One page of a filtered list. limit stays capped so a response is not the whole registry.

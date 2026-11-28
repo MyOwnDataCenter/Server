@@ -61,6 +61,8 @@ self.addEventListener('fetch', (e) => {
 		)
 		return
 	}
+	// Quick-transfer portals (/t/…) are never cached or answered from the app's cache.
+	if (new URL(e.request.url).pathname.startsWith('/t/')) return
 	if (e.request.mode === 'navigate') {
 		e.respondWith(
 			fetch(e.request)

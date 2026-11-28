@@ -19,11 +19,13 @@ import WebSocket, {WebSocketServer} from 'ws'
 
 import {dualProtocolServer, fromLocalProxy, wantsUpgrade} from '../omarchyd/tls.mjs'
 import {linkProxy} from '../omarchyd/proxy-link.mjs'
+import {viewerBackpressure} from '../omarchyd/backpressure.mjs'
 import {createBackendClient, BackendError} from './backend.mjs'
 import {hashId, newSessionId} from './store.mjs'
 import {createRemoteGate} from './remote-gate.mjs'
+import {createQuickTransfer, cleanUploadName, PORTAL_JS, portalHtml} from './quick-transfer.mjs'
 
-export const VERSION = '0.9.76'
+export const VERSION = '0.9.108'
 const COOKIE = 'omarchy_server_sid'
 const SESSION_MAX_AGE_S = 60 * 60 * 24 * 365
 const REFRESH_MARGIN_MS = 2 * 60 * 1000
@@ -88,6 +90,8 @@ export const ALLOWED = {
 	'system.deviceName': 'query',
 	'system.cpuTemperature': 'query',
 	'system.stats': 'query',
+	'system.bootStart': 'query',
+	'system.enableBootStart': 'mutation',
 	'system.cpuUsage': 'query',
 	'system.memoryUsage': 'query',
 	'system.diskUsage': 'query',
@@ -108,6 +112,38 @@ export const ALLOWED = {
 	'appStore.app': 'query',
 	'appStore.repositories': 'query',
 	'machines.list': 'query',
+	'containers.status': 'query',
+	'containers.list': 'query',
+	'containers.images': 'query',
+	'containers.create': 'mutation',
+	'containers.start': 'mutation',
+	'containers.stop': 'mutation',
+	'containers.restart': 'mutation',
+	'containers.forceStop': 'mutation',
+	'containers.delete': 'mutation',
+	'containers.snapshot': 'mutation',
+	'containers.restoreSnapshot': 'mutation',
+	'containers.deleteSnapshot': 'mutation',
+	'containers.addPort': 'mutation',
+	'containers.removePort': 'mutation',
+	'containers.templates': 'query',
+	'containers.stats': 'query',
+	'containers.backups': 'query',
+	'containers.files': 'query',
+	'containers.setResources': 'mutation',
+	'containers.setOptions': 'mutation',
+	'containers.clone': 'mutation',
+	'containers.saveTemplate': 'mutation',
+	'containers.deleteTemplate': 'mutation',
+	'containers.backup': 'mutation',
+	'containers.restoreBackup': 'mutation',
+	'containers.deleteBackup': 'mutation',
+	'containers.copyToServer': 'mutation',
+	'containers.setRootPassword': 'mutation',
+	'containers.templateFiles': 'query',
+	'containers.importTemplate': 'mutation',
+	'containers.downloadTemplate': 'mutation',
+	'containers.installConnector': 'mutation',
 	'usb.list': 'query',
 	'usb.attach': 'mutation',
 	'usb.detach': 'mutation',
@@ -135,6 +171,7 @@ export const ALLOWED = {
 	'swarm.setAbilities': 'mutation',
 	'swarm.action': 'mutation',
 	'swarm.storage.status': 'query',
+	'swarm.vms.status': 'query',
 	'swarm.storage.disks': 'query',
 	'swarm.storage.pools': 'query',
 	'swarm.storage.importable': 'query',
@@ -157,8 +194,19 @@ export const ALLOWED = {
 	'swarm.files.copyToServer': 'mutation',
 	'swarm.files.copyFromServer': 'mutation',
 	'assistant.keys': 'query',
+	'hermes.status': 'query',
+	'hermes.connect': 'mutation',
+	'hermes.disconnect': 'mutation',
+	'hermes.setMode': 'mutation',
+	'hermes.connectRemote': 'mutation',
+	'hermes.remoteSetup': 'query',
+	'hermes.rotateToken': 'mutation',
+	'assistant.setEngine': 'mutation',
 	'assistant.addKey': 'mutation',
 	'assistant.updateKey': 'mutation',
+	'assistant.reorderKeys': 'mutation',
+	'assistant.clearDefault': 'mutation',
+	'assistant.useServerDefault': 'mutation',
 	'assistant.removeKey': 'mutation',
 	'assistant.verifyKey': 'mutation',
 	'assistant.chatgptStart': 'mutation',
@@ -180,6 +228,10 @@ export const ALLOWED = {
 	'hyprland.dispatch': 'mutation',
 	'hyprland.clipboardRead': 'query',
 	'hyprland.clipboardWrite': 'mutation',
+	'hyprland.profiles': 'query',
+	'hyprland.profileRun': 'mutation',
+	'hyprland.profileSave': 'mutation',
+	'hyprland.profileDelete': 'mutation',
 	'apps.uninstall': 'mutation',
 	'apps.trackOpen': 'mutation',
 	'machines.start': 'mutation',
@@ -193,7 +245,10 @@ export const ALLOWED = {
 	'machines.capabilities': 'query',
 	'machines.osImages': 'query',
 	'machines.localIsos': 'query',
+	'machines.isoDownloads': 'query',
+	'machines.downloadIso': 'mutation',
 	'machines.create': 'mutation',
+	'machines.installConnector': 'mutation',
 	'machines.uninstall': 'mutation',
 	'machines.updateSettings': 'mutation',
 	'machines.pause': 'mutation',
@@ -237,6 +292,13 @@ export const ALLOWED = {
 	'backups.runComputer': 'mutation',
 	'backups.computerSnapshots': 'query',
 	'backups.restoreComputer': 'mutation',
+	'backups.gdrive.status': 'query',
+	'backups.gdrive.authStart': 'mutation',
+	'backups.gdrive.authFinish': 'mutation',
+	'backups.gdrive.configure': 'mutation',
+	'backups.gdrive.test': 'mutation',
+	'backups.gdrive.connectExisting': 'mutation',
+	'backups.gdrive.disconnect': 'mutation',
 	// Move from Unraid (owner only, checked in omarchyd)
 	'unraid.status': 'query',
 	'unraid.connect': 'mutation',
@@ -319,6 +381,8 @@ export const ALLOWED = {
 	'oidc.updateClient': 'mutation',
 	'oidc.rotateSecret': 'mutation',
 	'oidc.deleteClient': 'mutation',
+	'apps.oidcStatus': 'query',
+	'apps.setOidc': 'mutation',
 	// Settings: advanced (omarchyd itself re-checks the password for factory reset)
 	'system.logs': 'query',
 	'system.factoryReset': 'mutation',
@@ -369,10 +433,18 @@ export const ALLOWED = {
 	'clips.remove': 'mutation',
 	'clips.paste': 'mutation',
 	'clips.fleetList': 'query',
+	'toasts.list': 'query',
+	'toasts.add': 'mutation',
+	'toasts.dismiss': 'mutation',
+	'transfers.list': 'query',
+	'transfers.start': 'mutation',
+	'transfers.resume': 'mutation',
+	'transfers.cancel': 'mutation',
+	'transfers.dismiss': 'mutation',
 }
 
 // Long-running mutations: omarchyd answers when the operation finishes.
-export const SLOW = new Set(['hyprland.launch', 'unraid.connect', 'unraid.scan', 'unraid.preflight', 'unraid.resync', 'tailscale.login', 'tailscale.ping', 'backups.configure', 'backups.shares', 'backups.restoreApp', 'backups.connectExisting', 'backups.snapshots', 'backups.computerSnapshots', 'backups.setComputer', 'backups.computerFolders', 'storage.growSystem', 'system.replaceCertificate', 'system.desktopSignIn', 'system.desktopShare', 'omarchy.removeTheme', 'storage.disks', 'storage.createPool', 'storage.addToPool', 'storage.importPool', 'storage.forgetPool', 'files.addShare', 'files.removeShare', 'files.copy', 'files.unarchive', 'files.getThumbnail', 'files.move', 'files.delete', 'files.emptyTrash', 'files.search', 'files.list', 'swarm.files.list', 'swarm.files.recents', 'files.transfer', 'files.fleetRecents', 'apps.install', 'apps.update', 'apps.uninstall', 'apps.start', 'apps.stop', 'apps.restart', 'appStore.registry', 'appStore.app', 'appStore.addRepository', 'appStore.refresh', 'omarchy.plugins', 'omarchy.installPlugin', 'files.updateShare', 'files.setSharePassword', 'apps.logs', 'swarm.action', 'system.update', 'system.logs', 'machines.create', 'machines.uninstall', 'machines.snapshot', 'machines.revertSnapshot', 'machines.deleteSnapshot', 'machines.resizeDisk', 'machines.addDisk', 'machines.restart', 'machines.start', 'machines.hibernate', 'machines.updateCloudInit', 'machines.details', 'machines.node', 'wifi.connect', 'wifi.networks', 'system.setHostname', 'hardware.internalStorage.getDevices', 'hardware.raid.addDevice', 'hardware.raid.addMirror', 'hardware.raid.addAccelerator', 'hardware.raid.replaceDevice', 'hardware.raid.transitionToFailsafeRaidz', 'storage.unmount', 'storage.mount', 'storage.format', 'swarm.storage.disks', 'swarm.storage.unmount', 'swarm.storage.mount', 'swarm.storage.format', 'swarm.storage.pools', 'swarm.storage.importable', 'swarm.storage.createPool', 'swarm.storage.addToPool', 'swarm.storage.importPool', 'swarm.storage.forgetPool', 'swarm.storage.scrub', 'assistant.approve', 'clips.paste', 'clips.addFile', 'clips.fleetList', 'swarm.updateConnector', 'swarm.updateAllConnectors', 'swarm.services.list', 'swarm.services.logs', 'swarm.services.control', 'swarm.files.copyToServer', 'swarm.files.copyFromServer'])
+export const SLOW = new Set(['containers.images', 'containers.setRootPassword', 'containers.installConnector', 'containers.templateFiles', 'containers.importTemplate', 'containers.downloadTemplate', 'machines.downloadIso', 'containers.files', 'containers.copyToServer', 'containers.setResources', 'containers.clone', 'containers.saveTemplate', 'containers.backup', 'containers.restoreBackup', 'containers.stop', 'containers.restart', 'containers.delete', 'containers.snapshot', 'containers.restoreSnapshot', 'hyprland.launch', 'hermes.connect', 'hermes.connectRemote', 'hermes.disconnect', 'hyprland.profileRun', 'unraid.connect', 'unraid.scan', 'unraid.preflight', 'unraid.resync', 'tailscale.login', 'tailscale.ping', 'oidc.setConfig', 'apps.setOidc', 'backups.configure', 'backups.shares', 'backups.restoreApp', 'backups.connectExisting', 'backups.snapshots', 'backups.computerSnapshots', 'backups.setComputer', 'backups.computerFolders', 'backups.gdrive.authFinish', 'backups.gdrive.configure', 'backups.gdrive.test', 'backups.gdrive.connectExisting', 'storage.growSystem', 'system.replaceCertificate', 'system.desktopSignIn', 'system.desktopShare', 'omarchy.removeTheme', 'storage.disks', 'storage.createPool', 'storage.addToPool', 'storage.importPool', 'storage.forgetPool', 'files.addShare', 'files.removeShare', 'files.copy', 'files.unarchive', 'files.getThumbnail', 'files.move', 'files.delete', 'files.emptyTrash', 'files.search', 'files.list', 'swarm.files.list', 'swarm.files.recents', 'files.transfer', 'files.fleetRecents', 'apps.install', 'apps.update', 'apps.uninstall', 'apps.start', 'apps.stop', 'apps.restart', 'appStore.registry', 'appStore.app', 'appStore.addRepository', 'appStore.refresh', 'omarchy.plugins', 'omarchy.installPlugin', 'files.updateShare', 'files.setSharePassword', 'apps.logs', 'swarm.action', 'system.update', 'system.logs', 'machines.create', 'machines.installConnector', 'machines.uninstall', 'machines.snapshot', 'machines.revertSnapshot', 'machines.deleteSnapshot', 'machines.resizeDisk', 'machines.addDisk', 'machines.restart', 'machines.start', 'machines.hibernate', 'machines.updateCloudInit', 'machines.details', 'machines.node', 'wifi.connect', 'wifi.networks', 'system.setHostname', 'hardware.internalStorage.getDevices', 'hardware.raid.addDevice', 'hardware.raid.addMirror', 'hardware.raid.addAccelerator', 'hardware.raid.replaceDevice', 'hardware.raid.transitionToFailsafeRaidz', 'storage.unmount', 'storage.mount', 'storage.format', 'swarm.storage.disks', 'swarm.storage.unmount', 'swarm.storage.mount', 'swarm.storage.format', 'swarm.storage.pools', 'swarm.storage.importable', 'swarm.storage.createPool', 'swarm.storage.addToPool', 'swarm.storage.importPool', 'swarm.storage.forgetPool', 'swarm.storage.scrub', 'assistant.approve', 'clips.paste', 'clips.addFile', 'clips.fleetList', 'swarm.updateConnector', 'swarm.updateAllConnectors', 'swarm.services.list', 'swarm.services.logs', 'swarm.services.control', 'swarm.files.copyToServer', 'swarm.files.copyFromServer'])
 export const timeoutFor = (path) => (SLOW.has(path) ? 30 * 60 * 1000 : 20_000)
 
 // An IPv6 address in a URL needs brackets; req.hostname and URL.hostname may already have them.
@@ -463,7 +535,17 @@ export function normalizeBackendUrl(input) {
 	// A bare IPv6 address (more than one colon, no brackets) needs brackets to be a URL host.
 	if (!scheme && !value.startsWith('[') && !value.includes('/') && (value.match(/:/g) ?? []).length > 1) value = `[${value}]`
 	if (!scheme) value = `http://${value}`
-	const url = new URL(value)
+	let url
+	try {
+		url = new URL(value)
+	} catch {
+		// Node's own text is just "Invalid URL": say what is wrong and what to type instead.
+		const port = /^https?:\/\/[^/?#\s]*?(?:\]|[^:\]]):([^:/?#\]]*)(?:[/?#]|$)/i.exec(value)?.[1]
+		if (port !== undefined && !(/^\d+$/.test(port) && Number(port) >= 1 && Number(port) <= 65535)) {
+			throw new Error('The port in that address isn’t right. Use a number from 1 to 65535, like 192.168.1.50:7780')
+		}
+		throw new Error('That doesn’t look like an address. Try something like 192.168.1.50 or omarchy.local')
+	}
 	if (url.username || url.password) throw new Error('The address must not contain a username or password')
 	return `${url.protocol}//${url.host}`
 }
@@ -724,6 +806,7 @@ export function createApp({store, staticDir, connectorDir = staticDir ? join(sta
 		res.set('cache-control', 'no-store').redirect(308, `https://${host}${req.originalUrl.startsWith('/') && !req.originalUrl.startsWith('//') ? req.originalUrl : '/'}`)
 	})
 
+	const transfers = createQuickTransfer()
 	let client = null
 	const getClient = () => {
 		const {backendUrl} = store.getConfig()
@@ -824,7 +907,14 @@ export function createApp({store, staticDir, connectorDir = staticDir ? join(sta
 
 	// The connector on another computer trading its one-time pairing code for its own key
 	// (omarchyd checks the code; nothing else is reachable without a key).
-	app.post('/connector/enroll', express.json({limit: '64kb'}), async (req, res) => {
+	// A body that is not JSON, or too large, gets the short JSON answer omarchyd gives, not Express's HTML error page.
+	const enrollBodyError = (error, _req, res, next) => {
+		if (res.headersSent) return next(error)
+		const status = Number(error?.status ?? error?.statusCode)
+		if (!(status >= 400 && status < 500)) return next(error)
+		res.status(status).json({error: status === 413 ? 'Too large' : 'Bad request'})
+	}
+	app.post('/connector/enroll', express.json({limit: '64kb'}), enrollBodyError, async (req, res) => {
 		try {
 			const r = await fetchImpl(`${getClient().baseUrl}/connector/enroll`, {method: 'POST', headers: {'content-type': 'application/json'}, body: JSON.stringify(req.body ?? {}), signal: AbortSignal.timeout(15_000)})
 			res.status(r.status).json(await r.json().catch(() => ({})))
@@ -887,7 +977,13 @@ export function createApp({store, staticDir, connectorDir = staticDir ? join(sta
 	const api = express.Router()
 	const json64k = express.json({limit: '64kb'})
 	const jsonClipboard = express.json({limit: '256kb'})
-	api.use((req, res, next) => (req.path === '/rpc/hyprland.clipboardWrite' ? jsonClipboard(req, res, next) : json64k(req, res, next)))
+	// omarchyd takes up to 100,000 bytes for one assistant message, so the proxy must not cut it at 64 KB.
+	const jsonAssistant = express.json({limit: 100_000})
+	api.use((req, res, next) => {
+		if (req.path === '/rpc/hyprland.clipboardWrite') return jsonClipboard(req, res, next)
+		if (req.path === '/assistant/stream') return jsonAssistant(req, res, next)
+		return json64k(req, res, next)
+	})
 	api.use((req, res, next) => {
 		res.set('Cache-Control', 'no-store')
 		req.sid = parseCookies(req.headers.cookie)[COOKIE]
@@ -936,12 +1032,12 @@ export function createApp({store, staticDir, connectorDir = staticDir ? join(sta
 
 	// Express 4 does not turn a rejected async handler into a response, so a failed settings save
 	// has to be caught here or the process exits.
-	const catchSave = (handler) => (req, res) => {
+	const catchSave = (handler, message = 'Couldn’t save that') => (req, res) => {
 		Promise.resolve(handler(req, res)).catch((error) => {
 			console.error('[omarchy-server]', error)
 			if (res.headersSent) return
 			try {
-				res.status(500).json({error: {code: 'INTERNAL', message: 'Couldn’t save that'}})
+				res.status(500).json({error: {code: 'INTERNAL', message}})
 			} catch (sendFailure) {
 				console.error('[omarchy-server]', sendFailure)
 			}
@@ -1125,14 +1221,17 @@ export function createApp({store, staticDir, connectorDir = staticDir ? join(sta
 		const id = req.params.id
 		if (!backend || !/^\d{1,3}$/.test(id)) return res.status(404).end()
 		const tier = req.query.size === 'thumb' ? 'thumbnails' : 'medium'
+		// The .jpg is the desktop's current background (the same picture under id 1 whatever it is today),
+		// so it keeps the type it really has and is never cached as unchanging.
 		for (const [path, type] of [
 			[`/assets/wallpapers/generated-avif/${tier}/${id}.avif`, 'image/avif'],
-			[`/assets/wallpapers/${id}.jpg`, 'image/jpeg'],
+			[`/assets/wallpapers/${id}.jpg`, null],
 		]) {
 			try {
 				const upstream = await fetchImpl(`${backend.baseUrl}${path}`, {signal: AbortSignal.timeout(10_000)})
-				if (!upstream.ok || !(upstream.headers.get('content-type') ?? '').startsWith('image/')) continue
-				res.set({'Content-Type': type, 'Cache-Control': 'public, max-age=604800, immutable'})
+				const upstreamType = upstream.headers.get('content-type') ?? ''
+				if (!upstream.ok || !upstreamType.startsWith('image/')) continue
+				res.set({'Content-Type': type ?? upstreamType, 'Cache-Control': type ? 'public, max-age=604800, immutable' : 'no-cache'})
 				return res.send(Buffer.from(await upstream.arrayBuffer()))
 			} catch {
 				/* try the next format */
@@ -1211,6 +1310,57 @@ export function createApp({store, staticDir, connectorDir = staticDir ? join(sta
 			res.status(502).json({error: {code: 'UNAVAILABLE', message: 'Couldn’t download file from that computer'}})
 		}
 	})
+	// Owner-only file download/upload for this server's containers (proxied to omarchyd, which checks the owner).
+	const CONTAINER_NAME = /^[a-z]([a-z0-9-]{0,61}[a-z0-9])?$/
+	api.get('/containers/files/download', async (req, res) => {
+		const session = requireSession(req, res)
+		if (!session) return
+		const backend = getClient()
+		const name = String(req.query.name ?? '')
+		const path = String(req.query.path ?? '')
+		if (!CONTAINER_NAME.test(name) || !path.startsWith('/')) return res.status(400).json({error: {code: 'BAD_REQUEST', message: 'Missing file parameters'}})
+		try {
+			const r = await fetchImpl(`${backend.baseUrl}/api/containers/files/download?${new URLSearchParams({name, path})}`, {
+				headers: {authorization: `Bearer ${await accessTokenFor(req.sid, session)}`},
+				signal: AbortSignal.timeout(180_000),
+			})
+			const buf = Buffer.from(await r.arrayBuffer())
+			res.status(r.status)
+			for (const h of ['content-type', 'content-disposition', 'cache-control']) {
+				const v = r.headers.get(h)
+				if (v) res.set(h, v)
+			}
+			res.end(buf)
+		} catch {
+			res.status(502).json({error: {code: 'UNAVAILABLE', message: 'Couldn’t download the file from that container'}})
+		}
+	})
+	api.post('/containers/files/upload', async (req, res) => {
+		const session = requireSession(req, res)
+		if (!session) return
+		const backend = getClient()
+		const name = String(req.query.name ?? '')
+		const path = String(req.query.path ?? '')
+		if (!CONTAINER_NAME.test(name) || !path.startsWith('/')) return res.status(400).json({error: {code: 'BAD_REQUEST', message: 'Missing file parameters'}})
+		try {
+			let size = 0
+			const chunks = []
+			for await (const c of req) {
+				size += c.length
+				if (size > 100 * 1024 * 1024) return res.status(413).json({error: {code: 'BAD_REQUEST', message: 'Files larger than 100 MB can’t be uploaded this way'}})
+				chunks.push(c)
+			}
+			const r = await fetchImpl(`${backend.baseUrl}/api/containers/files/upload?${new URLSearchParams({name, path})}`, {
+				method: 'POST',
+				headers: {authorization: `Bearer ${await accessTokenFor(req.sid, session)}`, 'content-type': 'application/octet-stream'},
+				body: Buffer.concat(chunks),
+				signal: AbortSignal.timeout(180_000),
+			})
+			res.status(r.status).json(await r.json().catch(() => ({})))
+		} catch {
+			res.status(502).json({error: {code: 'UNAVAILABLE', message: 'Couldn’t upload the file to that container'}})
+		}
+	})
 	api.post('/swarm/files/upload', async (req, res) => {
 		const session = requireSession(req, res)
 		if (!session) return
@@ -1278,7 +1428,7 @@ export function createApp({store, staticDir, connectorDir = staticDir ? join(sta
 		if (map.size < 5000) return
 		for (const [k, v] of map) if (!v.length || now - v[v.length - 1] > windowMs) map.delete(k)
 	}
-	api.post('/auth/login', async (req, res) => {
+	api.post('/auth/login', catchSave(async (req, res) => {
 		const backend = getClient()
 		if (!backend) return res.status(409).json({error: {code: 'NOT_CONFIGURED', message: 'Connect to your server first'}})
 		const ip = req.ip ?? 'unknown'
@@ -1362,9 +1512,9 @@ export function createApp({store, staticDir, connectorDir = staticDir ? join(sta
 		setCookie(res, sid, SESSION_MAX_AGE_S)
 		shareAppSession(req, res, session)
 		res.json({ok: true, accountId: session.accountId, mode: session.mode})
-	})
+	}, 'Couldn’t sign you in. Try again.'))
 
-	api.post('/auth/logout', async (req, res) => {
+	api.post('/auth/logout', catchSave(async (req, res) => {
 		const session = store.getSession(req.sid)
 		// A website (SSO) session: revoked on myowndatacenter.com too.
 		if (session?.sso?.ref) await ssoCall('logout', {ref: session.sso.ref})
@@ -1382,14 +1532,40 @@ export function createApp({store, staticDir, connectorDir = staticDir ? join(sta
 		setCookie(res, '', 0)
 		res.append('Set-Cookie', 'OMARCHY_APP_SESSION=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0')
 		res.json({ok: true})
-	})
+	}, 'Couldn’t sign you out. Try again.'))
 
 	// ---- Saved appearance (per My Own Data Center account, shared by all its phones) -------
-	const THEME_IDS = ['horizon', 'mocha', 'tokyo', 'gruvbox', 'latte', 'custom', 'omarchy']
+	const THEME_IDS = ['horizon', 'mocha', 'tokyo', 'gruvbox', 'latte', 'linen', 'sky', 'custom', 'omarchy']
+	const DARK_THEME_IDS = ['mocha', 'tokyo', 'gruvbox']
+	const LIGHT_THEME_IDS = ['latte', 'linen', 'sky']
+	const PICTURE_THEME_IDS = ['horizon', 'custom', 'omarchy']
 	const ACCENT_IDS = ['wallpaper', 'blue', 'mauve', 'teal', 'peach', 'green', 'pink']
 	const HSL = /^\d{1,3}(\.\d+)? \d{1,3}(\.\d+)?% \d{1,3}(\.\d+)?%$/
 	const accountKey = (accountId) => hashId(`account:${accountId}`).slice(0, 32)
 	const backgroundFile = (accountId) => join(store.dataDir, 'backgrounds', `${accountKey(accountId)}.jpg`)
+	const TEMP_ID = /^[a-z0-9][a-z0-9:_-]{0,63}$/
+	const STAT_ID = /^[A-Za-z0-9][A-Za-z0-9:._-]{0,79}$/
+	const cleanIdList = (value, pattern) => {
+		if (value == null) return []
+		if (!Array.isArray(value)) return null
+		const out = []
+		for (const id of value) {
+			if (typeof id !== 'string' || !pattern.test(id) || out.includes(id)) return null
+			out.push(id)
+			if (out.length > 40) return null
+		}
+		return out
+	}
+	const cleanPicks = (value, pattern) => {
+		if (value == null || typeof value !== 'object' || Array.isArray(value)) return {ok: false}
+		const on = cleanIdList(value.on, pattern)
+		const off = cleanIdList(value.off, pattern)
+		if (!on || !off) return {ok: false}
+		const hidden = off.filter((id) => !on.includes(id))
+		return {ok: true, value: on.length || hidden.length ? {on, off: hidden} : null}
+	}
+	const cleanTempPicks = (value) => cleanPicks(value, TEMP_ID)
+	const cleanStatPicks = (value) => cleanPicks(value, STAT_ID)
 	const prefsOf = (accountId) => store.getConfig().prefs?.[accountKey(accountId)] ?? null
 	const savePrefs = async (accountId, patch) => {
 		const key = accountKey(accountId)
@@ -1418,7 +1594,7 @@ export function createApp({store, staticDir, connectorDir = staticDir ? join(sta
 	api.post('/prefs', catchSave(async (req, res) => {
 		const session = requireSession(req, res)
 		if (!session) return
-		const {theme, accent, customBrandHsl, omarchyBackground, solidColor, assistantLook} = req.body ?? {}
+		const {theme, darkTheme, lightTheme, pictureTheme, accent, customBrandHsl, omarchyBackground, solidColor, assistantLook, statView, machinesCompact, statPicks, tempPicks, tempUnit, dismissedTutorials} = req.body ?? {}
 		const patch = {}
 		// How the assistant looks for this account (character, name, motion). Appearance only: it never
 		// reaches the assistant itself. Checked field by field; anything else is dropped.
@@ -1439,6 +1615,18 @@ export function createApp({store, staticDir, connectorDir = staticDir ? join(sta
 			if (!THEME_IDS.includes(theme)) return res.status(400).json({error: {code: 'BAD_REQUEST', message: 'Unknown theme'}})
 			patch.theme = theme
 		}
+		if (darkTheme !== undefined) {
+			if (!DARK_THEME_IDS.includes(darkTheme)) return res.status(400).json({error: {code: 'BAD_REQUEST', message: 'Unknown dark theme'}})
+			patch.darkTheme = darkTheme
+		}
+		if (lightTheme !== undefined) {
+			if (!LIGHT_THEME_IDS.includes(lightTheme)) return res.status(400).json({error: {code: 'BAD_REQUEST', message: 'Unknown light theme'}})
+			patch.lightTheme = lightTheme
+		}
+		if (pictureTheme !== undefined) {
+			if (!PICTURE_THEME_IDS.includes(pictureTheme)) return res.status(400).json({error: {code: 'BAD_REQUEST', message: 'Unknown picture theme'}})
+			patch.pictureTheme = pictureTheme
+		}
 		if (accent !== undefined) {
 			if (!ACCENT_IDS.includes(accent)) return res.status(400).json({error: {code: 'BAD_REQUEST', message: 'Unknown accent'}})
 			patch.accent = accent
@@ -1448,6 +1636,49 @@ export function createApp({store, staticDir, connectorDir = staticDir ? join(sta
 				return res.status(400).json({error: {code: 'BAD_REQUEST', message: 'Bad colour'}})
 			}
 			patch.customBrandHsl = customBrandHsl
+		}
+		// How this account draws machine stats. Home's aggregate gauges do not read it.
+		if (statView !== undefined) {
+			if (statView !== null && statView !== 'line' && statView !== 'blocks' && statView !== 'gauges') return res.status(400).json({error: {code: 'BAD_REQUEST', message: 'Unknown stat view'}})
+			patch.statView = statView
+		}
+		// Desktop Machines compact list for this account. Absent means off.
+		if (machinesCompact !== undefined) {
+			if (typeof machinesCompact !== 'boolean') return res.status(400).json({error: {code: 'BAD_REQUEST', message: 'Bad compact setting'}})
+			patch.machinesCompact = machinesCompact
+		}
+		// Notes this account has closed. One id is one note, on every device.
+		if (dismissedTutorials !== undefined) {
+			const allowed = ['machines-filters']
+			if (!Array.isArray(dismissedTutorials) || dismissedTutorials.some((id) => typeof id !== 'string' || !allowed.includes(id))) {
+				return res.status(400).json({error: {code: 'BAD_REQUEST', message: 'Unknown tutorial'}})
+			}
+			patch.dismissedTutorials = [...new Set(dismissedTutorials)]
+		}
+		// Celsius, or Fahrenheit. Null and "c" both mean Celsius.
+		if (tempUnit !== undefined) {
+			if (tempUnit === null || tempUnit === 'c') patch.tempUnit = null
+			else if (tempUnit === 'f') patch.tempUnit = 'f'
+			else return res.status(400).json({error: {code: 'BAD_REQUEST', message: 'Bad temperature unit'}})
+		}
+		// Which readings this account shows. Temperatures stay in tempPicks. Null clears the choice.
+		// A reading that was never chosen stays shown. Another account is unchanged.
+		if (statPicks !== undefined) {
+			if (statPicks === null) patch.statPicks = null
+			else {
+				const picks = cleanStatPicks(statPicks)
+				if (!picks.ok) return res.status(400).json({error: {code: 'BAD_REQUEST', message: 'Bad stat choice'}})
+				patch.statPicks = picks.value
+			}
+		}
+		// Which temperature sensors this account shows. Null clears the choice.
+		if (tempPicks !== undefined) {
+			if (tempPicks === null) patch.tempPicks = null
+			else {
+				const picks = cleanTempPicks(tempPicks)
+				if (!picks.ok) return res.status(400).json({error: {code: 'BAD_REQUEST', message: 'Bad temperature choice'}})
+				patch.tempPicks = picks.value
+			}
 		}
 		res.json({prefs: await savePrefs(session.accountId, patch)})
 	}))
@@ -1531,7 +1762,7 @@ export function createApp({store, staticDir, connectorDir = staticDir ? join(sta
 			prefs = await savePrefs(session.accountId, {
 				backgroundVersion: null,
 				customBrandHsl: null,
-				...(current.theme === 'custom' ? {theme: 'horizon'} : {}),
+				...(current.theme === 'custom' ? {theme: 'horizon', pictureTheme: 'horizon'} : {}),
 			})
 		} catch (error) {
 			if (moved) await rename(aside, live).catch((restore) => console.error('[omarchy-server]', restore))
@@ -1683,17 +1914,22 @@ export function createApp({store, staticDir, connectorDir = staticDir ? join(sta
 		}
 	}
 	const PASS_HEADERS = ['content-type', 'content-length', 'content-disposition', 'content-range', 'accept-ranges', 'last-modified', 'etag']
-	const fileGet = (kind) => async (req, res) => {
+	// scope(req): {sid, paths} for a quick-transfer link (acting as the person who made it); by
+	// default the signed-in browser and the paths it asked for.
+	const fileGet = (kind, scope = null) => async (req, res) => {
 		try {
-			if (!store.getSession(req.sid)) return res.status(401).json({error: {code: 'UNAUTHORIZED', message: 'Signed out'}})
-			const auth = await browserAuth(req.sid)
-			const token = await fileUrlToken(req.sid)
+			const scoped = scope ? scope(req) : null
+			if (scope && !scoped) return res.status(404).json({error: {code: 'NOT_FOUND', message: 'This link has ended'}})
+			const sid = scoped ? scoped.sid : req.sid
+			if (!store.getSession(sid)) return res.status(401).json({error: {code: 'UNAUTHORIZED', message: 'Signed out'}})
+			const auth = await browserAuth(sid)
+			const token = await fileUrlToken(sid)
 			const url = new URL(`${getClient().baseUrl}/api/files/${kind}`)
 			if (kind === 'thumbnail') {
 				if (!/^[\w.-]{1,200}$/.test(req.params.name)) return res.status(404).end()
 				url.pathname += `/${req.params.name}`
 			}
-			for (const p of [req.query.path].flat()) if (typeof p === 'string') url.searchParams.append('path', p)
+			for (const p of scoped ? scoped.paths : [req.query.path].flat()) if (typeof p === 'string') url.searchParams.append('path', p)
 			url.searchParams.set('token', token)
 			const upstream = await fetchImpl(url, {
 				headers: {
@@ -1705,9 +1941,9 @@ export function createApp({store, staticDir, connectorDir = staticDir ? join(sta
 				signal: AbortSignal.timeout(6 * 60 * 60 * 1000),
 			})
 			if (upstream.status === 401) {
-				forgetUrlToken(req.sid)
+				forgetUrlToken(sid)
 				await upstream.body?.cancel?.().catch(() => {})
-				await store.updateSession(req.sid, {console: null})
+				await store.updateSession(sid, {console: null})
 				return res.status(409).json({error: {code: 'CONSOLE_SESSION_REQUIRED', message: 'Sign out and back in to use this'}})
 			}
 			res.status(upstream.status)
@@ -1740,13 +1976,18 @@ export function createApp({store, staticDir, connectorDir = staticDir ? join(sta
 	api.get('/files/thumbnail/:name', fileGet('thumbnail'))
 
 	// Whole files, and big ones in pieces (upload-chunk: see omarchyd/files.mjs uploadChunk).
-	const relayUpload = (kind) => async (req, res) => {
+	const relayUpload = (kind, scope = null) => async (req, res) => {
 		try {
-			if (!store.getSession(req.sid)) return res.status(401).json({error: {code: 'UNAUTHORIZED', message: 'Signed out'}})
-			const path = req.query.path
+			const scoped = scope ? scope(req) : null
+			if (scope && !scoped) return res.status(404).json({error: {code: 'NOT_FOUND', message: 'This link has ended'}})
+			if (scoped?.error) return res.status(400).json({error: {code: 'BAD_REQUEST', message: scoped.error}})
+			const sid = scoped ? scoped.sid : req.sid
+			if (!store.getSession(sid)) return res.status(401).json({error: {code: 'UNAUTHORIZED', message: 'Signed out'}})
+			const path = scoped ? scoped.path : req.query.path
 			if (typeof path !== 'string' || !path.startsWith('/')) return res.status(400).json({error: {code: 'BAD_REQUEST', message: 'path is required'}})
-			const collision = ['error', 'keep-both', 'replace'].includes(req.query.collision) ? req.query.collision : 'keep-both'
-			const auth = await browserAuth(req.sid)
+			// A quick-transfer upload never replaces anything: a name already there gets a new one.
+			const collision = scoped ? 'keep-both' : ['error', 'keep-both', 'replace'].includes(req.query.collision) ? req.query.collision : 'keep-both'
+			const auth = await browserAuth(sid)
 			const url = new URL(`${getClient().baseUrl}/api/files/${kind}`)
 			url.searchParams.set('path', path)
 			url.searchParams.set('collision', collision)
@@ -1779,7 +2020,7 @@ export function createApp({store, staticDir, connectorDir = staticDir ? join(sta
 				body = {}
 			}
 			if (upstream.status === 401) {
-				await store.updateSession(req.sid, {console: null})
+				await store.updateSession(sid, {console: null})
 				return res.status(409).json({error: {code: 'CONSOLE_SESSION_REQUIRED', message: 'Sign out and back in to use this'}})
 			}
 			if (!upstream.ok) {
@@ -1795,6 +2036,30 @@ export function createApp({store, staticDir, connectorDir = staticDir ? join(sta
 		}
 	}
 	api.post('/files/upload', relayUpload('upload'))
+
+	// Quick transfer (Files › right-click › Share with a QR code / Upload from a phone).
+	api.post('/transfer', catchSave(async (req, res) => {
+		const session = requireSession(req, res)
+		if (!session) return
+		const {kind, path, name, size, theme, background} = req.body ?? {}
+		if ((kind !== 'download' && kind !== 'upload') || typeof path !== 'string' || !path.startsWith('/') || path.length > 4096 || path.includes('\0'))
+			return res.status(400).json({error: {code: 'BAD_REQUEST', message: 'Choose a file or a folder'}})
+		// This server's own files only (Home and its drives), never the Trash or another computer.
+		if (!/^\/(Home|External)(\/|$)/.test(path) || /(^|\/)\.\.?(\/|$)/.test(path)) return res.status(400).json({error: {code: 'BAD_REQUEST', message: 'Only files on this server can be shared this way'}})
+		if (kind === 'upload') {
+			// The folder must exist and take new files, as this person.
+			const listing = await authedCall(req, 'files.list', 'query', {path, limit: 1}).catch(() => null)
+			if (!listing || listing.type !== 'directory' || !listing.operations?.includes('writable'))
+				return res.status(400).json({error: {code: 'BAD_REQUEST', message: 'Files can’t be added to this folder'}})
+		}
+		const shown = typeof name === 'string' && name.trim() ? name.trim().slice(0, 240) : path.split('/').pop() || 'File'
+		const t = transfers.create({kind, path, name: shown, size: kind === 'download' ? Number(size) : null, sid: req.sid, accountId: session.accountId, theme, bg: background})
+		res.json({path: `/t/${t.token}`, token: t.token, expiresAt: t.expiresAt})
+	}))
+	api.delete('/transfer/:token', (req, res) => {
+		if (!requireSession(req, res)) return
+		res.json({ok: transfers.revoke(req.params.token, req.sid)})
+	})
 	api.post('/files/upload-chunk', relayUpload('upload-chunk'))
 
 	// Clip book bytes. Text and screenshots are larger than the JSON body limit, so they travel as
@@ -2151,6 +2416,8 @@ export function createApp({store, staticDir, connectorDir = staticDir ? join(sta
 			const sid = relaySid(req, app.id)
 			if (!sid) return socket.destroy()
 			const up = http.request(upstream(req, sid))
+			// A browser that goes away while the app is still answering must not raise an unhandled 'error'.
+			socket.on('error', () => up.destroy())
 			up.on('upgrade', (ur, us, uhead) => {
 				const lines = [`HTTP/1.1 ${ur.statusCode} ${ur.statusMessage}`]
 				for (let i = 0; i < ur.rawHeaders.length; i += 2) lines.push(`${ur.rawHeaders[i]}: ${ur.rawHeaders[i + 1]}`)
@@ -2443,8 +2710,12 @@ export function createApp({store, staticDir, connectorDir = staticDir ? join(sta
 		const wss = new WebSocketServer({noServer: true, maxPayload: 16 * 1024 * 1024, perMessageDeflate: false})
 		consoles.add(wss)
 		server.on('upgrade', async (req, socket, head) => {
+			// A browser that resets the connection while we are still checking its session or asking omarchyd
+			// would otherwise raise an unhandled 'error' on its socket and end this process.
+			socket.on('error', () => {})
 			// Upgrades skip Express: drop untrusted forwarding headers here too.
 			stripForwarding(req)
+			// App relays (by host) are reached only after the remote gate below.
 			const refuse = (status) => {
 				if (socket.destroyed) return
 				socket.write(`HTTP/1.1 ${status}\r\nConnection: close\r\n\r\n`)
@@ -2562,11 +2833,16 @@ export function createApp({store, staticDir, connectorDir = staticDir ? join(sta
 					const rows = Number(url.searchParams.get('rows'))
 					if (appId && !/^[a-z0-9][a-z0-9_-]{0,63}$/.test(appId)) return refuse('400 Bad Request')
 					if (agentId && !/^[0-9a-f]{12}$/.test(agentId)) return refuse('400 Bad Request')
+					// One of this server's LXC containers: its console or a shell in it. Without this the
+					// request reached omarchyd as a plain terminal and opened the server's own shell.
+					const containerId = url.searchParams.get('containerId') ?? ''
+					const containerMode = url.searchParams.get('containerMode') === 'shell' ? 'shell' : 'console'
+					if (containerId && !/^[a-z]([a-z0-9-]{0,61}[a-z0-9])?$/.test(containerId)) return refuse('400 Bad Request')
 					if (!Number.isInteger(cols) || !Number.isInteger(rows) || cols < 10 || cols > 500 || rows < 4 || rows > 300) return refuse('400 Bad Request')
 					target.pathname = '/terminal'
 					const session = url.searchParams.get('session') ?? ''
 					if (session && !/^[A-Za-z0-9._-]{1,40}$/.test(session)) return refuse('400 Bad Request')
-					params = {...(appId ? {appId} : {}), ...(agentId ? {agentId} : {}), ...(session ? {session} : {}), cols: String(cols), rows: String(rows), ...(url.searchParams.get('fresh') === '1' ? {fresh: '1'} : {})}
+					params = {...(appId ? {appId} : {}), ...(agentId ? {agentId} : {}), ...(containerId ? {containerId, containerMode} : {}), ...(session ? {session} : {}), cols: String(cols), rows: String(rows), ...(url.searchParams.get('fresh') === '1' ? {fresh: '1'} : {})}
 				}
 				const needsOwner = route === 'terminal' || route === 'hyprland' || params.machineId === 'desktop' || /^agent-[0-9a-f]{12}$/.test(params.machineId ?? '')
 				if (needsOwner) {
@@ -2622,8 +2898,11 @@ export function createApp({store, staticDir, connectorDir = staticDir ? join(sta
 						}, 30_000)
 						keepOpen.unref?.()
 						client.once('close', () => clearInterval(keepOpen))
+						// Remote screens: slow the source down while this browser catches up (see backpressure.mjs).
+						const behind = viewerBackpressure(client, upstream, () => closeBoth(1011, 'The viewer fell behind'))
 						const closeBoth = (code, reason) => {
 							clearInterval(keepOpen)
+							behind.stop()
 							unregisterActive()
 							if (proxyKeyTimer) {
 								clearTimeout(proxyKeyTimer)
@@ -2713,7 +2992,14 @@ export function createApp({store, staticDir, connectorDir = staticDir ? join(sta
 								client.send(data, {binary: isBinary})
 								return
 							}
-							// Same 1 MiB cap as the connector viewer. The connector passthrough above does not use it.
+							if (route === 'machines') {
+								// A remote screen's big burst (the whole picture after signing in) waits for the browser
+								// instead of cutting it off, which made it reconnect and get cut off again in a loop.
+								client.send(data, {binary: isBinary})
+								behind.check()
+								return
+							}
+							// Shells: same 1 MiB cap as before (the terminal replays what it missed on reconnect).
 							if (client.bufferedAmount > 1024 * 1024) {
 								closeBoth(1011, 'The viewer fell behind')
 								return
@@ -3010,6 +3296,46 @@ export function createApp({store, staticDir, connectorDir = staticDir ? join(sta
 		}
 	})
 
+	api.get('/backups/gdrive/callback', async (req, res) => {
+		res.set('Cache-Control', 'no-store')
+		const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[c]))
+		const page = (title, body, {ok = false, refreshUrl = '', linkHref = '', linkLabel = ''} = {}) =>
+			res
+				.status(ok || refreshUrl ? 200 : 400)
+				.type('text/html; charset=utf-8')
+				.send(
+					`<!doctype html><meta charset="utf-8">${refreshUrl ? `<meta http-equiv="refresh" content="0;url=${esc(refreshUrl)}">` : ''}<title>${esc(title)}</title><body style="font:15px system-ui;background:#0f1117;color:#eef2ff;display:grid;place-items:center;min-height:100vh;margin:0;padding:24px"><div style="max-width:460px;text-align:center"><h2>${esc(title)}</h2><p style="opacity:.82;line-height:1.45">${esc(body)}</p>${linkHref ? `<p style="margin-top:18px"><a href="${esc(linkHref)}" style="display:inline-block;padding:10px 18px;border-radius:10px;background:#38bdf8;color:#0b1120;font-weight:600;text-decoration:none">${esc(linkLabel || 'Continue')}</a></p>` : ok ? '<p><a href="/" style="color:#7dd3fc">Return to My Own Data Center</a></p>' : ''}</div></body>`,
+				)
+		if (req.query.error) return page('Google Drive sign-in cancelled', String(req.query.error))
+		const code = String(req.query.code ?? '').trim()
+		const state = String(req.query.state ?? '').trim()
+		if (!code || !state) return page('Missing authorization code', 'Google didn’t return a code. Try connecting Google Drive again from the Backups screen.')
+		// The My Own Data Center session cookie is SameSite=Strict, so browsers withhold it on the initial
+		// cross-site redirect from accounts.google.com. A same-origin hop re-attaches the Strict cookie
+		// without relaxing SameSite protection.
+		if (!store.getSession(req.sid)) {
+			const sameOriginUrl = `/api/backups/gdrive/callback?code=${encodeURIComponent(code)}&state=${encodeURIComponent(state)}&r=1`
+			if (req.query.r !== '1') {
+				return page('Completing Google Drive sign-in…', 'Finishing secure handoff to My Own Data Center. Click below if this page doesn’t continue automatically.', {
+					refreshUrl: sameOriginUrl,
+					linkHref: sameOriginUrl,
+					linkLabel: 'Complete Google Drive sign-in',
+				})
+			}
+			return page(
+				'Sign in required',
+				'Your browser didn’t attach a My Own Data Center session cookie. Copy this tab’s full URL from the address bar and paste it into the “Paste callback URL” box on the Backups screen.',
+				{linkHref: '/', linkLabel: 'Open My Own Data Center'},
+			)
+		}
+		try {
+			await authedCall(req, 'backups.gdrive.authFinish', 'mutation', {code, state})
+			return page('Google Drive connected', 'Your Google Drive backup account is linked. You can close this tab and finish setup on the Backups screen.', {ok: true})
+		} catch (e) {
+			return page('Couldn’t connect Google Drive', e?.message || 'Sign-in failed')
+		}
+	})
+
 	api.get('/health', (req, res) => res.json({ok: true, version: VERSION}))
 	api.use((req, res) => res.status(404).json({error: {code: 'NOT_FOUND', message: 'Not found'}}))
 	// Errors the routes above don't answer themselves (a malformed JSON body, a failed save) get
@@ -3017,9 +3343,83 @@ export function createApp({store, staticDir, connectorDir = staticDir ? join(sta
 	api.use((error, req, res, next) => {
 		if (res.headersSent) return next(error)
 		const status = Number(error?.status ?? error?.statusCode)
-		if (status >= 400 && status < 500) return res.status(status).json({error: {code: 'BAD_REQUEST', message: error.type === 'entity.parse.failed' ? 'Malformed JSON' : error.type === 'entity.too.large' ? 'Request too large' : 'Bad request'}})
+		if (status >= 400 && status < 500) return res.status(status).json({error: {code: 'BAD_REQUEST', message: error.type === 'entity.parse.failed' ? 'Malformed JSON' : error.type === 'entity.too.large' ? (req.path === '/assistant/stream' ? 'That message is too long (the limit is about 100 KB)' : 'Request too large') : 'Bad request'}})
 		console.error('[omarchy-server] api', error?.message ?? error)
 		res.status(500).json({error: {code: 'INTERNAL_SERVER_ERROR', message: 'Something went wrong on the server'}})
+	})
+	// Quick transfer portal: no sign-in; the link is the permission (see quick-transfer.mjs).
+	const transferOf = (req) => transfers.get(req.params.token, {sessionAlive: (sid) => !!store.getSession(sid)})
+	const transferHeaders = (res) => res.set({'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer', 'X-Robots-Tag': 'noindex', 'X-Content-Type-Options': 'nosniff'})
+	app.get('/transfer-portal.js', (_req, res) => res.set({'Content-Type': 'text/javascript; charset=utf-8', 'Cache-Control': 'no-cache'}).send(PORTAL_JS))
+	app.get('/t/:token', (req, res) => {
+		transferHeaders(res)
+		res.status(transferOf(req) ? 200 : 404).type('html').send(portalHtml())
+	})
+	app.get('/t/:token/info', (req, res) => {
+		transferHeaders(res)
+		const s = transferOf(req)
+		if (!s) return res.status(404).json({error: {code: 'NOT_FOUND', message: 'This link has ended'}})
+		res.json({kind: s.kind, name: s.name, size: s.size, remainingMs: Math.max(0, s.expiresAt - Date.now()), theme: s.theme, background: !!s.bg && s.bg.kind !== 'color'})
+	})
+	const transferFile = fileGet('download', (req) => {
+		const s = transferOf(req)
+		return s && s.kind === 'download' ? {sid: s.sid, paths: [s.path]} : null
+	})
+	app.get('/t/:token/file', (req, res) => (transferHeaders(res), transferFile(req, res)))
+	app.get('/t/:token/background', async (req, res) => {
+		transferHeaders(res)
+		const s = transferOf(req)
+		const backend = getClient()
+		if (!s?.bg || !backend) return res.status(404).end()
+		try {
+			if (s.bg.kind === 'photo') return res.type('image/jpeg').send(await readFile(backgroundFile(s.accountId)))
+			const tries = s.bg.kind === 'wallpaper' ? [`/assets/wallpapers/generated-avif/medium/${s.bg.id}.avif`, `/assets/wallpapers/${s.bg.id}.jpg`] : [`/omarchy/background/${s.bg.id}`]
+			for (const path of tries) {
+				const r = await fetchImpl(`${backend.baseUrl}${path}`, {signal: AbortSignal.timeout(15_000)}).catch(() => null)
+				const type = r?.headers.get('content-type') ?? ''
+				if (r?.ok && type.startsWith('image/')) return res.type(type).send(Buffer.from(await r.arrayBuffer()))
+			}
+		} catch {
+			/* no background */
+		}
+		res.status(404).end()
+	})
+	const transferUpload = relayUpload('upload', (req) => {
+		const s = transferOf(req)
+		if (!s || s.kind !== 'upload') return null
+		const name = cleanUploadName(req.query.name)
+		if (!name) return {sid: s.sid, error: 'That file name can’t be used'}
+		return {sid: s.sid, path: `${s.path.replace(/\/+$/, '')}/${name}`}
+	})
+	app.post('/t/:token/upload', (req, res) => {
+		transferHeaders(res)
+		// Only the portal's own script sends this header; another site would need a CORS preflight, which is refused.
+		if (req.headers['x-modc-transfer'] !== '1') return res.status(403).json({error: {code: 'FORBIDDEN', message: 'Refused'}})
+		transferUpload(req, res)
+	})
+	// This server's tools for a Hermes agent on another computer or in the cloud (Settings › Assistant ›
+	// Hermes). omarchyd checks the token Hermes sends; without the right one nothing is answered.
+	app.all('/mcp', async (req, res) => {
+		const backend = getClient()
+		if (!backend) return res.status(503).json({error: 'not set up'})
+		if (req.method !== 'POST') return res.status(405).set('allow', 'POST').json({error: 'POST only'})
+		try {
+			const {Readable} = await import('node:stream')
+			const up = await fetchImpl(`${backend.baseUrl}/mcp`, {
+				method: 'POST',
+				headers: {
+					'content-type': 'application/json',
+					...(typeof req.headers.authorization === 'string' ? {authorization: req.headers.authorization.slice(0, 600)} : {}),
+				},
+				body: Readable.toWeb(req),
+				duplex: 'half',
+				signal: AbortSignal.timeout(5 * 60_000),
+			})
+			res.status(up.status).set({'content-type': up.headers.get('content-type') ?? 'application/json', 'cache-control': 'no-store'})
+			res.send(Buffer.from(await up.arrayBuffer()))
+		} catch {
+			res.status(502).json({error: 'unavailable'})
+		}
 	})
 	app.use('/api', api)
 
@@ -3033,5 +3433,14 @@ export function createApp({store, staticDir, connectorDir = staticDir ? join(sta
 			res.set('Cache-Control', 'no-cache').sendFile(join(staticDir, 'index.html'))
 		})
 	}
+	// Anything the routes above don't answer (a path that is not valid percent-encoding, say) would get
+	// Express's HTML error page with a stack trace and this server's file paths, even from someone not signed in.
+	app.use((error, req, res, next) => {
+		if (res.headersSent) return next(error)
+		const status = Number(error?.status ?? error?.statusCode)
+		if (status >= 400 && status < 500) return res.status(status).type('text/plain').send('Bad request')
+		console.error('[omarchy-server]', error?.message ?? error)
+		res.status(500).type('text/plain').send('Something went wrong')
+	})
 	return app
 }

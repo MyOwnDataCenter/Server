@@ -3,7 +3,7 @@
 // name, so the second rename failed (ENOENT) and that change was lost.
 import {randomBytes} from 'node:crypto'
 import {constants} from 'node:fs'
-import {chmod, copyFile, readFile, rename, rm, writeFile} from 'node:fs/promises'
+import {chmod, copyFile, open, readFile, rename, rm, writeFile} from 'node:fs/promises'
 import {basename} from 'node:path'
 
 const queues = new Map()
@@ -87,7 +87,16 @@ export function writeAtomic(file, content, {mode = 0o600} = {}) {
 		if (data == null) return
 		const tmp = `${file}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`
 		try {
+			// Flushed before the rename: after a power cut the name must hold the old or the new
+			// contents, never a file the disk had not yet written.
+			// (fsync acts on the file, so a second handle flushes what writeFile wrote.)
 			await writeFile(tmp, data, {mode})
+			const handle = await open(tmp, 'r')
+			try {
+				await handle.sync()
+			} finally {
+				await handle.close()
+			}
 			await rename(tmp, file)
 		} catch (error) {
 			await rm(tmp, {force: true}).catch(() => {})

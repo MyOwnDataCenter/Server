@@ -26,6 +26,7 @@ export type SwarmMetrics = {
 	cpu?: number | null
 	cores?: number | null
 	mem?: {total: number; used: number} | null
+	swap?: {total: number; used: number} | null
 	disks?: SwarmDisk[]
 	gpus?: SwarmGpu[]
 	batteries?: SwarmBattery[]
@@ -139,6 +140,7 @@ export function swarmGaugeItems(m: SwarmMetrics | null | undefined) {
 	if (!m || (m.cpu == null && !m.mem?.total && !(m.disks ?? []).length && !(m.gpus ?? []).length && !(m.batteries ?? []).length)) return []
 	const disk = rootDisk(m.disks)
 	const mem = m.mem
+	const swap = m.swap && m.swap.total > 0 ? m.swap : null
 	return [
 		{
 			k: 'CPU',
@@ -154,6 +156,17 @@ export function swarmGaugeItems(m: SwarmMetrics | null | undefined) {
 			sub: mem ? `${bytes(mem.used, 1, 1024)} of ${bytes(mem.total, 0, 1024)}` : '–',
 			ready: !!mem?.total,
 		},
+		...(swap
+			? [
+					{
+						k: 'Swap',
+						icon: 'swap' as const,
+						p: pct(swap.used ?? 0, swap.total),
+						sub: `${bytes(swap.used ?? 0, 1, 1024)} of ${bytes(swap.total, 0, 1024)}`,
+						ready: true,
+					},
+				]
+			: []),
 		...(disk
 			? [
 					{

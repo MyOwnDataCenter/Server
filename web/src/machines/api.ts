@@ -66,7 +66,7 @@ export type Backup = {id: string; name: string; vmid: number; sourceId: string; 
 
 export const useMachineDetails = (id: string | null) =>
 	useQuery({queryKey: ['machines.details', id], queryFn: () => query<MachineDetails>('machines.details', {id}), enabled: !!id, refetchInterval: 5000})
-export const useNode = () => useQuery({queryKey: ['machines.node'], queryFn: () => query<NodeInfo>('machines.node'), refetchInterval: 15_000, staleTime: 10_000})
+export const useNode = (id?: string) => useQuery({queryKey: ['machines.node', id ?? 'server'], queryFn: () => query<NodeInfo>('machines.node', id ? {id} : undefined), refetchInterval: 15_000, staleTime: 10_000})
 export const useStats = (id: string | null, enabled = true) =>
 	useQuery({
 		queryKey: statsQueryKey(id ?? ''),
@@ -118,6 +118,7 @@ export const TASK_LABEL: Record<string, string> = {
 	backup: 'Backup',
 	clone: 'Clone',
 	restore: 'Restore',
+	connector: 'Install connector',
 }
 export const CPU_LABEL: Record<string, string> = {host: 'host (fastest; this server’s own CPU)', 'host-model': 'host-model (migratable copy of this CPU)', max: 'max (every feature QEMU can offer)', qemu64: 'qemu64 (most compatible)'}
 export const VIDEO_LABEL: Record<string, string> = {vga: 'Standard VGA', bochs: 'Bochs', virtio: 'VirtIO-GPU', qxl: 'SPICE (qxl)', cirrus: 'Cirrus', none: 'None'}

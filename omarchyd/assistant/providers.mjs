@@ -1,6 +1,6 @@
 import {randomBytes} from 'node:crypto'
 
-import {anthropicHeaders} from './anthropic.mjs'
+import {anthropicHeaders, plainBody} from './anthropic.mjs'
 
 const completeArgs = (s) => {
 	if (!s) return false
@@ -163,15 +163,18 @@ const errorMessage = (raw, status) => {
 		const m = json.error?.message || json.message
 		if (m) return String(m)
 	} catch {}
-	return (raw && String(raw).trim()) || `HTTP ${status}`
+	return plainBody(raw, status)
 }
 
 function parseEvent(event, pending) {
-	const data = event.split('\n')
+	let data = event.split('\n')
 		.filter((l) => l.startsWith('data:'))
 		.map((l) => l.slice(5).replace(/^ /, ''))
 		.join('\n')
-	const out = {content: '', finishReason: null}
+	// A server that ignored stream:true answers with one plain JSON completion instead of events.
+	if (!data && event.trimStart().startsWith('{')) data = event.trim()
+	const out = {content: '', finishReason: null, done: false, error: null}
+	if (data === '[DONE]') out.done = true
 	if (!data || data === '[DONE]') return out
 	let json
 	try {
@@ -179,6 +182,8 @@ function parseEvent(event, pending) {
 	} catch {
 		return out
 	}
+	// Some servers report a failure inside a 200 stream.
+	if (json.error && typeof json.error === 'object' && !json.choices) out.error = String(json.error.message || 'The assistant did not answer')
 	const choice = json.choices?.[0] ?? {}
 	const delta = choice.delta ?? {}
 	if (typeof choice.finish_reason === 'string' && choice.finish_reason) out.finishReason = choice.finish_reason
@@ -233,9 +238,13 @@ export async function* streamChat({baseUrl, apiKey, model, messages, tools, tool
 	let buf = ''
 	let contentBuf = ''
 	let finishReason = null
+	let ended = false
+	let streamError = null
 	const pump = function* (event, final) {
 		const parsed = parseEvent(event, pending)
 		if (parsed.finishReason) finishReason = parsed.finishReason
+		if (parsed.done || parsed.finishReason) ended = true
+		if (parsed.error) streamError = parsed.error
 		if (parsed.content) contentBuf += parsed.content
 		const next = takeXmlTools(contentBuf, final, schemas)
 		contentBuf = next.rest
@@ -259,6 +268,15 @@ export async function* streamChat({baseUrl, apiKey, model, messages, tools, tool
 	if (buf.trim()) yield* pump(buf.replace(/\r\n/g, '\n'), false)
 	yield* pump('', true)
 	if (signal?.aborted) return
+	if (streamError) {
+		yield {type: 'error', message: streamError}
+		return
+	}
+	// A stream that closed before [DONE] or a finish reason was interrupted: not a finished answer.
+	if (!ended) {
+		yield {type: 'error', message: 'The answer was cut off; try again'}
+		return
+	}
 	if (finishReason === 'length' || xmlTools.some((t) => t.type === 'error')) {
 		yield {type: 'error', message: 'The answer was cut off; try again'}
 		return
@@ -377,7 +395,9 @@ export async function* streamResponses({baseUrl = 'https://api.openai.com/v1', a
 	let buf = ''
 	if (res.body) {
 		for await (const chunk of res.body) {
-			buf += (typeof chunk === 'string' ? chunk : decoder.decode(chunk, {stream: true})).replace(/\r\n/g, '\n')
+			// A chunk can end between the \r and the \n, so the whole buffer is normalized, not just the new piece.
+			buf += typeof chunk === 'string' ? chunk : decoder.decode(chunk, {stream: true})
+			buf = buf.replace(/\r\n/g, '\n')
 			let idx
 			while ((idx = buf.indexOf('\n\n')) >= 0) {
 				const event = buf.slice(0, idx)

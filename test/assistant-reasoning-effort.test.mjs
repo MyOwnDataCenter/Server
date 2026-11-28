@@ -46,7 +46,6 @@ test('a key keeps an effort; only its owner can change it, and unknown values ar
 		assert.equal((await keys.update(OWNER, {id: k.id, effort: 'high'})).effort, 'high')
 		assert.equal((await keys.update(OWNER, {id: k.id, effort: 'ludicrous'})).effort, 'high')
 		assert.equal((await keys.update(OWNER, {id: k.id, effort: ''})).effort, '')
-		await keys.update(OWNER, {id: k.id, sharedWith: ['sam']})
 		await assert.rejects(() => keys.update({userId: 'sam', role: 'member'}, {id: k.id, effort: 'low'}), /Only the person who added/)
 	} finally {
 		await rm(dataDir, {recursive: true, force: true})

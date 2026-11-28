@@ -596,6 +596,23 @@ class CpuPercent(unittest.TestCase):
         finally:
             agent.read = orig
 
+    def test_a_falling_iowait_counter_cannot_push_it_past_100(self):
+        agent._cpu_last = None
+        lines = iter(["cpu  1000 0 500 8000 200 0 0 0 0 0\n", "cpu  1700 0 600 8000 170 0 0 0 0 0\n"])
+        orig = agent.read
+
+        def read(path, default=""):
+            if path == "/proc/stat":
+                return next(lines)
+            return orig(path, default)
+
+        agent.read = read
+        try:
+            self.assertIsNone(agent.cpu_percent())
+            self.assertEqual(agent.cpu_percent(), 100.0)
+        finally:
+            agent.read = orig
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

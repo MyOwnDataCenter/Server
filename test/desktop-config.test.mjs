@@ -34,7 +34,7 @@ const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 test('the next account does not inherit this tab’s desktop', async () => {
 	assert.equal(typeof resetDeskConfig, 'function', 'resetDeskConfig is not exported')
 
-	patchDeskConfig({wallpaper: 'valley', dock: {position: 'bottom'}})
+	patchDeskConfig({wallpaper: 'color:#335577', dock: {position: 'bottom'}})
 	assert.match(localStorage.getItem(KEY), /"bottom"/)
 	localStorage.setItem(REV, '3')
 	localStorage.setItem(DIRTY, '1')
@@ -55,9 +55,9 @@ test('the next account does not inherit this tab’s desktop', async () => {
 	await wait(800)
 	const posted = posts.join('\n')
 	assert.equal(posted.includes('"bottom"'), false, 'push still has the previous dock')
-	assert.equal(posted.includes('valley'), false, 'push still has the previous wallpaper')
+	assert.equal(posted.includes('color:#335577'), false, 'push still has the previous wallpaper')
 
-	patchDeskConfig({wallpaper: 'valley', dock: {position: 'bottom'}})
+	patchDeskConfig({wallpaper: 'color:#335577', dock: {position: 'bottom'}})
 	localStorage.setItem(REV, '3')
 	resetDeskConfig()
 	posts.length = 0
@@ -66,16 +66,16 @@ test('the next account does not inherit this tab’s desktop', async () => {
 			posts.push(String(opts.body))
 			return {ok: true, json: async () => ({desktop: {rev: 4}})}
 		}
-		return {ok: true, json: async () => ({desktop: {config: {wallpaper: 'surf', dock: {position: 'top'}}, rev: 3}})}
+		return {ok: true, json: async () => ({desktop: {config: {wallpaper: 'color:#225588', dock: {position: 'top'}}, rev: 3}})}
 	}
 	syncDeskConfig()
 	await wait(50)
 	const saved = JSON.parse(localStorage.getItem(KEY))
-	assert.equal(saved.wallpaper, 'surf')
+	assert.equal(saved.wallpaper, 'color:#225588')
 	assert.equal(saved.dock.position, 'top')
 	assert.equal(localStorage.getItem(REV), '3')
 	const again = posts.join('\n')
-	assert.equal(again.includes('valley'), false, 'posted the previous wallpaper')
+	assert.equal(again.includes('color:#335577'), false, 'posted the previous wallpaper')
 	assert.equal(again.includes('"bottom"'), false, 'posted the previous dock')
 
 	let release
@@ -88,7 +88,7 @@ test('the next account does not inherit this tab’s desktop', async () => {
 		}
 		return {ok: true, json: async () => ({desktop: null})}
 	}
-	patchDeskConfig({wallpaper: 'dunes', dock: {position: 'right'}})
+	patchDeskConfig({wallpaper: 'color:#aa8855', dock: {position: 'right'}})
 	await wait(700)
 	assert.equal(typeof release, 'function', 'the push never left')
 	resetDeskConfig()
@@ -100,14 +100,14 @@ test('the next account does not inherit this tab’s desktop', async () => {
 	let releaseGet
 	fetchImpl = () =>
 		new Promise((resolve) => {
-			releaseGet = () => resolve({ok: true, json: async () => ({desktop: {config: {wallpaper: 'meadow', dock: {position: 'bottom'}}, rev: 8}})})
+			releaseGet = () => resolve({ok: true, json: async () => ({desktop: {config: {wallpaper: 'color:#558833', dock: {position: 'bottom'}}, rev: 8}})})
 		})
 	syncDeskConfig()
 	await wait(30)
 	assert.equal(typeof releaseGet, 'function', 'the load never started')
 	fetchImpl = async (_url, opts) => {
 		if (opts?.method === 'POST') return {ok: true, json: async () => ({desktop: {rev: 1}})}
-		return {ok: true, json: async () => ({desktop: {config: {wallpaper: 'pier', dock: {position: 'right'}}, rev: 4}})}
+		return {ok: true, json: async () => ({desktop: {config: {wallpaper: 'color:#884466', dock: {position: 'right'}}, rev: 4}})}
 	}
 	resetDeskConfig()
 	// The next account mounts while that load is still in flight.
@@ -115,7 +115,7 @@ test('the next account does not inherit this tab’s desktop', async () => {
 	releaseGet()
 	await wait(50)
 	const followed = JSON.parse(localStorage.getItem(KEY))
-	assert.equal(followed.wallpaper, 'pier', 'the load that was in flight swallowed the next account')
+	assert.equal(followed.wallpaper, 'color:#884466', 'the load that was in flight swallowed the next account')
 	assert.equal(followed.dock.position, 'right')
 })
 
@@ -142,13 +142,13 @@ test('a signed-out pull does not throttle the next account desktop', async () =>
 	let nextGets = 0
 	fetchImpl = async () => {
 		nextGets++
-		return {ok: true, json: async () => ({desktop: {config: {wallpaper: 'dahlia', dock: {position: 'top'}}, rev: 6}})}
+		return {ok: true, json: async () => ({desktop: {config: {wallpaper: 'color:#cc3377', dock: {position: 'top'}}, rev: 6}})}
 	}
 	syncDeskConfig()
 	await wait(50)
 	assert.equal(nextGets, 1, 'signed-out pull left the next syncDeskConfig behind the 3 second throttle')
 	const raw = localStorage.getItem(KEY)
-	assert.equal(raw && JSON.parse(raw).wallpaper, 'dahlia', 'the next account desktop was not loaded')
+	assert.equal(raw && JSON.parse(raw).wallpaper, 'color:#cc3377', 'the next account desktop was not loaded')
 })
 
 test('a second tab picks up changes from the first on focus instead of overwriting them', async (t) => {
@@ -169,7 +169,7 @@ test('a second tab picks up changes from the first on focus instead of overwriti
 	let now = 10_000
 	Date.now = () => now
 	let serverDesktop = {
-		config: {wallpaper: 'valley', style: 'glass', accent: 'wallpaper', shell: 'gnome', dock: {position: 'left', iconSize: 46, hover: 'lift', magnify: 1.6, bounce: true, floating: false, autohide: false, showRunning: true, items: ['files']}, icons: [], showIcons: true, appsOpenIn: 'auto'},
+		config: {wallpaper: 'color:#335577', style: 'glass', accent: 'wallpaper', shell: 'gnome', dock: {position: 'left', iconSize: 46, hover: 'lift', magnify: 1.6, bounce: true, floating: false, autohide: false, showRunning: true, items: ['files']}, icons: [], showIcons: true, appsOpenIn: 'auto'},
 		rev: 2,
 	}
 	fetchImpl = async (_url, opts) => {
@@ -226,7 +226,7 @@ test('a second tab picks up changes immediately via storage events', async (t) =
 	bag.clear()
 	Date.now = () => 20_000
 	let serverDesktop = {
-		config: {wallpaper: 'valley', style: 'glass', accent: 'wallpaper', shell: 'gnome', dock: {position: 'left', iconSize: 46, hover: 'lift', magnify: 1.6, bounce: true, floating: false, autohide: false, showRunning: true, items: ['files']}, icons: [], showIcons: true, appsOpenIn: 'auto'},
+		config: {wallpaper: 'color:#335577', style: 'glass', accent: 'wallpaper', shell: 'gnome', dock: {position: 'left', iconSize: 46, hover: 'lift', magnify: 1.6, bounce: true, floating: false, autohide: false, showRunning: true, items: ['files']}, icons: [], showIcons: true, appsOpenIn: 'auto'},
 		rev: 2,
 	}
 	fetchImpl = async (_url, opts) => {
@@ -278,7 +278,7 @@ test('cross-tab sign-out cancels pending edits, invalidates in-flight pulls, and
 			posts++
 			return {ok: true, json: async () => ({desktop: {rev: 9}})}
 		}
-		return {ok: true, json: async () => ({desktop: {config: {wallpaper: 'valley'}, rev: 2}})}
+		return {ok: true, json: async () => ({desktop: {config: {wallpaper: 'color:#335577'}, rev: 2}})}
 	}
 	const tabAEvents = new Map()
 	const tabBEvents = new Map()
@@ -307,7 +307,7 @@ test('cross-tab sign-out cancels pending edits, invalidates in-flight pulls, and
 			return {ok: true, json: async () => ({desktop: {rev: 10}})}
 		}
 		await new Promise((r) => (releaseGet = r))
-		return {ok: true, json: async () => ({desktop: {config: {wallpaper: 'valley'}, rev: 3}})}
+		return {ok: true, json: async () => ({desktop: {config: {wallpaper: 'color:#335577'}, rev: 3}})}
 	}
 	tabB.syncDeskConfig()
 	await wait(15)
@@ -326,11 +326,18 @@ test('cross-tab sign-out cancels pending edits, invalidates in-flight pulls, and
 	let account2Gets = 0
 	fetchImpl = async () => {
 		account2Gets++
-		return {ok: true, json: async () => ({desktop: {config: {wallpaper: 'dahlia'}, rev: 5}})}
+		return {ok: true, json: async () => ({desktop: {config: {wallpaper: 'color:#cc3377'}, rev: 5}})}
 	}
 	tabB.syncDeskConfig()
 	await wait(30)
 	assert.equal(account2Gets, 1, 'cross-tab sign-out left Tab B behind the 3 second pull throttle')
 	const raw = localStorage.getItem(KEY)
-	assert.equal(raw && JSON.parse(raw).wallpaper, 'dahlia')
+	assert.equal(raw && JSON.parse(raw).wallpaper, 'color:#cc3377')
+})
+
+test('a saved built-in photo that was removed falls back to the Omarchy background', async () => {
+	localStorage.setItem(KEY, JSON.stringify({v: 1, wallpaper: 'valley', preset: 'yosemite'}))
+	const {loadConfig} = await import('../web/src/desktop/config.ts')
+	const c = loadConfig()
+	assert.equal(c.wallpaper, 'omarchy')
 })

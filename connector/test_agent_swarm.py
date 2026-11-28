@@ -208,6 +208,27 @@ class TelemetryPowerAndSessionsTests(unittest.TestCase):
         self.assertIn("shutdown", agent.ACTIONS)
         self.assertIn("suspend", agent.ACTIONS)
 
+    def test_reboot_uses_reboot_when_systemctl_is_missing(self):
+        ran = []
+        with mock.patch.object(agent, "IS_WINDOWS", False), mock.patch.object(agent, "IS_MAC", False), mock.patch("shutil.which", lambda name: None if name == "systemctl" else "/bin/" + name), mock.patch.object(agent, "run", lambda cmd, **kw: ran.append(cmd) or ""):
+            self.assertTrue(agent.reboot({}))
+        self.assertEqual(ran, [["reboot"]])
+
+    def test_shutdown_uses_poweroff_when_systemctl_is_missing(self):
+        ran = []
+        with mock.patch.object(agent, "IS_WINDOWS", False), mock.patch.object(agent, "IS_MAC", False), mock.patch("shutil.which", lambda name: None if name == "systemctl" else "/bin/" + name), mock.patch.object(agent, "run", lambda cmd, **kw: ran.append(cmd) or ""):
+            self.assertTrue(agent.shutdown({}))
+        self.assertEqual(ran, [["poweroff"]])
+
+    def test_forget_stops_openrc_when_systemctl_is_missing(self):
+        ran = []
+        def which(name):
+            return "/sbin/rc-service" if name == "rc-service" else None
+        with mock.patch.object(agent, "IS_WINDOWS", False), mock.patch.object(agent, "IS_MAC", False), mock.patch("shutil.which", which), mock.patch("subprocess.run", lambda cmd, **kw: ran.append(cmd) or mock.Mock()), mock.patch.object(agent, "_backup_password_dir"), mock.patch("os.unlink"), mock.patch("os._exit") as exited:
+            agent.forget()
+        self.assertTrue(any(cmd[:3] == ["rc-service", "omarchy-connector", "stop"] for cmd in ran))
+        exited.assert_called_with(0)
+
 
 class ServicesAndFilesTests(unittest.TestCase):
     def test_parse_systemd_and_containers(self):
@@ -249,6 +270,23 @@ class ServicesAndFilesTests(unittest.TestCase):
                 agent.files_write({"path": "/Home/.ssh/authorized_keys", "data": "eA=="}, home=home)
             with self.assertRaises(RuntimeError):
                 agent.files_list({"path": "/Home/.local/share/keyrings"}, home=home)
+
+    def test_renaming_or_trashing_a_link_acts_on_the_link_not_what_it_points_to(self):
+        with tempfile.TemporaryDirectory() as home:
+            os.makedirs(os.path.join(home, "docs"))
+            real = os.path.join(home, "docs", "report.txt")
+            with open(real, "w") as f:
+                f.write("report")
+            os.symlink(real, os.path.join(home, "shortcut"))
+            res = agent.files_rename({"path": "/Home/shortcut", "newName": "renamed"}, home=home)
+            self.assertEqual(res["path"], "/Home/renamed")
+            self.assertTrue(os.path.islink(os.path.join(home, "renamed")))
+            self.assertFalse(os.path.lexists(os.path.join(home, "shortcut")))
+            self.assertTrue(os.path.isfile(real), "the file the link points to must stay where it was")
+            agent.files_trash({"path": "/Home/renamed"}, home=home)
+            self.assertFalse(os.path.lexists(os.path.join(home, "renamed")))
+            self.assertTrue(os.path.islink(os.path.join(home, ".local", "share", "Trash", "files", "renamed")))
+            self.assertTrue(os.path.isfile(real))
 
     def test_files_jail_blocks_traversal_symlink_escape_and_connector_config(self):
         with tempfile.TemporaryDirectory() as outer:
@@ -296,6 +334,27 @@ class ServicesAndFilesTests(unittest.TestCase):
             with mock.patch.object(agent, "CONFIG_DIR", cfg_dir):
                 with self.assertRaises(RuntimeError):
                     agent.files_read({"path": "/Home/.config/omarchy-connector/config.json"}, home=home)
+
+
+class PostureTests(unittest.TestCase):
+    def test_listening_ports_filters_loopback_and_non_listen(self):
+        proc_tcp = (
+            "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n"
+            "   0: 00000000:1F90 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1000 0 1\n"
+            "   1: 0100007F:07E5 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1000 0 2\n"
+            "   2: 00000000:0050 00000000:0000 01 00000000:00000000 00:00000000 00000000  1000 0 3\n"
+        )
+        ports = agent._listening_ports(read_file=lambda p: proc_tcp if p.endswith("/tcp") else "")
+        self.assertEqual(ports, [{"port": 8080, "proto": "tcp", "addr": "0.0.0.0"}])
+
+    def test_reboot_required_detects_debian_stamp_and_arch_kernel_mismatch(self):
+        needed, _ = agent._reboot_required(exists=lambda p: p == "/var/run/reboot-required", list_dir=lambda _: [], kernel="6.8.0")
+        self.assertTrue(needed)
+        needed2, reason2 = agent._reboot_required(exists=lambda p: p == "/usr/lib/modules", list_dir=lambda _: ["7.3.0-omarchy"], kernel="7.2.15-omarchy")
+        self.assertTrue(needed2)
+        self.assertIn("7.2.15-omarchy", reason2)
+        needed3, _ = agent._reboot_required(exists=lambda p: p == "/usr/lib/modules", list_dir=lambda _: ["7.2.15-omarchy"], kernel="7.2.15-omarchy")
+        self.assertFalse(needed3)
 
 
 if __name__ == "__main__":

@@ -143,6 +143,10 @@ test('checking typed-in details: presets use their own address, and only the own
 		assert.equal(urls.at(-1), 'https://api.openai.com/v1/models')
 		await assert.rejects(() => run({provider: 'openai-compatible', baseUrl: 'http://10.0.0.5:8080'}, 'sam'), /owner/)
 		assert.equal(urls.length, 1)
+		// The model on this server is the one address someone else may check before saving it.
+		const local = await run({provider: 'openai-compatible', baseUrl: 'http://127.0.0.1:11434/v1', apiKey: ''}, 'sam')
+		assert.equal(local.ok, true)
+		assert.equal(urls.at(-1), 'http://127.0.0.1:11434/v1/models')
 		const ok = await run({provider: 'openai-compatible', baseUrl: 'http://127.0.0.1:1234'}, 'owner')
 		assert.equal(ok.ok, true)
 		assert.equal(urls.at(-1), 'http://127.0.0.1:1234/v1/models')

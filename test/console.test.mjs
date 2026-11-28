@@ -41,8 +41,8 @@ describe('console helpers', () => {
 		assert.equal(screenshotFilename('Сервер', fakeLocal), 'Сервер-2026-11-20-23-30-05.png')
 		assert.equal(screenshotFilename('Мой ПК', fakeLocal), 'Мой-ПК-2026-11-20-23-30-05.png')
 		assert.equal(screenshotFilename('日本語 VM 1', fakeLocal), '日本語-VM-1-2026-11-20-23-30-05.png')
-		assert.equal(screenshotFilename('!!!', fakeLocal), 'console-2026-11-20-23-30-05.png')
-		assert.equal(screenshotFilename('   ', fakeLocal), 'console-2026-11-20-23-30-05.png')
+		assert.equal(screenshotFilename('!!!', fakeLocal), 'desktop-2026-11-20-23-30-05.png')
+		assert.equal(screenshotFilename('   ', fakeLocal), 'desktop-2026-11-20-23-30-05.png')
 		assert.equal(screenshotFilename('My VM!', fakeLocal), 'My-VM-2026-11-20-23-30-05.png')
 
 		const src = await readFile(new URL('../web/src/Console.tsx', import.meta.url), 'utf8')
