@@ -569,7 +569,7 @@ export function createContainers({run = defaultRun, reservedPorts = [], user = o
 		return {name: n}
 	}
 
-	const remotePower = {start: 'lxc-start', stop: 'lxc-stop', restart: 'lxc-restart', forceStop: 'lxc-stop'}
+	const remotePower = {start: 'lxc-start', stop: 'lxc-stop', restart: 'lxc-restart', forceStop: 'lxc-force-stop'}
 	const power = (verb) => async (input = {}) => {
 		const n = name(input.name)
 		const hostId = await containerHost(n)

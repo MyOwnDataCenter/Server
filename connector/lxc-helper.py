@@ -7,7 +7,7 @@ import shutil
 import subprocess
 import sys
 
-VERBS = frozenset(("status", "list", "launch", "start", "stop", "restart", "delete", "write-config", "read-config"))
+VERBS = frozenset(("status", "list", "launch", "start", "stop", "restart", "force-stop", "delete", "write-config", "read-config"))
 ARITY = {
     "status": (0, 0),
     "list": (0, 0),
@@ -15,6 +15,7 @@ ARITY = {
     "start": (1, 1),
     "stop": (1, 1),
     "restart": (1, 1),
+    "force-stop": (1, 1),
     "delete": (1, 1),
     "write-config": (0, 0),
     "read-config": (1, 1),
@@ -197,6 +198,9 @@ def launch_containers(run=None, body=None):
 def power_verb(run, verb, name):
     valid_name(name)
     incus = incus_path()
+    if verb == "force-stop":
+        run(incus, ["stop", name, "--force"], timeout=120)
+        return json.dumps({"ok": True})
     timeout = 90 if verb == "restart" else 120
     extra = ["--timeout", "60"] if verb in ("stop", "restart") else []
     run(incus, [verb, name, *extra], timeout=timeout)
