@@ -48,7 +48,7 @@ export const PINNED = {
 
 const STATUS_EVERY_MS = 5 * 60_000 // the contract's suggestion while the connector is on
 const STATUS_IDLE_MS = 30 * 60_000 // off: only to show the address and setup state
-const STATUS_BLOCKED_MS = 30 * 60_000 // no tunnel, not the connector, deleted tunnel: wait for the owner
+const STATUS_BLOCKED_MS = 2 * 60_000 // no tunnel, not the connector, deleted tunnel: the owner fixes these on the website, so look again soon (5 of the 30 status calls per 10 minutes)
 const STATUS_NOT_ALLOWED_MS = 6 * 60 * 60_000
 const AFTER_START_MS = 30_000 // "after about 30 seconds, call status"
 const TOKEN_TRIES = 3 // automatic attempts per incident, then the owner presses Try again
@@ -63,7 +63,7 @@ const HOST_RE = /^(?=.{1,253}$)([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,
 export const BLOCKS = {
 	no_tunnel: ['No tunnel is set up for this data center yet.', 'Create it in My Data Centers on myowndatacenter.com. This server checks again every 30 minutes, or press Check now.'],
 	not_allowed: ['Secure tunnels are in a limited pilot, and your account isn’t in it yet.', 'Nothing to do here; the connector stays off. Pairing and check-ins keep working.'],
-	not_connector: ['Another device is this tunnel’s connector, so this server stopped its own.', 'A tunnel’s connector can’t be moved to another device yet: remove the tunnel on myowndatacenter.com and create it again while this server is paired.'],
+	not_connector: ['The website’s tunnel still belongs to an earlier pairing of this data center, so this server isn’t running it yet.', 'On myowndatacenter.com, press Turn on remote access: it moves the tunnel to this server. This server checks again every 2 minutes, or press Check now.'],
 	data_center_mismatch: ['This server isn’t attached to that tunnel’s data center.', 'Disconnect, then pair this server with the data center that has the tunnel.'],
 	tunnel_missing: ['The tunnel was deleted in Cloudflare.', 'Remove the tunnel on myowndatacenter.com and create it again. The connector stays off until then.'],
 	tunnel_mismatch: ['The tunnel no longer matches its record on myowndatacenter.com, so the website refused it.', 'Remove the tunnel on myowndatacenter.com and create it again.'],

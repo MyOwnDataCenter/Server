@@ -330,7 +330,9 @@ test('not the connector / not in the pilot: stops and waits; never retried in a 
 		let s = (await t.connect.status()).tunnel
 		assert.equal(s.block.code, 'not_connector')
 		assert.equal(t.mach.units[UNIT].active, 'inactive')
-		assert.ok(s.nextCheckAt - t.site.clock() >= 29 * 60_000)
+		// The owner fixes this on the website (Turn on moves the tunnel here), so it looks again in about 2 minutes, not sooner.
+		assert.ok(s.nextCheckAt - t.site.clock() >= 110_000 && s.nextCheckAt - t.site.clock() <= 130_000)
+		assert.match(s.block.recovery, /Turn on remote access/)
 		t.site.over['GET /api/public/cloud/tunnel/status'] = () => json(403, {error: 'not_allowed'})
 		await t.tunnel.tick()
 		s = (await t.connect.status()).tunnel
