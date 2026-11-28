@@ -44,7 +44,9 @@ import {createOsInfo} from './os-info.mjs'
 import {WebSocketServer} from 'ws'
 import {viewerBackpressure} from './backpressure.mjs'
 
-export const OMARCHYD_VERSION = '0.9.106'
+export const OMARCHYD_VERSION = '0.9.107'
+// Written by install.sh when the owner turns on unattended boot: the disk then unlocks itself at boot.
+export const UNATTENDED_BOOT_CONF = '/etc/mkinitcpio.conf.d/zz-modc-unattended.conf'
 
 export async function startOmarchyd({port = 2021, host = '127.0.0.1', dataDir, tlsDir: sharedTlsDir = null, home = os.homedir(), webPort = 7780, machineOptions = {}, containerOptions = {}, appOptions = {}, storageOptions = {}, updaterOptions = {}, pluginOptions = {}, themeOptions = {}, assistantOptions = {}, usbOptions = {}, backupOptions = {}, unraidOptions = {}, tailscaleOptions = {}, oidcOptions = {}, hyprlandOptions = {}, terminalTmux = process.env.NODE_TEST_CONTEXT ? null : undefined, desktopVncPort = 5900, viewerStallMs = undefined, desktopVncSocket = join(process.env.XDG_RUNTIME_DIR || `/run/user/${process.getuid?.() ?? ''}`, 'omarchy-server', 'desktop-vnc.sock')}) {
 	const sourceDir = localGitDir('OMARCHY_SERVER_SOURCE', process.env.OMARCHY_SERVER_SOURCE)
@@ -847,7 +849,8 @@ export async function startOmarchyd({port = 2021, host = '127.0.0.1', dataDir, t
 		// Linger only matters once the system has booted. An encrypted system disk (Omarchy's default)
 		// asks for its password before anything on it runs, this server included, so after a restart the
 		// computer waits at that screen. It boots by itself only when the disk unlocks itself (a TPM,
-		// a FIDO key, a Tang server through Clevis).
+		// a FIDO key, a Tang server through Clevis, or the key file install.sh adds to the boot image when
+		// the owner turns on unattended boot).
 		async diskLock() {
 			if (machineOptions.diskLock !== undefined) return machineOptions.diskLock
 			const src = await sh('findmnt', ['-no', 'SOURCE', '/'], 5_000)
@@ -858,8 +861,9 @@ export async function startOmarchyd({port = 2021, host = '127.0.0.1', dataDir, t
 			if (!stack.ok) return null
 			if (!stack.out.split(/\s+/).includes('crypt')) return {encrypted: false, unlocksItself: false}
 			const text = (await Promise.all(['/proc/cmdline', '/etc/crypttab.initramfs', '/etc/crypttab'].map((f) => readFile(f, 'utf8').catch(() => '')))).join('\n')
-			const clevis = await stat('/usr/lib/initcpio/install/clevis').then(() => true, () => false)
-			return {encrypted: true, unlocksItself: clevis || /tpm2-device|fido2-device/.test(text)}
+			const exists = (f) => stat(f).then(() => true, () => false)
+			const [clevis, unattended] = await Promise.all([exists('/usr/lib/initcpio/install/clevis'), exists(UNATTENDED_BOOT_CONF)])
+			return {encrypted: true, unlocksItself: clevis || unattended || /tpm2-device|fido2-device/.test(text)}
 		},
 	}
 	// Before a restart or shutdown: if this server wouldn't come back by itself (no linger), turn that
