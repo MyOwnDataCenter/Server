@@ -348,6 +348,9 @@ export function createConnector({dataDir, tlsDir, connectorDir = fileURLToPath(n
 	// A guest connector is the same agent, remembered against the virtual machine it was installed on.
 	// Anything else stays a physical computer. A bad value must not hide that computer.
 	const guestOf = (a) => (typeof a?.guestOf === 'string' && /^[a-f0-9]{8}$/.test(a.guestOf) ? a.guestOf : '')
+	// An LXC connector is remembered against the Incus instance name (same rules as containers.mjs NAME).
+	const CONTAINER_OF = /^[a-z]([a-z0-9-]{0,61}[a-z0-9])?$/
+	const containerOf = (a) => (typeof a?.containerOf === 'string' && CONTAINER_OF.test(a.containerOf) ? a.containerOf : '')
 	function reportedMacs(info) {
 		const nics = info?.nics
 		if (Array.isArray(nics) && nics.length) {
@@ -387,6 +390,7 @@ export function createConnector({dataDir, tlsDir, connectorDir = fileURLToPath(n
 			freshness,
 			enrolledAt: a.enrolledAt,
 			guestOf: guestOf(a),
+			containerOf: containerOf(a),
 			// What it may do: allowed at pairing (and by the connector itself) and still switched on here.
 			allowed: a.allowed,
 			on: a.on,
@@ -415,14 +419,27 @@ export function createConnector({dataDir, tlsDir, connectorDir = fileURLToPath(n
 		if (!/^[a-f0-9]{8}$/.test(id)) throw new RpcError('BAD_REQUEST', 'That virtual machine isn’t valid')
 		return id
 	}
+	function pairingContainer(input) {
+		if (input == null || input === '') return ''
+		const name = String(input)
+		if (!CONTAINER_OF.test(name)) throw new RpcError('BAD_REQUEST', 'That container isn’t valid')
+		return name
+	}
 	async function pair(input = {}) {
 		await loaded
 		const abilities = Object.fromEntries(ABILITIES.map((k) => [k, input?.[k] === true]))
 		const linked = pairingGuest(input?.machineId)
+		const linkedContainer = pairingContainer(input?.containerOf)
+		if (linked && linkedContainer) throw new RpcError('BAD_REQUEST', 'A connector can’t belong to both a virtual machine and a container')
 		const token = randomBytes(24).toString('base64url')
 		for (const [k, p] of pairings) if (p.expires < now()) pairings.delete(k)
-		const ttl = linked ? GUEST_PAIR_TTL : PAIR_TTL
-		pairings.set(sha(token), {abilities, expires: now() + ttl, ...(linked ? {guestOf: linked} : {})})
+		const ttl = linked || linkedContainer ? GUEST_PAIR_TTL : PAIR_TTL
+		pairings.set(sha(token), {
+			abilities,
+			expires: now() + ttl,
+			...(linked ? {guestOf: linked} : {}),
+			...(linkedContainer ? {containerOf: linkedContainer} : {}),
+		})
 		return {token, ca: await caFingerprint(), expiresAt: now() + ttl, abilities, source: await source(), port: webPort, addresses: serverAddresses()}
 	}
 	// Re-authorize an existing computer in place so its name, id, metrics and backups stay intact.
@@ -745,6 +762,7 @@ export function createConnector({dataDir, tlsDir, connectorDir = fileURLToPath(n
 		const agent = {id, name, keyHash: sha(key), allowed, on: {...allowed}, enrolledAt: t, lastSeen: null, info}
 		tickNics(agent, reportedMacs(body?.info ?? info))
 		if (p.guestOf) agent.guestOf = p.guestOf
+		if (p.containerOf) agent.containerOf = p.containerOf
 		state.agents.push(agent)
 		await save()
 		return {status: 200, body: {id, key, name, abilities: allowed}}
