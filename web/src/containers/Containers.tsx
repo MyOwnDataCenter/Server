@@ -13,7 +13,6 @@ import {AddFile, type Download} from '../AddFile'
 import {SERVER_FLEET_ID} from '../fleet/list'
 import {MachineActions} from '../fleet/machineActions'
 import {MachineTabs} from '../fleet/MachineTabs'
-import {openStore} from '../fleet/openStore'
 import {PinButton} from '../fleet/PinButton'
 import {containerAgent, linuxConnectorOs} from '../swarm/guestLink'
 import {agentMay, useSwarm} from '../swarm/Swarm'
@@ -1002,11 +1001,6 @@ export function ContainerDetail({c, all, onBack, onOpen}: {c: Container; all: Co
 						<Files c={c} />
 					)
 							)},
-							...(agent?.online
-								? [{id: 'apps', label: 'Apps', body: (
-					<Row icon="store" color="var(--accent)" label="App Store" sub={`Installs on ${c.name}`} onClick={() => (haptic(6), openStore({id: agent.id, kind: 'computer', name: c.name}))} />
-								)}]
-								: []),
 							{id: 'options', label: 'Options', body: (<div className="ct-col" style={{display: 'grid', gridTemplateColumns: 'minmax(0, 1fr)', gap: 12, minWidth: 0}}>
 					<Boot key={`${c.bootOrder}-${c.bootDelay}`} c={c} busy={busy} run={run} />
 					<Group title="Signing in" footer="Terminal on this container is its own login. Sign in there as root with the password set here.">
