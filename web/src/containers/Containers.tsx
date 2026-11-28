@@ -17,6 +17,8 @@ import {openStore} from '../fleet/openStore'
 import {PinButton} from '../fleet/PinButton'
 import {containerAgent, linuxConnectorOs} from '../swarm/guestLink'
 import {agentMay, useSwarm} from '../swarm/Swarm'
+import {NixosConfigPanel} from '../nixos/NixosConfigPanel'
+import {isNixosOs, NIXOS_EXAMPLE_LXC} from '../nixos/example'
 import {Group, PortalRoot, Row, Sheet, SheetHeader, Spark, StatusPill, Switch, haptic, useConfirm, useToast} from '../ui'
 
 const MachineFiles = lazy(() => import('../screens/Files').then((m) => ({default: m.Files})))
@@ -53,6 +55,7 @@ export type Container = {
 	pending?: boolean
 	progress?: string | null
 	startedAt?: string | null
+	nixos?: boolean
 }
 type Distro = {os: string; name: string; releases: {alias: string; release: string; description: string}[]}
 type Template = {alias: string; name: string; os: string; release: string; size: number; from: string}
@@ -72,9 +75,10 @@ const OS_COLOR: Record<string, string> = {
 	opensuse: '#73ba25',
 	devuan: '#5c5c7a',
 	gentoo: '#54487a',
+	nixos: '#5277c3',
 }
 const osColor = (os: string) => OS_COLOR[os] ?? '#4b5563'
-const OS_NAME: Record<string, string> = {archlinux: 'Arch Linux', rockylinux: 'Rocky Linux', almalinux: 'AlmaLinux', centos: 'CentOS Stream', opensuse: 'openSUSE'}
+const OS_NAME: Record<string, string> = {archlinux: 'Arch Linux', rockylinux: 'Rocky Linux', almalinux: 'AlmaLinux', centos: 'CentOS Stream', opensuse: 'openSUSE', nixos: 'NixOS'}
 const osLabel = (c: {os: string; release: string}) => [OS_NAME[c.os] ?? (c.os ? c.os[0].toUpperCase() + c.os.slice(1) : ''), c.release].filter(Boolean).join(' ')
 const bytes = (n: number) => (n >= 1024 ** 3 ? `${(n / 1024 ** 3).toFixed(1)} GB` : n >= 1024 ** 2 ? `${Math.round(n / 1024 ** 2)} MB` : `${Math.max(1, Math.round(n / 1024))} KB`)
 const plain = (e: Error) => e.message.replace(/^[A-Z_]+: /, '')
@@ -333,13 +337,25 @@ function CreateContainer({onDone, existing, backLabel = 'LXC containers'}: {onDo
 	const [autostart, setAutostart] = useState(true)
 	const [password, setPassword] = useState('')
 	const [sshKey, setSshKey] = useState('')
+	const [nixosConfig, setNixosConfig] = useState('')
+	const nixosImage = image ? isNixosOs(image.os) : false
 	const nameProblem = nameProblemOf(name, existing)
 	const pick = (id: string, label: string, os: string, suggested: string) => (haptic(6), setImage({id, label, os}), setName(name || suggested))
 	const create = () =>
 		action.mutate(
 			{
 				path: 'containers.create',
-				input: {name, image: image!.id, cpus: Number(cpus), memoryMiB: Number(memory), diskGiB: Number(disk), autostart, rootPassword: password || undefined, sshKey: sshKey.trim() || undefined},
+				input: {
+					name,
+					image: image!.id,
+					cpus: Number(cpus),
+					memoryMiB: Number(memory),
+					diskGiB: Number(disk),
+					autostart,
+					rootPassword: password || undefined,
+					sshKey: sshKey.trim() || undefined,
+					...(nixosImage && nixosConfig.trim() ? {nixosConfig} : {}),
+				},
 				done: `Creating ${name}. The first container of a system takes a minute to download.`,
 			},
 			{onSuccess: onDone},
@@ -417,6 +433,17 @@ function CreateContainer({onDone, existing, backLabel = 'LXC containers'}: {onDo
 					<SwitchRow label="Start with the server" sub="Starts by itself after the server restarts." on={autostart} onChange={setAutostart} />
 					<TextField id="ct-pw" label="Root password (optional)" type="password" value={password} onChange={setPassword} hint="For signing in on this container or over SSH. It isn’t stored by My Own Data Center." />
 					<TextField id="ct-key" label="SSH public key (optional)" value={sshKey} onChange={setSshKey} placeholder="ssh-ed25519 AAAA… you@laptop" area hint="Added for root. Install an SSH server inside to use it." />
+					{nixosImage ? (
+						<TextField
+							id="ct-nixos-config"
+							label="NixOS configuration"
+							value={nixosConfig}
+							onChange={setNixosConfig}
+							area
+							placeholder={NIXOS_EXAMPLE_LXC}
+							hint="Optional. Saved on this server and mounted into the container; the guest applies it on boot."
+						/>
+					) : null}
 					<button type="button" className="btn block" style={{marginTop: 8}} disabled={!!nameProblem || action.isPending} onClick={create}>
 						{action.isPending ? <span className="spinner" /> : <Icon name="plus" size={18} />} Create container
 					</button>
@@ -1006,6 +1033,31 @@ export function ContainerDetail({c, all, onBack, onOpen}: {c: Container; all: Co
 								? [{id: 'apps', label: 'Apps', body: (
 					<Row icon="store" color="var(--accent)" label="App Store" sub={`Installs on ${c.name}`} onClick={() => (haptic(6), openStore({id: agent.id, kind: 'computer', name: c.name}))} />
 								)}]
+								: []),
+							...(c.nixos
+								? [
+										{
+											id: 'config',
+											label: 'Config',
+											body: (
+												<NixosConfigPanel
+													id={c.name}
+													kind="lxc"
+													busy={busy}
+													running={c.status === 'running'}
+													onApply={() =>
+														action.mutate({
+															path: 'containers.applyNixosConfig',
+															input: {name: c.name},
+															done: 'Restarting so the container picks up the configuration',
+														})
+													}
+													readConfig={() => query<{config: string; present: boolean}>('containers.nixosConfig', {name: c.name})}
+													saveConfig={(config) => mutate('containers.setNixosConfig', {name: c.name, config})}
+												/>
+											),
+										},
+									]
 								: []),
 							{id: 'options', label: 'Options', body: (<div className="ct-col" style={{display: 'grid', gridTemplateColumns: 'minmax(0, 1fr)', gap: 12, minWidth: 0}}>
 					<Boot key={`${c.bootOrder}-${c.bootDelay}`} c={c} busy={busy} run={run} />
