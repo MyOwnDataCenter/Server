@@ -3412,6 +3412,7 @@ LXC_ACTIONS = {
     "lxc-delete": "delete",
     "lxc-write-config": "write-config",
     "lxc-read-config": "read-config",
+    "lxc-ensure-nixos-image": "ensure-nixos-image",
 }
 _LXC_POSITIONALS = {
     "status": (),
@@ -3424,13 +3425,14 @@ _LXC_POSITIONALS = {
     "delete": ("name",),
     "write-config": (),
     "read-config": ("name",),
+    "ensure-nixos-image": (),
 }
-_LXC_JSON = frozenset(("launch", "write-config"))
+_LXC_JSON = frozenset(("launch", "write-config", "ensure-nixos-image"))
 
 
 def _lxc_spawn(argv, stdin=None):
     verb = argv[2] if len(argv) > 2 else ""
-    timeout = 30 * 60 if verb == "launch" else 2 * 60
+    timeout = 30 * 60 if verb in ("launch", "ensure-nixos-image") else 2 * 60
     if isinstance(stdin, bytes):
         stdin = stdin.decode("utf-8")
     r = subprocess.run(argv, input="" if stdin is None else stdin, capture_output=True, text=True, timeout=timeout)

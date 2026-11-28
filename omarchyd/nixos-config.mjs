@@ -4,6 +4,11 @@ import {writeAtomic} from './atomic.mjs'
 
 export const NIXOS_CONFIG_MAX = 512 * 1024
 export const NIXOS_GUEST_MOUNT = '/modc/nixos-config'
+/** Local Incus alias for the MODC guest image (apply-on-boot module). */
+export const MODC_NIXOS_ALIAS = 'modc/nixos'
+/** Combined squashfs + metadata tarball from the app-store release. */
+export const MODC_NIXOS_INCUS_URL =
+	'https://github.com/MyOwnDataCenter/app-store/releases/download/nixos-v24.11.0/modc-nixos-24.11-amd64.incus.tar.xz'
 
 const CACHE_URL = /^https?:\/\/[A-Za-z0-9._:~%/?#@[\]!$&'()*+,;=-]+$/
 

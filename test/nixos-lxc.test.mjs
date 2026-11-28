@@ -26,6 +26,14 @@ const NIXOS_IMAGE = {
 	size: 2_000_000,
 }
 
+const MODC_NIXOS_IMAGE = {
+	type: 'container',
+	architecture: 'x86_64',
+	properties: {os: 'nixos', release: '24.11', architecture: 'amd64', variant: 'default', description: 'MODC NixOS'},
+	aliases: [{name: 'modc/nixos'}],
+	size: 2_000_000,
+}
+
 const DEBIAN_IMAGE = {
 	type: 'container',
 	architecture: 'x86_64',
@@ -34,11 +42,14 @@ const DEBIAN_IMAGE = {
 	size: 2_000_000,
 }
 
-function mockRun(calls, {containers: list = []} = {}) {
+function mockRun(calls, {containers: list = [], modcReady = true} = {}) {
 	return async (args) => {
 		calls.push(args)
 		if (args[0] === 'query' && args[1] === '/1.0') return JSON.stringify({environment: {server_version: '6', project: 'default'}})
-		if (args[0] === 'image' && args[1] === 'list') return JSON.stringify([NIXOS_IMAGE, DEBIAN_IMAGE])
+		if (args[0] === 'image' && args[1] === 'list') {
+			if (args.includes('modc/nixos')) return JSON.stringify(modcReady ? [MODC_NIXOS_IMAGE] : [])
+			return JSON.stringify([NIXOS_IMAGE, DEBIAN_IMAGE])
+		}
 		if (args[0] === 'list') return JSON.stringify(list)
 		if (args[0] === 'launch' || args[0] === 'config') return ''
 		if (args[0] === 'restart') return ''
@@ -82,7 +93,7 @@ test('create NixOS writes share and adds disk device', async () => {
 	const p = createContainers({run: mockRun(calls), dataDir}).procedures
 	await p['containers.create'].run({name: 'nix1', image: 'nixos/24.11', nixosConfig: EXAMPLE})
 	await waitCreate(calls)
-	assert.ok(calls.some((a) => a[0] === 'launch' && a.includes('security.nesting=true') && a.includes('user.modc.nixos=true')))
+	assert.ok(calls.some((a) => a[0] === 'launch' && a.includes('modc/nixos') && a.includes('security.nesting=true') && a.includes('user.modc.nixos=true')))
 	assert.ok(calls.some((a) => a[0] === 'config' && a.includes('device') && a.includes('modc-nixos-config')))
 	const mount = calls.find((a) => a[0] === 'config' && a.includes('modc-nixos-config'))
 	assert.ok(mount?.includes(`path=/modc/nixos-config`))

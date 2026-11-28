@@ -12,7 +12,9 @@
 // owner's own templates (a container saved as an image). Small app recipes are the App Store's job.
 
 import {spawn} from 'node:child_process'
+import {createWriteStream} from 'node:fs'
 import {mkdir, mkdtemp, readdir, rm, stat, writeFile as writeFs} from 'node:fs/promises'
+import {pipeline} from 'node:stream/promises'
 import os from 'node:os'
 import {basename, join} from 'node:path'
 
@@ -24,6 +26,8 @@ import {
 	configDir,
 	ensureConfigDir,
 	isNixosOs,
+	MODC_NIXOS_ALIAS,
+	MODC_NIXOS_INCUS_URL,
 	NIXOS_GUEST_MOUNT,
 	readConfiguration,
 	validateNixosConfig,
@@ -188,6 +192,38 @@ function defaultRun(args, opts = {}) {
 	return execIncus('incus', args, opts)
 }
 
+async function downloadFile(url, dest, fetchImpl = fetch) {
+	const res = await fetchImpl(url, {redirect: 'follow'})
+	if (!res.ok) throw new Error(`Couldn’t download the MODC NixOS image (${res.status})`)
+	await pipeline(res.body, createWriteStream(dest))
+}
+
+/** Ensure the apply-on-boot MODC Incus image is present as modc/nixos. */
+export async function ensureModcNixosImage({run = defaultRun, fetchImpl = fetch, url = MODC_NIXOS_INCUS_URL} = {}) {
+	try {
+		const listed = JSON.parse(String(await run(['image', 'list', MODC_NIXOS_ALIAS, '--format', 'json'], {timeout: 30_000})))
+		if (Array.isArray(listed) && listed.length) return {ok: true, alias: MODC_NIXOS_ALIAS, imported: false}
+	} catch {
+		/* import below */
+	}
+	const work = await mkdtemp(join(os.tmpdir(), 'modc-nixos-image-'))
+	try {
+		const bundle = join(work, 'bundle.incus.tar.xz')
+		await downloadFile(url, bundle, fetchImpl)
+		await execIncus('tar', ['-xJf', bundle, '-C', work], {timeout: 120_000})
+		const names = await readdir(work)
+		const squash = names.find((n) => n.endsWith('.squashfs'))
+		const meta = names.find((n) => n.endsWith('.tar.xz') && n.includes('metadata')) || names.find((n) => n.endsWith('.tar.xz') && n !== 'bundle.incus.tar.xz')
+		if (!squash || !meta) throw new Error('The MODC NixOS image bundle didn’t contain a squashfs and metadata')
+		await run(['image', 'import', join(work, squash), join(work, meta), '--alias', MODC_NIXOS_ALIAS], {timeout: 10 * 60_000})
+		return {ok: true, alias: MODC_NIXOS_ALIAS, imported: true}
+	} catch (error) {
+		throw new RpcError('PRECONDITION_FAILED', `The MODC NixOS container image isn’t ready: ${error?.message ?? error}`)
+	} finally {
+		await rm(work, {recursive: true, force: true})
+	}
+}
+
 export function execIncus(bin, args, {timeout = 60_000, input, binary = false, onOutput} = {}) {
 	return new Promise((resolve, reject) => {
 		// stdin is closed unless there's something to send. `incus launch` reads a config from stdin
@@ -232,7 +268,7 @@ export function execIncus(bin, args, {timeout = 60_000, input, binary = false, o
  * @param {{pair?: Function, list?: Function, call?: Function, caCertificate?: Function}} [o.connector] local swarm for connector install and remote Incus
  * @param {string} [o.dataDir] MODC data dir (NixOS config shares live under `{dataDir}/nixos-configs/`)
  */
-export function createContainers({run = defaultRun, reservedPorts = [], user = os.userInfo().username, backupsDir = null, files = null, dataDir = null, now = Date.now, connector = null, connectorEnrollTimeoutMs = 10 * 60_000} = {}) {
+export function createContainers({run = defaultRun, reservedPorts = [], user = os.userInfo().username, backupsDir = null, files = null, dataDir = null, now = Date.now, connector = null, connectorEnrollTimeoutMs = 10 * 60_000, fetchImpl = fetch} = {}) {
 	// Containers that don't exist yet (being created, cloned or restored), and work on existing ones
 	// (backing up, saving as a template, first-time setup). A failure stays visible for 10 minutes.
 	const pending = new Map() // name -> {what, from?, error?, at}
@@ -516,6 +552,8 @@ export function createContainers({run = defaultRun, reservedPorts = [], user = o
 		const diskGiB = intIn(input.diskGiB ?? 8, 1, 4096, 'Use 1 to 4096 GB of disk')
 		if (input.autostart) config.push('boot.autostart=true')
 		if (nixos) config.push('security.nesting=true', 'user.modc.nixos=true')
+		// Stock images:nixos has no apply-on-boot module; always launch the MODC image.
+		if (nixos) source = MODC_NIXOS_ALIAS
 		const cred = secrets(input)
 		if (pending.has(n) && !pending.get(n).error) throw new RpcError('CONFLICT', `${n} is already being created`)
 		if (hostId !== 'server') {
@@ -530,6 +568,7 @@ export function createContainers({run = defaultRun, reservedPorts = [], user = o
 				throw new RpcError('PRECONDITION_FAILED', `${who} needs Incus set up first. ${remote.reason} Run ${remote.setupCommand ?? setupCommand()} on ${who}.`)
 			}
 			if (nixos) {
+				await remoteContainerCall(connector, hostId, 'lxc-ensure-nixos-image', {url: MODC_NIXOS_INCUS_URL}, 30 * 60_000)
 				const writeBody = {name: n}
 				if (input.nixosConfig) {
 					const checked = validateNixosConfig(input.nixosConfig)
@@ -572,6 +611,11 @@ export function createContainers({run = defaultRun, reservedPorts = [], user = o
 			n,
 			'creating',
 			async () => {
+				if (nixos) {
+					const p = pending.get(n)
+					if (p && !p.error) p.progress = 'Preparing MODC NixOS image'
+					await ensureModcNixosImage({run: incus, fetchImpl})
+				}
 				// Incus prints its progress ("Retrieving image: rootfs: 45% (12.3MB/s)"); the list shows the latest.
 				const onOutput = (text) => {
 					const line = text.split(/[\r\n]+/).map((l) => l.trim()).filter(Boolean).pop()

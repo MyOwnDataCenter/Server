@@ -7,7 +7,7 @@ import shutil
 import subprocess
 import sys
 
-VERBS = frozenset(("status", "list", "launch", "start", "stop", "restart", "force-stop", "delete", "write-config", "read-config"))
+VERBS = frozenset(("status", "list", "launch", "start", "stop", "restart", "force-stop", "delete", "write-config", "read-config", "ensure-nixos-image"))
 ARITY = {
     "status": (0, 0),
     "list": (0, 0),
@@ -19,8 +19,14 @@ ARITY = {
     "delete": (1, 1),
     "write-config": (0, 0),
     "read-config": (1, 1),
+    "ensure-nixos-image": (0, 0),
 }
 NIXOS_GUEST_MOUNT = "/modc/nixos-config"
+MODC_NIXOS_ALIAS = "modc/nixos"
+MODC_NIXOS_INCUS_URL = (
+    "https://github.com/MyOwnDataCenter/app-store/releases/download/nixos-v24.11.0/"
+    "modc-nixos-24.11-amd64.incus.tar.xz"
+)
 NAME = re.compile(r"^[a-z]([a-z0-9-]{0,61}[a-z0-9])?$")
 SETUP = "machines-add-lxc"
 
@@ -147,6 +153,59 @@ def read_nixos_config(name=None):
         return json.dumps({"config": fh.read(), "present": True})
 
 
+def alias_present(run, alias):
+    incus = incus_path()
+    out = run(incus, ["image", "list", alias, "--format", "json"], timeout=30)
+    try:
+        rows = json.loads(out)
+    except (json.JSONDecodeError, TypeError):
+        return False
+    return isinstance(rows, list) and len(rows) > 0
+
+
+def ensure_nixos_image(run=None, body=None):
+    """Download the MODC Incus bundle if needed and alias it as modc/nixos."""
+    run = run or default_run
+    url = MODC_NIXOS_INCUS_URL
+    if isinstance(body, dict) and isinstance(body.get("url"), str) and body["url"].startswith("https://"):
+        url = body["url"]
+    if alias_present(run, MODC_NIXOS_ALIAS):
+        return json.dumps({"ok": True, "alias": MODC_NIXOS_ALIAS, "imported": False})
+    import tempfile
+    import urllib.request
+    work = tempfile.mkdtemp(prefix="modc-nixos-image-")
+    try:
+        bundle = os.path.join(work, "bundle.incus.tar.xz")
+        # stdlib download; Incus import needs the extracted squashfs + metadata.
+        with urllib.request.urlopen(url, timeout=600) as resp, open(bundle, "wb") as fh:
+            while True:
+                chunk = resp.read(1024 * 1024)
+                if not chunk:
+                    break
+                fh.write(chunk)
+        run("tar", ["-xJf", bundle, "-C", work], timeout=120)
+        squash = None
+        meta = None
+        for name in os.listdir(work):
+            path = os.path.join(work, name)
+            if name.endswith(".squashfs"):
+                squash = path
+            elif name.endswith(".tar.xz") and "metadata" in name:
+                meta = path
+            elif name.endswith(".tar.xz") and name != "bundle.incus.tar.xz":
+                meta = meta or path
+        if not squash or not meta:
+            raise HelperError("The MODC NixOS image bundle didn’t contain a squashfs and metadata")
+        run(
+            incus_path(),
+            ["image", "import", squash, meta, "--alias", MODC_NIXOS_ALIAS],
+            timeout=10 * 60,
+        )
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+    return json.dumps({"ok": True, "alias": MODC_NIXOS_ALIAS, "imported": True})
+
+
 def launch_containers(run=None, body=None):
     run = run or default_run
     incus = incus_path()
@@ -225,7 +284,7 @@ def main():
         sys.stderr.write("Unknown action\n")
         return 2
     body = None
-    if verb in ("launch", "write-config"):
+    if verb in ("launch", "write-config", "ensure-nixos-image"):
         raw = sys.stdin.read()
         try:
             body = json.loads(raw) if raw.strip() else {}
@@ -237,6 +296,8 @@ def main():
             sys.stdout.write(status_report())
         elif verb == "list":
             sys.stdout.write(list_containers())
+        elif verb == "ensure-nixos-image":
+            sys.stdout.write(ensure_nixos_image(body=body))
         elif verb == "launch":
             sys.stdout.write(launch_containers(body=body))
         elif verb == "write-config":
