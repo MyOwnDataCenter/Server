@@ -43,6 +43,7 @@ import {createSampler} from './stats.mjs'
 import {createOsInfo} from './os-info.mjs'
 import {WebSocketServer} from 'ws'
 import {viewerBackpressure} from './backpressure.mjs'
+import {readNixCache, writeNixCache} from './nix-cache.mjs'
 
 export const OMARCHYD_VERSION = '0.9.108'
 // Written by install.sh when the owner turns on unattended boot: the disk then unlocks itself at boot.
@@ -494,6 +495,14 @@ export async function startOmarchyd({port = 2021, host = '127.0.0.1', dataDir, t
 				alwaysHttps: (await readPolicy(tlsDir)).alwaysHttps,
 				lockAfterRemote: security.lockAfterRemote !== false,
 			}),
+		},
+		'nix.cache': {kind: 'query', run: () => readNixCache(dataDir)},
+		'nix.setCache': {
+			kind: 'mutation',
+			run: async (input, {auth}) => {
+				ownerOnly(auth, 'change the Nix binary cache')
+				return writeNixCache(dataDir, input ?? {})
+			},
 		},
 		'system.setSecurity': {
 			kind: 'mutation',

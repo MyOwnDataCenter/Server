@@ -74,6 +74,8 @@ export const ALLOWED = {
 	'system.security': 'query',
 	'storage.growSystem': 'mutation',
 	'system.setSecurity': 'mutation',
+	'nix.cache': 'query',
+	'nix.setCache': 'mutation',
 	'system.replaceCertificate': 'mutation',
 	'system.desktopShare': 'mutation',
 	'apps.probe': 'query',
