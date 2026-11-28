@@ -74,7 +74,7 @@ function machineIcon(member: FleetMember): IconName {
 	return 'devices'
 }
 
-export function Home({onOpenApp}: {onOpenApp: (app: UserApp) => void; go: (tab: 'apps' | 'more' | 'store') => void; onTerminal?: () => void; onAssistant?: () => void}) {
+export function Home({onOpenApp, go}: {onOpenApp: (app: UserApp) => void; go: (tab: 'apps' | 'more' | 'store') => void; onTerminal?: () => void; onAssistant?: () => void}) {
 	const {tempUnit} = useStatView()
 	const user = useUser()
 	const apps = useApps()
@@ -178,14 +178,19 @@ export function Home({onOpenApp}: {onOpenApp: (app: UserApp) => void; go: (tab: 
 							</span>
 						)
 					)}
-					<span className="fact">
+					<button type="button" className="fact fact-link" onClick={() => go('more')} aria-label={`Up ${duration(uptime.data)}. Open the System dashboard`}>
 						<Icon name="clock" size={15} />
 						Up {duration(uptime.data)}
-					</span>
-					<span className="fact">
+					</button>
+					<button type="button" className="fact fact-link" onClick={() => go('apps')} aria-label={`${running} of ${list.length} apps running. Open Apps`}>
 						<Icon name="apps" size={15} />
 						{running}/{list.length} apps running
-					</span>
+					</button>
+					<button type="button" className="fact fact-link fact-system" onClick={() => go('more')}>
+						<Icon name="activity" size={15} />
+						System dashboard
+						<Icon name="chevron" size={13} />
+					</button>
 					{swarmList.length > 0 && (
 						<span className="fact">
 							<Icon name="devices" size={15} />

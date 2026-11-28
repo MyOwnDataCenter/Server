@@ -12355,3 +12355,35 @@ input.temp-unit-box.fallback:checked {
 .console.terminal.over-sheet {
 	z-index: 53;
 }
+
+/* Home facts: tiles side by side; the ones that open a page look and act like buttons. */
+.facts:has(.fact-link) {
+	display: grid;
+	grid-template-columns: repeat(auto-fit, minmax(min(100%, 150px), 1fr));
+}
+.fact-link {
+	cursor: pointer;
+	font: inherit;
+	font-size: 12.5px;
+	font-weight: 550;
+	transition:
+		background 0.15s,
+		border-color 0.15s;
+}
+.fact-link:hover {
+	background: var(--glass-2);
+	border-color: var(--line-2);
+}
+.fact-link:focus-visible {
+	outline: 2px solid var(--accent-text);
+	outline-offset: 2px;
+}
+.fact-system {
+	color: var(--accent-text);
+}
+/* On a phone the two facts share a row and the System link takes its own full row, not half of one. */
+@media (max-width: 520px) {
+	.facts:has(.fact-link) .fact-system {
+		grid-column: 1 / -1;
+	}
+}

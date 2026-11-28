@@ -98,7 +98,8 @@ const CELL_H = 112
 
 // `bg` is the icon in the colourful themes; `tone` is the palette colour it takes in the others
 // (Midnight, Neon, Ember, Daylight and the Omarchy desktop's own theme), see .sys-ico in styles.css.
-export const SYS: Record<SysKind, {title: string; icon?: IconName; bg?: string; tone?: string; w: number; h: number}> = {
+// `max`: the window opens maximised (its content is a dashboard that uses the whole screen); Restore still works.
+export const SYS: Record<SysKind, {title: string; icon?: IconName; bg?: string; tone?: string; w: number; h: number; max?: boolean}> = {
 	home: {title: 'Home', icon: 'home-filled', bg: 'linear-gradient(150deg,#93c5fd,#1d4ed8 70%)', tone: 'var(--blue)', w: 860, h: 720},
 	files: {title: 'Files', icon: 'folder-filled', bg: 'linear-gradient(150deg,#7cb4ff,#2563eb 70%)', tone: 'var(--blue)', w: 960, h: 660},
 	apps: {title: 'Apps', icon: 'apps-filled', bg: 'linear-gradient(150deg,#c4b5fd,#7c3aed 70%)', tone: 'var(--mauve)', w: 800, h: 680},
@@ -106,7 +107,7 @@ export const SYS: Record<SysKind, {title: string; icon?: IconName; bg?: string; 
 	terminal: {title: 'Terminal', w: 860, h: 540},
 	machines: {title: 'Machines', icon: 'machine-filled', bg: 'linear-gradient(150deg,#5eead4,#0f766e 70%)', tone: 'var(--teal)', w: 1180, h: 760},
 	terminals: {title: 'Terminals', icon: 'terminal', bg: 'linear-gradient(150deg,#86efac,#15803d 70%)', tone: 'var(--green)', w: 980, h: 760},
-	system: {title: 'System', icon: 'activity-filled', bg: 'linear-gradient(150deg,#fdba74,#c2410c 70%)', tone: 'var(--peach)', w: 820, h: 720},
+	system: {title: 'System', icon: 'activity-filled', bg: 'linear-gradient(150deg,#fdba74,#c2410c 70%)', tone: 'var(--peach)', w: 820, h: 720, max: true},
 	settings: {title: 'Settings', icon: 'settings', bg: 'linear-gradient(150deg,#cbd5e1,#475569 70%)', tone: 'var(--fg)', w: 760, h: 720},
 	personalize: {title: 'Appearance', icon: 'palette', bg: 'linear-gradient(150deg,#f9a8d4,#be185d 70%)', tone: 'var(--pink)', w: 880, h: 720},
 	assistant: {title: 'Assistant', icon: 'sparkle', bg: 'linear-gradient(150deg,#c4b5fd,#7c3aed 70%)', tone: 'var(--mauve)', w: 720, h: 640},
@@ -700,7 +701,7 @@ export function Desktop({boot, prefs, setPrefs, onSignedOut, reopenAssistant}: {
 			zTop.current += 1
 			const id = Math.random().toString(36).slice(2, 10)
 			const workspace = hyprWsRef.current
-			const win: Win = {id, kind, key, payload: storedPayload, x: Math.max(a.x + 8, x), y: Math.max(a.y + 8, y), w, h, z: zTop.current, min: false, snap: null, born: Date.now(), workspace, float: false}
+			const win: Win = {id, kind, key, payload: storedPayload, x: Math.max(a.x + 8, x), y: Math.max(a.y + 8, y), w, h, z: zTop.current, min: false, snap: cfg.shell !== 'hyprland' && (SYS as Record<string, {max?: boolean}>)[kind]?.max ? 'max' : null, born: Date.now(), workspace, float: false}
 			if (cfg.shell === 'hyprland') {
 				const focused = topTileOn(workspace)
 				setTrees((ts) => ({...ts, [workspace]: insertTile(ts[workspace] ?? null, focused?.id ?? firstLeaf(ts[workspace] ?? null), id, usable(), GAP, hiddenIds(workspace))}))
