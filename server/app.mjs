@@ -1252,9 +1252,9 @@ export function createApp({store, staticDir, connectorDir = staticDir ? join(sta
 	}, 'Couldn’t sign you out. Try again.'))
 
 	// ---- Saved appearance (per My Own Data Center account, shared by all its phones) -------
-	const THEME_IDS = ['horizon', 'mocha', 'tokyo', 'gruvbox', 'latte', 'linen', 'sky', 'custom', 'omarchy']
-	const DARK_THEME_IDS = ['mocha', 'tokyo', 'gruvbox']
-	const LIGHT_THEME_IDS = ['latte', 'linen', 'sky']
+	const THEME_IDS = ['horizon', 'mocha', 'tokyo', 'gruvbox', 'latte', 'linen', 'sky', 'chronara-studio', 'chronara-studio-light', 'custom', 'omarchy']
+	const DARK_THEME_IDS = ['mocha', 'tokyo', 'gruvbox', 'chronara-studio']
+	const LIGHT_THEME_IDS = ['latte', 'linen', 'sky', 'chronara-studio-light']
 	const PICTURE_THEME_IDS = ['horizon', 'custom', 'omarchy']
 	const ACCENT_IDS = ['wallpaper', 'blue', 'mauve', 'teal', 'peach', 'green', 'pink']
 	const HSL = /^\d{1,3}(\.\d+)? \d{1,3}(\.\d+)?% \d{1,3}(\.\d+)?%$/

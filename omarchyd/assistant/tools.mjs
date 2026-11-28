@@ -187,6 +187,8 @@ export function appearanceCatalog() {
 			{id: 'latte', name: 'Daylight', look: 'Light palette'},
 			{id: 'linen', name: 'Linen', look: 'Warm off-white palette'},
 			{id: 'sky', name: 'Sky', look: 'Pale blue palette'},
+			{id: 'chronara-studio', name: 'Chronara Studio', look: 'Calm dark palette, solid panels, one accent'},
+			{id: 'chronara-studio-light', name: 'Chronara Studio Light', look: 'Calm light palette, solid panels, one accent'},
 			{id: 'omarchy', name: 'Omarchy', look: 'This server’s Omarchy colours'},
 		],
 		panelStyle: {

@@ -746,6 +746,8 @@ export const THEMES = [
 	{id: 'latte', name: 'Daylight', bg: '#f2f2ef', fg: '#4c4f69', dots: ['#1e66f5', '#40a02b', '#df8e1d', '#d20f39']},
 	{id: 'linen', name: 'Linen', bg: '#f6f1e7', fg: '#4a4338', dots: ['#3d6fbf', '#3d8c3a', '#b8860b', '#c44536']},
 	{id: 'sky', name: 'Sky', bg: '#d5e3f6', fg: '#2c3d52', dots: ['#3a6fbf', '#2f8f6b', '#c4922a', '#d04555']},
+	{id: 'chronara-studio', name: 'Chronara Studio', bg: '#14181d', fg: '#e7eaee', dots: ['#6ea0ff', '#4cc38a', '#e5b454', '#f2716b']},
+	{id: 'chronara-studio-light', name: 'Chronara Studio Light', bg: '#f7f8fa', fg: '#161a20', dots: ['#2f62d0', '#1f8a5b', '#a86b00', '#c8362f']},
 	{id: 'omarchy', name: 'Omarchy', bg: '#1a1b26', fg: '#a9b1d6', dots: ['#7aa2f7', '#9ece6a', '#e0af68', '#f7768e']},
 ] as const
 export const ACCENTS = ['wallpaper', 'blue', 'mauve', 'teal', 'peach', 'green', 'pink'] as const
@@ -892,6 +894,9 @@ function applyOmarchyPalette(root: HTMLElement, on: boolean) {
 	set('--teal', p.cyan)
 	set('--peach', p.yellow && p.red ? mix(p.yellow, p.red, 55) : p.yellow)
 }
+// Chronara Studio's own accent, per mode (white text on the fill passes WCAG AA in both).
+const CHRONARA_STUDIO_ACCENT = {dark: {fill: '#3d70db', text: '#8db3ff'}, light: {fill: '#2f62d0', text: '#2a58c2'}}
+const isChronaraStudio = (theme: string): theme is 'chronara-studio' | 'chronara-studio-light' => theme === 'chronara-studio' || theme === 'chronara-studio-light'
 export function applyPrefs(p: Prefs, brandHsl?: string | null) {
 	const root = document.documentElement
 	root.dataset.theme = p.theme
@@ -905,6 +910,11 @@ export function applyPrefs(p: Prefs, brandHsl?: string | null) {
 		root.style.setProperty('--accent', fill)
 		root.style.setProperty('--accent-text', fill)
 		root.style.setProperty('--on-accent', pickOnAccent(fill, '#111', c?.background ?? '#1a1b26'))
+	} else if (p.accent === 'wallpaper' && isChronaraStudio(p.theme)) {
+		const a = CHRONARA_STUDIO_ACCENT[p.theme === 'chronara-studio-light' ? 'light' : 'dark']
+		root.style.setProperty('--accent', a.fill)
+		root.style.setProperty('--accent-text', a.text)
+		root.style.setProperty('--on-accent', '#fff')
 	} else if (p.accent === 'wallpaper') {
 		const source = p.theme === 'custom' ? (p.customBrandHsl ?? brandHsl) : brandHsl
 		const [h, s, l] = (source ?? FALLBACK_BRAND).split(' ').map((v) => parseFloat(v))

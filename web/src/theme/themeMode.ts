@@ -1,6 +1,6 @@
 // Sun and Moon are named palettes. Off is the picture theme: Horizon, Your photo, or Omarchy.
-export const DARK_THEME_IDS = ['mocha', 'tokyo', 'gruvbox'] as const
-export const LIGHT_THEME_IDS = ['latte', 'linen', 'sky'] as const
+export const DARK_THEME_IDS = ['mocha', 'tokyo', 'gruvbox', 'chronara-studio'] as const
+export const LIGHT_THEME_IDS = ['latte', 'linen', 'sky', 'chronara-studio-light'] as const
 export const PICTURE_THEME_IDS = ['horizon', 'custom', 'omarchy'] as const
 
 export type DarkThemeId = (typeof DARK_THEME_IDS)[number]

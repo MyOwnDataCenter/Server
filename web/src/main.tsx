@@ -6,6 +6,7 @@ import {App} from './App'
 import {ApiError} from './api'
 import {Providers, applyPrefs, readPrefs, watchKeyboardViewport} from './ui'
 import './styles.css'
+import './theme-chronara-studio.css'
 
 applyPrefs(readPrefs())
 watchKeyboardViewport()

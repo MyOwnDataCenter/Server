@@ -1,0 +1,550 @@
+/* Chronara Studio: a calm, professional theme for the desktop (and the phone), in a dark and a light mode.
+   - Colour: layered solid surfaces (no blur), one accent for "you can act here", status colours only
+     for state (good / warning / critical), so what needs attention stands out (ISA-101 idea).
+   - Depth: controls you can press are raised (light from above: a top highlight, a darker lower edge,
+     a soft drop shadow) and sink 1 px when pressed; fields you type into are recessed. Surfaces stay flat.
+   - Type: Inter for words, JetBrains Mono only for data (IDs, addresses, sizes), tabular numbers.
+     Scale 12 / 13 / 14 / 16 / 20 / 26.
+   - Space: a 4 px grid (4, 8, 12, 16, 24, 32). Radius: 6 small controls, 8 controls, 12 surfaces.
+   - Controls: 36 px on the desktop (pointer), 44 px+ on the phone (touch), visible focus everywhere.
+   Imported after styles.css; every rule is scoped to the two Chronara Studio themes, so no other theme changes. */
+
+/* ---- tokens: dark (chronara-studio) ---- */
+:root[data-theme='chronara-studio'] {
+	--bg: #0d1014;
+	--bg-solid: #14181d;
+	--fg: #e7eaee;
+	--fg-2: #b9c0ca;
+	--muted: #8d96a3;
+	--faint: rgba(231, 234, 238, 0.06);
+	--glass: #1a1f26;
+	--card: var(--glass);
+	--glass-2: #222833;
+	--glass-press: #2a313d;
+	--line: #262c35;
+	--line-2: #343b47;
+	--sheet: #171b21;
+	--dock: rgba(15, 18, 22, 0.94);
+	--green: #4cc38a;
+	--yellow: #e5b454;
+	--red: #f2716b;
+	--blue: #6ea0ff;
+	--mauve: #a98bf5;
+	--teal: #4fc4cf;
+	--peach: #f0965a;
+	--pink: #e57fb8;
+	--shadow: 0 16px 48px rgba(0, 0, 0, 0.5);
+
+	--chrome: #0f1216;
+	--win-bar: #181c22;
+	--menu: #1a1f26;
+	--ring-active: #3d4552;
+	--win-drop: rgba(0, 0, 0, 0.45);
+
+	--btn-top: #2c333e;
+	--btn-bot: #222831;
+	--btn-hover-top: #333b47;
+	--btn-hover-bot: #282f39;
+	--btn-edge: #3b434f;
+	--btn-edge-low: #11151a;
+	--btn-hi: rgba(255, 255, 255, 0.14);
+	--gloss-a: 0.09;
+	--btn-drop: rgba(0, 0, 0, 0.4);
+	--well: #101318;
+	--well-shade: rgba(0, 0, 0, 0.45);
+	--danger-fill: #c8413b;
+	color-scheme: dark;
+}
+
+/* ---- tokens: light (chronara-studio-light) ---- */
+:root[data-theme='chronara-studio-light'] {
+	--bg: #e9edf2;
+	--bg-solid: #f7f8fa;
+	--fg: #161a20;
+	--fg-2: #3b434e;
+	--muted: #5f6875;
+	--faint: rgba(22, 26, 32, 0.05);
+	--glass: #ffffff;
+	--card: var(--glass);
+	--glass-2: #f1f3f6;
+	--glass-press: #e6e9ee;
+	--line: #dde1e7;
+	--line-2: #cdd3db;
+	--sheet: #ffffff;
+	--dock: rgba(248, 249, 251, 0.95);
+	--green: #1f8a5b;
+	--yellow: #a86b00;
+	--red: #c8362f;
+	--blue: #2f62d0;
+	--mauve: #7048d8;
+	--teal: #11808b;
+	--peach: #c25a17;
+	--pink: #b8407e;
+	--shadow: 0 16px 40px rgba(16, 24, 40, 0.16);
+
+	--chrome: #f7f8fa;
+	--win-bar: #eef1f5;
+	--menu: #ffffff;
+	--ring-active: #b8c0cb;
+	--win-drop: rgba(16, 24, 40, 0.14);
+
+	--btn-top: #ffffff;
+	--btn-bot: #f0f2f5;
+	--btn-hover-top: #ffffff;
+	--btn-hover-bot: #e8ebef;
+	--btn-edge: #cdd3db;
+	--btn-edge-low: #aab3bf;
+	--btn-hi: rgba(255, 255, 255, 1);
+	--gloss-a: 0.7;
+	--btn-drop: rgba(16, 24, 40, 0.1);
+	--well: #ffffff;
+	--well-shade: rgba(16, 24, 40, 0.08);
+	--danger-fill: #c8362f;
+	color-scheme: light;
+}
+
+/* ---- shared scales ---- */
+:root:is([data-theme='chronara-studio'], [data-theme='chronara-studio-light']) {
+	--icon-shadow: none;
+	--text-shadow: none;
+	--r-lg: 12px;
+	--r-md: 8px;
+	--r-sm: 6px;
+	--sp-1: 4px;
+	--sp-2: 8px;
+	--sp-3: 12px;
+	--sp-4: 16px;
+	--sp-5: 24px;
+	--sp-6: 32px;
+	--fs-xs: 12px;
+	--fs-sm: 13px;
+	--fs-md: 14px;
+	--fs-lg: 16px;
+	--fs-xl: 20px;
+	--fs-2xl: 26px;
+	--ctl: 44px;
+	--press: 90ms;
+	--recessed: inset 0 1px 2px var(--well-shade);
+	/* gloss: a soft shine on the top half of anything raised */
+	--gloss: linear-gradient(180deg, rgba(255, 255, 255, var(--gloss-a)) 0%, rgba(255, 255, 255, calc(var(--gloss-a) * 0.35)) 48%, rgba(255, 255, 255, 0) 52%, rgba(0, 0, 0, 0.04) 100%);
+	/* emboss: bright top lip, dark bottom lip, then the drop shadow */
+	--raised: inset 0 1px 0 var(--btn-hi), inset 0 -1px 0 rgba(0, 0, 0, 0.22), 0 1px 0 var(--btn-edge-low), 0 2px 4px var(--btn-drop), 0 6px 14px -6px var(--btn-drop);
+	--raised-hover: inset 0 1px 0 var(--btn-hi), inset 0 -1px 0 rgba(0, 0, 0, 0.22), 0 1px 0 var(--btn-edge-low), 0 3px 6px var(--btn-drop), 0 10px 20px -8px var(--btn-drop);
+	--pressed: inset 0 2px 4px var(--btn-drop), inset 0 0 0 1px var(--btn-edge-low);
+}
+:root:is([data-theme='chronara-studio'], [data-theme='chronara-studio-light']) .desk {
+	--ctl: 36px;
+}
+
+/* ---- type ---- */
+:root:is([data-theme='chronara-studio'], [data-theme='chronara-studio-light']) body {
+	letter-spacing: 0;
+}
+:root:is([data-theme='chronara-studio'], [data-theme='chronara-studio-light']) .desk {
+	font-size: var(--fs-md);
+}
+:root:is([data-theme='chronara-studio'], [data-theme='chronara-studio-light']) h1.title {
+	font-size: var(--fs-2xl);
+	font-weight: 650;
+	letter-spacing: -0.015em;
+	text-shadow: none;
+}
+:root:is([data-theme='chronara-studio'], [data-theme='chronara-studio-light']) :is(.mono, code, kbd, .kv .row .v, td, .num) {
+	font-variant-numeric: tabular-nums;
+}
+:root:is([data-theme='chronara-studio'], [data-theme='chronara-studio-light']) .section-head {
+	margin: var(--sp-5) 2px var(--sp-2);
+}
+:root:is([data-theme='chronara-studio'], [data-theme='chronara-studio-light']) :is(.list-head, .section-head h2, .section-head h3) {
+	font-size: var(--fs-xs);
+	font-weight: 600;
+	letter-spacing: 0.06em;
+	text-transform: uppercase;
+	color: var(--muted);
+}
+
+/* ---- surfaces: flat, solid layers ---- */
+:root:is([data-theme='chronara-studio'], [data-theme='chronara-studio-light']) .glass {
+	background: var(--glass);
+	border-color: var(--line);
+	border-radius: var(--r-lg);
+	backdrop-filter: none;
+	-webkit-backdrop-filter: none;
+	box-shadow: none;
+}
+:root[data-theme='chronara-studio-light'] .glass {
+	box-shadow: 0 1px 2px rgba(16, 24, 40, 0.04);
+}
+:root:is([data-theme='chronara-studio'], [data-theme='chronara-studio-light']) .backdrop .aurora {
+	opacity: 0.08;
+}
+:root:is([data-theme='chronara-studio'], [data-theme='chronara-studio-light']) .card {
+	padding: var(--sp-4);
+}
+:root:is([data-theme='chronara-studio'], [data-theme='chronara-studio-light']) .sheet {
+	background: var(--sheet);
+	backdrop-filter: none;
+	-webkit-backdrop-filter: none;
+	border: 1px solid var(--line-2);
+	border-bottom: 0;
+	border-radius: 16px 16px 0 0;
+}
+:root:is([data-theme='chronara-studio'], [data-theme='chronara-studio-light']) .desk .sheet {
+	border-bottom: 1px solid var(--line-2);
+	border-radius: var(--r-lg);
+	box-shadow: var(--shadow);
+}
+
+/* ---- buttons: raised, and they press in ---- */
+:root:is([data-theme='chronara-studio'], [data-theme='chronara-studio-light']) .btn {
+	min-height: var(--ctl);
+	padding: 0 var(--sp-4);
+	gap: var(--sp-2);
+	border-radius: var(--r-md);
+	border: 1px solid var(--btn-edge);
+	background: var(--gloss), linear-gradient(180deg, var(--btn-top), var(--btn-bot));
+	box-shadow: var(--raised);
+	color: var(--fg);
+	font-size: var(--fs-md);
+	font-weight: 550;
+	transition:
+		transform var(--press) ease,
+		box-shadow 140ms ease,
+		background 140ms ease,
+		border-color 140ms ease;
+}
+:root:is([data-theme='chronara-studio'], [data-theme='chronara-studio-light']) .btn:hover:not(:disabled) {
+	background: var(--gloss), linear-gradient(180deg, var(--btn-hover-top), var(--btn-hover-bot));
+	box-shadow: var(--raised-hover);
+}
+:root:is([data-theme='chronara-studio'], [data-theme='chronara-studio-light']) .btn:active:not(:disabled) {
+	transform: translateY(1px);
+	background: linear-gradient(180deg, var(--btn-bot), var(--btn-bot));
+	box-shadow: var(--pressed);
+}
+:root:is([data-theme='chronara-studio'], [data-theme='chronara-studio-light']) .btn:disabled {
+	box-shadow: none;
+	opacity: 0.5;
+}
+:root:is([data-theme='chronara-studio'], [data-theme='chronara-studio-light']) .btn.small {
+	min-height: 30px;
+	padding: 0 var(--sp-3);
+	border-radius: var(--r-sm);
+	font-size: var(--fs-sm);
+	font-weight: 550;
+}
+:root:is([data-theme='chronara-studio'], [data-theme='chronara-studio-light']) .btn.primary {
+	border-color: color-mix(in srgb, var(--accent) 70%, #000);
+	background: linear-gradient(180deg, rgba(255, 255, 255, 0.26) 0%, rgba(255, 255, 255, 0.08) 48%, rgba(255, 255, 255, 0) 52%), linear-gradient(180deg, color-mix(in srgb, var(--accent) 86%, #fff), color-mix(in srgb, var(--accent) 88%, #000));
+	color: var(--on-accent);
+	text-shadow: 0 -1px 0 rgba(0, 0, 0, 0.18);
+	box-shadow:
+		inset 0 1px 0 rgba(255, 255, 255, 0.34),
+		inset 0 -1px 0 rgba(0, 0, 0, 0.25),
+		0 1px 0 color-mix(in srgb, var(--accent) 55%, #000),
+		0 3px 10px -2px color-mix(in srgb, var(--accent) 55%, transparent);
+}
+:root:is([data-theme='chronara-studio'], [data-theme='chronara-studio-light']) .btn.primary:hover:not(:disabled) {
+	background: linear-gradient(180deg, rgba(255, 255, 255, 0.3) 0%, rgba(255, 255, 255, 0.1) 48%, rgba(255, 255, 255, 0) 52%), linear-gradient(180deg, color-mix(in srgb, var(--accent) 78%, #fff), var(--accent));
+	box-shadow:
+		inset 0 1px 0 rgba(255, 255, 255, 0.28),
+		0 1px 0 color-mix(in srgb, var(--accent) 55%, #000),
+		0 4px 14px -3px color-mix(in srgb, var(--accent) 60%, transparent);
+}
+:root:is([data-theme='chronara-studio'], [data-theme='chronara-studio-light']) .btn.primary:active:not(:disabled) {
+	background: color-mix(in srgb, var(--accent) 88%, #000);
+	box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.35);
+}
+:root:is([data-theme='chronara-studio'], [data-theme='chronara-studio-light']) .btn.danger {
+	color: var(--red);
+}
+:root:is([data-theme='chronara-studio'], [data-theme='chronara-studio-light']) .btn.danger.primary {
+	color: #fff;
+	border-color: color-mix(in srgb, var(--danger-fill) 70%, #000);
+	background: linear-gradient(180deg, rgba(255, 255, 255, 0.26) 0%, rgba(255, 255, 255, 0.08) 48%, rgba(255, 255, 255, 0) 52%), linear-gradient(180deg, color-mix(in srgb, var(--danger-fill) 86%, #fff), color-mix(in srgb, var(--danger-fill) 88%, #000));
+	box-shadow:
+		inset 0 1px 0 rgba(255, 255, 255, 0.3),
+		0 1px 0 color-mix(in srgb, var(--danger-fill) 55%, #000),
+		0 2px 8px -2px color-mix(in srgb, var(--danger-fill) 55%, transparent);
+}
+/* ghost: flat at rest, raised under the pointer */
+:root:is([data-theme='chronara-studio'], [data-theme='chronara-studio-light']) .btn.ghost {
+	background: transparent;
+	border-color: transparent;
+	box-shadow: none;
+}
+:root:is([data-theme='chronara-studio'], [data-theme='chronara-studio-light']) .btn.ghost:hover:not(:disabled) {
+	border-color: var(--btn-edge);
+	background: var(--gloss), linear-gradient(180deg, var(--btn-top), var(--btn-bot));
+	box-shadow: var(--raised);
+}
+:root:is([data-theme='chronara-studio'], [data-theme='chronara-studio-light']) .round-btn {
+	border-radius: var(--r-md);
+	border: 1px solid var(--btn-edge);
+	background: var(--gloss), linear-gradient(180deg, var(--btn-top), var(--btn-bot));
+	box-shadow: var(--raised);
+	color: var(--fg);
+}
+:root:is([data-theme='chronara-studio'], [data-theme='chronara-studio-light']) .round-btn:active {
+	transform: translateY(1px);
+	box-shadow: var(--pressed);
+}
+:root:is([data-theme='chronara-studio'], [data-theme='chronara-studio-light']) .icon-btn {
+	border-radius: var(--r-md);
+}
+
+/* ---- focus: always visible for keyboard users ---- */
+:root:is([data-theme='chronara-studio'], [data-theme='chronara-studio-light']) :is(button, a, [role='tab'], [role='menuitem'], [tabindex]):focus-visible {
+	outline: 2px solid var(--accent-text);
+	outline-offset: 2px;
+}
+
+/* ---- fields: recessed wells ---- */
+:root:is([data-theme='chronara-studio'], [data-theme='chronara-studio-light']) .search {
+	height: var(--ctl);
+	border-radius: var(--r-md);
+	padding: 0 var(--sp-3);
+	gap: var(--sp-2);
+	margin-bottom: var(--sp-3);
+	background: var(--well);
+	border: 1px solid var(--line-2);
+	box-shadow: var(--recessed);
+}
+:root:is([data-theme='chronara-studio'], [data-theme='chronara-studio-light']) .search:focus-within {
+	border-color: var(--accent-text);
+	box-shadow:
+		var(--recessed),
+		0 0 0 3px color-mix(in srgb, var(--accent) 25%, transparent);
+}
+:root:is([data-theme='chronara-studio'], [data-theme='chronara-studio-light']) :is(input, select, textarea):not([type='checkbox']):not([type='radio']):not([type='range']):not([type='color']):not(.search input) {
+	border-radius: var(--r-md);
+}
+
+/* ---- segmented: a recessed track with a raised thumb ---- */
+:root:is([data-theme='chronara-studio'], [data-theme='chronara-studio-light']) .segmented {
+	padding: 4px; /* the thumb's width assumes 4 px (ui.tsx Segmented) */
+	border-radius: var(--r-md);
+	margin-bottom: var(--sp-3);
+	background: var(--well);
+	border: 1px solid var(--line-2);
+	box-shadow: var(--recessed);
+}
+:root:is([data-theme='chronara-studio'], [data-theme='chronara-studio-light']) .segmented .thumb {
+	top: 4px;
+	bottom: 4px;
+	left: 4px;
+	border-radius: var(--r-sm);
+	background: var(--gloss), linear-gradient(180deg, var(--btn-top), var(--btn-bot));
+	box-shadow:
+		inset 0 1px 0 var(--btn-hi),
+		0 0 0 1px var(--btn-edge),
+		0 1px 3px var(--btn-drop);
+}
+:root:is([data-theme='chronara-studio'], [data-theme='chronara-studio-light']) .desk .segmented button {
+	height: 30px;
+}
+:root:is([data-theme='chronara-studio'], [data-theme='chronara-studio-light']) .segmented button[aria-selected='true'],
+:root:is([data-theme='chronara-studio'], [data-theme='chronara-studio-light']) .segmented button[aria-pressed='true'] {
+	color: var(--fg);
+}
+
+/* ---- rows and key/value lists ---- */
+:root:is([data-theme='chronara-studio'], [data-theme='chronara-studio-light']) .row {
+	gap: var(--sp-3);
+}
+:root:is([data-theme='chronara-studio'], [data-theme='chronara-studio-light']) .desk .row {
+	min-height: 52px;
+	padding: var(--sp-2) var(--sp-3);
+}
+:root:is([data-theme='chronara-studio'], [data-theme='chronara-studio-light']) .row .main b {
+	font-size: var(--fs-md);
+	font-weight: 550;
+}
+:root:is([data-theme='chronara-studio'], [data-theme='chronara-studio-light']) .row .main span {
+	font-size: var(--fs-sm);
+	margin-top: 2px;
+}
+:root:is([data-theme='chronara-studio'], [data-theme='chronara-studio-light']) .desk .kv .row {
+	min-height: 40px;
+}
+:root:is([data-theme='chronara-studio'], [data-theme='chronara-studio-light']) .kv .row :is(.k, .v) {
+	font-size: var(--fs-sm);
+}
+:root:is([data-theme='chronara-studio'], [data-theme='chronara-studio-light']) .kv .row .v {
+	font-weight: 500;
+}
+
+/* ---- status: shape + word + colour, never colour alone ---- */
+:root:is([data-theme='chronara-studio'], [data-theme='chronara-studio-light']) .pill {
+	height: 22px;
+	padding: 0 var(--sp-2);
+	gap: 6px;
+	border-radius: 999px;
+	font-size: var(--fs-xs);
+	font-weight: 550;
+	text-transform: none;
+	background: color-mix(in srgb, var(--c) 13%, transparent);
+	box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--c) 32%, transparent);
+}
+
+/* ---- empty states ---- */
+:root:is([data-theme='chronara-studio'], [data-theme='chronara-studio-light']) .empty {
+	padding: var(--sp-6) var(--sp-5);
+	gap: var(--sp-2);
+	font-size: var(--fs-md);
+}
+
+/* ---- desktop chrome: top bar, dock, windows, menus ---- */
+:root:is([data-theme='chronara-studio'], [data-theme='chronara-studio-light']) .desk-top {
+	background: var(--chrome);
+	backdrop-filter: none;
+	-webkit-backdrop-filter: none;
+	border-bottom: 1px solid var(--line);
+	color: var(--fg);
+	font-size: var(--fs-sm);
+}
+:root:is([data-theme='chronara-studio'], [data-theme='chronara-studio-light']) .desk-top :is(button, .top-stat) {
+	color: var(--fg);
+}
+:root:is([data-theme='chronara-studio'], [data-theme='chronara-studio-light']) .theme-mode {
+	display: inline-grid;
+	place-items: center;
+	cursor: pointer;
+}
+:root:is([data-theme='chronara-studio'], [data-theme='chronara-studio-light']) .desk-dock {
+	--dock-bg: var(--dock);
+	--dock-border: var(--line-2);
+	--dock-hover: var(--glass-2);
+	--dock-focus: var(--glass-press);
+	--dock-dot: var(--accent-text);
+	backdrop-filter: none;
+	-webkit-backdrop-filter: none;
+}
+:root:is([data-theme='chronara-studio'], [data-theme='chronara-studio-light']) .dock-item {
+	border-radius: 10px;
+}
+:root:is([data-theme='chronara-studio'], [data-theme='chronara-studio-light']) .dock-item.focused {
+	background: var(--gloss), linear-gradient(180deg, var(--btn-top), var(--btn-bot));
+	box-shadow: var(--raised);
+}
+:root:is([data-theme='chronara-studio'], [data-theme='chronara-studio-light']) .win {
+	border-radius: 10px;
+	background: var(--bg-solid);
+	box-shadow:
+		0 0 0 1px var(--line-2),
+		0 8px 24px var(--win-drop);
+}
+:root:is([data-theme='chronara-studio'], [data-theme='chronara-studio-light']) .win.active {
+	box-shadow:
+		0 0 0 1px var(--ring-active),
+		0 18px 56px var(--win-drop);
+}
+:root:is([data-theme='chronara-studio'], [data-theme='chronara-studio-light']) .win.snapped {
+	border-radius: 0;
+}
+:root:is([data-theme='chronara-studio'], [data-theme='chronara-studio-light']) .win-bar {
+	height: 40px;
+	gap: var(--sp-2);
+	padding: 0 6px 0 var(--sp-3);
+	background: var(--win-bar);
+	border-bottom: 1px solid var(--line);
+}
+:root:is([data-theme='chronara-studio'], [data-theme='chronara-studio-light']) .win:not(.active) .win-bar {
+	background: var(--bg-solid);
+}
+:root:is([data-theme='chronara-studio'], [data-theme='chronara-studio-light']) .win-title {
+	font-size: var(--fs-sm);
+	font-weight: 600;
+}
+:root:is([data-theme='chronara-studio'], [data-theme='chronara-studio-light']) .win-btn {
+	width: 28px;
+	height: 28px;
+	border-radius: var(--r-sm);
+	background: transparent;
+	color: var(--fg-2);
+}
+:root:is([data-theme='chronara-studio'], [data-theme='chronara-studio-light']) .win-btn:hover {
+	background: var(--gloss), linear-gradient(180deg, var(--btn-top), var(--btn-bot));
+	box-shadow: var(--raised);
+	color: var(--fg);
+}
+:root:is([data-theme='chronara-studio'], [data-theme='chronara-studio-light']) .win-btn.close:hover {
+	background: linear-gradient(180deg, color-mix(in srgb, var(--danger-fill) 86%, #fff), var(--danger-fill));
+	color: #fff;
+}
+:root:is([data-theme='chronara-studio'], [data-theme='chronara-studio-light']) :is(.top-pop, .ctx-menu) {
+	background: var(--menu);
+	color: var(--fg);
+	backdrop-filter: none;
+	-webkit-backdrop-filter: none;
+	border: 1px solid var(--line-2);
+	border-radius: 10px;
+	box-shadow: var(--shadow);
+}
+
+/* ---- icons: glossy tiles in each app's colour, white symbol, so each one reads at a glance ---- */
+:root:is([data-theme='chronara-studio'], [data-theme='chronara-studio-light']) .app-icon.sys-ico,
+:root:is([data-theme='chronara-studio'], [data-theme='chronara-studio-light']) .app-icon.os-ico {
+	background:
+		radial-gradient(120% 70% at 50% -10%, rgba(255, 255, 255, 0.5), rgba(255, 255, 255, 0.12) 45%, rgba(255, 255, 255, 0) 46%),
+		var(--grad, linear-gradient(160deg, color-mix(in srgb, var(--tone) 82%, #fff), color-mix(in srgb, var(--tone) 82%, #000))) !important;
+	color: #fff !important;
+	box-shadow:
+		inset 0 1px 0 rgba(255, 255, 255, 0.55),
+		inset 0 -1px 0 rgba(0, 0, 0, 0.25),
+		inset 0 0 0 1px rgba(0, 0, 0, 0.18),
+		0 2px 6px rgba(0, 0, 0, 0.28) !important;
+}
+:root:is([data-theme='chronara-studio'], [data-theme='chronara-studio-light']) .app-icon.sys-ico svg,
+:root:is([data-theme='chronara-studio'], [data-theme='chronara-studio-light']) .app-icon.os-ico svg {
+	filter: drop-shadow(0 1px 1px rgba(0, 0, 0, 0.35));
+}
+:root:is([data-theme='chronara-studio'], [data-theme='chronara-studio-light']) .app-icon.sys-ico::after {
+	display: none;
+}
+:root:is([data-theme='chronara-studio'], [data-theme='chronara-studio-light']) .dock button svg {
+	color: color-mix(in srgb, var(--tone) 65%, var(--muted));
+}
+:root:is([data-theme='chronara-studio'], [data-theme='chronara-studio-light']) .dock button[aria-current='page'] svg {
+	color: var(--tone);
+}
+
+@media (prefers-reduced-motion: reduce) {
+	:root:is([data-theme='chronara-studio'], [data-theme='chronara-studio-light']) :is(.win, .sheet, .btn, .row, .segmented .thumb, .round-btn) {
+		transition: none !important;
+		animation: none !important;
+	}
+	:root:is([data-theme='chronara-studio'], [data-theme='chronara-studio-light']) :is(.btn, .round-btn):active {
+		transform: none !important;
+	}
+}
+
+/* ---- desktop background when there is no picture (or it hasn't loaded): the theme's own ground ---- */
+:root:is([data-theme='chronara-studio'], [data-theme='chronara-studio-light']) .desk-wall {
+	background:
+		radial-gradient(120% 90% at 15% 0%, color-mix(in srgb, var(--accent) 10%, transparent), transparent 60%),
+		radial-gradient(90% 70% at 100% 100%, color-mix(in srgb, var(--teal) 7%, transparent), transparent 60%),
+		var(--bg);
+}
+/* dark labels only on the plain light ground; over a picture they keep their light text and shadow */
+:root[data-theme='chronara-studio-light'] .desk:not(:has(.wall-layer)) .desk-icon-label {
+	color: var(--fg);
+	text-shadow: none;
+}
+
+/* Home facts in Studio: raised tiles, like the buttons. */
+:root:is([data-theme='chronara-studio'], [data-theme='chronara-studio-light']) .fact-link {
+	border-radius: var(--r-md);
+	border: 1px solid var(--btn-edge);
+	background: var(--gloss), linear-gradient(180deg, var(--btn-top), var(--btn-bot));
+	box-shadow: var(--raised);
+	backdrop-filter: none;
+	-webkit-backdrop-filter: none;
+}
+:root:is([data-theme='chronara-studio'], [data-theme='chronara-studio-light']) .fact-link:hover {
+	box-shadow: var(--raised-hover);
+}
+:root:is([data-theme='chronara-studio'], [data-theme='chronara-studio-light']) .fact-link:active {
+	transform: translateY(1px);
+	box-shadow: var(--pressed);
+}
