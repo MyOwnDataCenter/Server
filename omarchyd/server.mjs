@@ -105,6 +105,7 @@ export async function startOmarchyd({port = 2021, host = '127.0.0.1', dataDir, t
 	const containers = createContainers({
 		reservedPorts: [port, webPort],
 		backupsDir: join(dataDir, 'container-backups'),
+		dataDir,
 		files,
 		connector: {
 			pair: (input) => connector.procedures['swarm.pair'].run(input),

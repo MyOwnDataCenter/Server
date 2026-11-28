@@ -48,6 +48,7 @@ export type Container = {
 	tags: string[]
 	job: string | null
 	error: string | null
+	nixos?: boolean
 	from?: string | null
 	// Not in Incus yet: being created, cloned or restored (or that failed).
 	pending?: boolean
@@ -70,11 +71,12 @@ const OS_COLOR: Record<string, string> = {
 	almalinux: '#0f4266',
 	centos: '#a14f8c',
 	opensuse: '#73ba25',
+	nixos: '#5277c3',
 	devuan: '#5c5c7a',
 	gentoo: '#54487a',
 }
 const osColor = (os: string) => OS_COLOR[os] ?? '#4b5563'
-const OS_NAME: Record<string, string> = {archlinux: 'Arch Linux', rockylinux: 'Rocky Linux', almalinux: 'AlmaLinux', centos: 'CentOS Stream', opensuse: 'openSUSE'}
+const OS_NAME: Record<string, string> = {nixos: 'NixOS', archlinux: 'Arch Linux', rockylinux: 'Rocky Linux', almalinux: 'AlmaLinux', centos: 'CentOS Stream', opensuse: 'openSUSE'}
 const osLabel = (c: {os: string; release: string}) => [OS_NAME[c.os] ?? (c.os ? c.os[0].toUpperCase() + c.os.slice(1) : ''), c.release].filter(Boolean).join(' ')
 const bytes = (n: number) => (n >= 1024 ** 3 ? `${(n / 1024 ** 3).toFixed(1)} GB` : n >= 1024 ** 2 ? `${Math.round(n / 1024 ** 2)} MB` : `${Math.max(1, Math.round(n / 1024))} KB`)
 const plain = (e: Error) => e.message.replace(/^[A-Z_]+: /, '')
@@ -132,6 +134,10 @@ export function useContainerAction() {
 			if (/Template/.test(a.path) || a.path === 'containers.create') qc.invalidateQueries({queryKey: ['containers.templates']})
 			if (/ackup/.test(a.path)) qc.invalidateQueries({queryKey: ['containers.backups']})
 			if (a.path === 'containers.installConnector') qc.invalidateQueries({queryKey: ['swarm.list']})
+			if (/[Nn]ixos|[Nn]ixCache/.test(a.path)) {
+				qc.invalidateQueries({queryKey: ['containers.nixosConfig']})
+				qc.invalidateQueries({queryKey: ['containers.nixCache']})
+			}
 		},
 	})
 }
@@ -259,13 +265,24 @@ function SetUp({status, onCheck, checking}: {status: Extract<ContainerStatus, {a
 
 const NAME = /^[a-z]([a-z0-9-]{0,61}[a-z0-9])?$/
 const nameProblemOf = (name: string, existing: string[]) => (!name ? 'Give it a name' : !NAME.test(name) ? 'Lowercase letters, numbers and dashes, starting with a letter' : existing.includes(name) ? 'That name is taken' : null)
+const isNixosImage = (os: string) => /^nixos$/i.test(os.trim())
+const NIXOS_EXAMPLE = `{ config, pkgs, ... }:
+{
+  imports = [ <nixpkgs/nixos/modules/virtualisation/lxc-container.nix> ];
 
-function TextField({id, label, value, onChange, hint, placeholder, numeric, type, area}: {id: string; label: string; value: string; onChange: (v: string) => void; hint?: ReactNode; placeholder?: string; numeric?: boolean; type?: string; area?: boolean}) {
+  networking.hostName = "nixos";
+  system.stateVersion = "24.11";
+
+  environment.systemPackages = with pkgs; [ vim curl ];
+}
+`
+
+function TextField({id, label, value, onChange, hint, placeholder, numeric, type, area, rows}: {id: string; label: string; value: string; onChange: (v: string) => void; hint?: ReactNode; placeholder?: string; numeric?: boolean; type?: string; area?: boolean; rows?: number}) {
 	return (
 		<div className="field">
 			<label htmlFor={id}>{label}</label>
 			{area ? (
-				<textarea id={id} value={value} placeholder={placeholder} rows={3} onChange={(e) => onChange(e.target.value)} />
+				<textarea id={id} value={value} placeholder={placeholder} rows={rows ?? 3} onChange={(e) => onChange(e.target.value)} spellCheck={false} />
 			) : (
 				<input
 					id={id}
@@ -333,13 +350,14 @@ function CreateContainer({onDone, existing, backLabel = 'LXC containers'}: {onDo
 	const [autostart, setAutostart] = useState(true)
 	const [password, setPassword] = useState('')
 	const [sshKey, setSshKey] = useState('')
+	const [nixosConfig, setNixosConfig] = useState('')
 	const nameProblem = nameProblemOf(name, existing)
 	const pick = (id: string, label: string, os: string, suggested: string) => (haptic(6), setImage({id, label, os}), setName(name || suggested))
 	const create = () =>
 		action.mutate(
 			{
 				path: 'containers.create',
-				input: {name, image: image!.id, cpus: Number(cpus), memoryMiB: Number(memory), diskGiB: Number(disk), autostart, rootPassword: password || undefined, sshKey: sshKey.trim() || undefined},
+				input: {name, image: image!.id, cpus: Number(cpus), memoryMiB: Number(memory), diskGiB: Number(disk), autostart, rootPassword: password || undefined, sshKey: sshKey.trim() || undefined, ...(image && isNixosImage(image.os) && nixosConfig.trim() ? {nixosConfig} : {})},
 				done: `Creating ${name}. The first container of a system takes a minute to download.`,
 			},
 			{onSuccess: onDone},
@@ -417,6 +435,14 @@ function CreateContainer({onDone, existing, backLabel = 'LXC containers'}: {onDo
 					<SwitchRow label="Start with the server" sub="Starts by itself after the server restarts." on={autostart} onChange={setAutostart} />
 					<TextField id="ct-pw" label="Root password (optional)" type="password" value={password} onChange={setPassword} hint="For signing in on this container or over SSH. It isn’t stored by My Own Data Center." />
 					<TextField id="ct-key" label="SSH public key (optional)" value={sshKey} onChange={setSshKey} placeholder="ssh-ed25519 AAAA… you@laptop" area hint="Added for root. Install an SSH server inside to use it." />
+					{image && isNixosImage(image.os) ? (
+						<>
+							<TextField id="ct-nix" label="NixOS configuration (optional)" value={nixosConfig} onChange={setNixosConfig} area rows={12} hint="Written to /etc/nixos/configuration.nix and applied with nixos-rebuild after the container starts. Leave empty for the stock image." placeholder="{ config, pkgs, ... }: { … }" />
+							<button type="button" className="btn small" style={{marginTop: 4}} onClick={() => setNixosConfig(NIXOS_EXAMPLE)}>
+								Use example
+							</button>
+						</>
+					) : null}
 					<button type="button" className="btn block" style={{marginTop: 8}} disabled={!!nameProblem || action.isPending} onClick={create}>
 						{action.isPending ? <span className="spinner" /> : <Icon name="plus" size={18} />} Create container
 					</button>
@@ -711,6 +737,101 @@ function NotesAndTags({c, busy, run}: {c: Container; busy: boolean; run: (path: 
 	)
 }
 
+function NixosConfigPanel({c, busy, run}: {c: Container; busy: boolean; run: (path: string, done?: string, extra?: Record<string, unknown>) => void}) {
+	const toast = useToast()
+	const qc = useQueryClient()
+	const cfg = useQuery({
+		queryKey: ['containers.nixosConfig', c.name],
+		queryFn: () => query<{path: string; config: string; present: boolean}>('containers.nixosConfig', {name: c.name}),
+		enabled: c.status === 'running',
+		retry: false,
+	})
+	const cache = useQuery({
+		queryKey: ['containers.nixCache'],
+		queryFn: () => query<{enabled: boolean; substituter: string}>('containers.nixCache'),
+		retry: false,
+	})
+	const [text, setText] = useState('')
+	const [sub, setSub] = useState('')
+	const [cacheOn, setCacheOn] = useState(false)
+	useEffect(() => {
+		if (cfg.data) setText(cfg.data.config)
+	}, [cfg.data?.config, cfg.dataUpdatedAt])
+	useEffect(() => {
+		if (cache.data) {
+			setCacheOn(cache.data.enabled)
+			setSub(cache.data.substituter)
+		}
+	}, [cache.data?.enabled, cache.data?.substituter, cache.dataUpdatedAt])
+	const exportConfig = () => {
+		const blob = new Blob([text.endsWith('\n') ? text : `${text}\n`], {type: 'text/plain'})
+		const url = URL.createObjectURL(blob)
+		const a = document.createElement('a')
+		a.href = url
+		a.download = `${c.name}-configuration.nix`
+		a.click()
+		URL.revokeObjectURL(url)
+		toast('Downloaded configuration.nix')
+	}
+	const saveCache = () =>
+		mutate<{enabled: boolean; substituter: string}>('containers.setNixCache', {enabled: cacheOn, substituter: sub.trim()})
+			.then(() => {
+				toast(cacheOn ? 'Binary cache on' : 'Binary cache off')
+				qc.invalidateQueries({queryKey: ['containers.nixCache']})
+			})
+			.catch((e) => toast(plain(e as Error), true))
+	return (
+		<div className="ct-col" style={{display: 'grid', gridTemplateColumns: 'minmax(0, 1fr)', gap: 12, minWidth: 0}}>
+			<Group title="configuration.nix" footer="Applied with nixos-rebuild switch inside the container. Nesting is on so builds can run.">
+				{c.status !== 'running' ? (
+					<p className="quiet" style={{padding: '4px 12px'}}>Start the container to read or apply its configuration.</p>
+				) : cfg.isLoading ? (
+					<div className="skeleton" style={{height: 160, borderRadius: 16}} />
+				) : cfg.isError ? (
+					<p className="quiet" style={{padding: '4px 12px'}}>{plain(cfg.error as Error)}</p>
+				) : (
+					<div style={{padding: '4px 12px 12px', display: 'grid', gap: 8}}>
+						<TextField id="ct-nix-cfg" label="Configuration" value={text} onChange={setText} area rows={16} hint={!cfg.data?.present ? 'No configuration.nix yet. Paste one or use the example.' : undefined} />
+						<div style={{display: 'flex', flexWrap: 'wrap', gap: 8}}>
+							<button type="button" className="btn small" disabled={busy} onClick={() => setText(NIXOS_EXAMPLE)}>
+								Use example
+							</button>
+							<button
+								type="button"
+								className="btn small"
+								disabled={busy || !text.trim()}
+								onClick={() => run('containers.setNixosConfig', 'Configuration saved', {config: text})}
+							>
+								<Icon name="check" size={14} /> Save
+							</button>
+							<button
+								type="button"
+								className="btn small"
+								disabled={busy || !text.trim()}
+								onClick={() => run('containers.applyNixosConfig', 'Applying NixOS configuration…', {config: text})}
+							>
+								Apply
+							</button>
+							<button type="button" className="btn small" disabled={!text.trim()} onClick={exportConfig}>
+								Export
+							</button>
+						</div>
+					</div>
+				)}
+			</Group>
+			<Group title="Binary cache" footer="Optional. When on, Apply tells this container’s Nix to prefer the substituter URL (for example a nix-serve on this server). Off by default.">
+				<div style={{padding: '4px 12px 12px', display: 'grid', gap: 8}}>
+					<SwitchRow label="Use a binary cache" sub="Shared across NixOS containers on this server." on={cacheOn} disabled={busy} onChange={setCacheOn} />
+					<TextField id="ct-nix-sub" label="Substituter URL" value={sub} onChange={setSub} placeholder="http://10.0.0.1:5000" hint="http(s) address of the cache. Leave empty to clear." />
+					<button type="button" className="btn small" disabled={busy} onClick={saveCache}>
+						Save cache settings
+					</button>
+				</div>
+			</Group>
+		</div>
+	)
+}
+
 export function ContainerDetail({c, all, onBack, onOpen}: {c: Container; all: Container[]; onBack: () => void; onOpen: (name: string) => void}) {
 	const action = useContainerAction()
 	const confirm = useConfirm()
@@ -912,6 +1033,9 @@ export function ContainerDetail({c, all, onBack, onOpen}: {c: Container; all: Co
 								<Graphs c={c} />
 					<Resources key={`${c.cpus}-${c.memory}-${c.disk}-${c.cpuAllowance}-${c.cpuPriority}-${c.swap}`} c={c} busy={busy} run={run} />
 							</div>)},
+							...(c.nixos || isNixosImage(c.os)
+								? [{id: 'nixos', label: 'Config', body: <NixosConfigPanel c={c} busy={busy} run={run} />}]
+								: []),
 							{id: 'network', label: 'Network', body: (
 					<Group title="Open ports" footer="Opens a port on this server to your home network and passes it to the container. Only the ports listed here are reachable from outside the server.">
 						{c.ports.map((p) => (
