@@ -32,7 +32,7 @@ import {hostdevXml, parseUsbLive} from './usb.mjs'
 import {stoppedMessage} from './exec-error.mjs'
 import {checkLink, fileNameFor, listDownloads, startDownload} from './download.mjs'
 import {readNixCache} from './nix-cache.mjs'
-import {configDir, ensureConfigDir, validateNixosConfig, writeCacheFragment, writeConfiguration} from './nixos-config.mjs'
+import {configDir, ensureConfigDir, readConfiguration, validateNixosConfig, writeCacheFragment, writeConfiguration} from './nixos-config.mjs'
 
 export const CATALOG_URL = 'https://raw.githubusercontent.com/MyOwnDataCenter/app-store/main/machines/catalog.json'
 const BUNDLED_CATALOG = fileURLToPath(new URL('./machine-catalog.json', import.meta.url))
@@ -719,6 +719,7 @@ function domainXml(m, kvm, uuid = '') {
 				portForwards: forwardsFor(m, state),
 				...(b?.progress !== undefined ? {installProgress: b.progress} : {}),
 				...(state === 'error' && m.errorMessage ? {errorMessage: m.errorMessage} : {}),
+				...(m.nixos ? {nixos: true} : {}),
 			}
 		})
 		if (persist) await save().catch(() => {})
@@ -1962,7 +1963,36 @@ function domainXml(m, kvm, uuid = '') {
 			snapshots: m.snapshots ?? [],
 			tasks: (m.tasks ?? []).slice(0, 50),
 			guestIps,
+			...(m.nixos ? {nixos: true} : {}),
 		}
+	}
+
+	async function nixosConfig(input = {}) {
+		await ready
+		const m = find(input.id)
+		if (!m.nixos) throw new RpcError('BAD_REQUEST', 'That machine isn’t a NixOS guest.')
+		return readConfiguration(dataDir, m.id)
+	}
+	async function setNixosConfig(input = {}) {
+		await ready
+		const m = find(input.id)
+		if (!m.nixos) throw new RpcError('BAD_REQUEST', 'That machine isn’t a NixOS guest.')
+		const checked = validateNixosConfig(input.config ?? '')
+		if (!checked.ok) throw new RpcError('BAD_REQUEST', checked.error)
+		try {
+			await writeConfiguration(dataDir, m.id, checked.config)
+		} catch (error) {
+			throw new RpcError('BAD_REQUEST', String(error?.message ?? error))
+		}
+		const cache = await readNixCache(dataDir)
+		await writeCacheFragment(dataDir, m.id, cache)
+		return readConfiguration(dataDir, m.id)
+	}
+	async function applyNixosConfig(input = {}, ctx) {
+		if (input.config !== undefined && input.config !== null) {
+			await setNixosConfig({id: input.id, config: input.config})
+		}
+		return lifecycle((d) => ['reboot', d], 'restarting')(input, ctx)
 	}
 
 	async function updateHardware(input = {}, ctx) {
@@ -2910,6 +2940,9 @@ function domainXml(m, kvm, uuid = '') {
 			'machines.clone': {kind: 'mutation', run: clone},
 			'machines.monitor': {kind: 'mutation', run: monitor},
 			'machines.installConnector': {kind: 'mutation', run: installConnector},
+			'machines.nixosConfig': {kind: 'query', run: nixosConfig},
+			'machines.setNixosConfig': {kind: 'mutation', run: setNixosConfig},
+			'machines.applyNixosConfig': {kind: 'mutation', run: applyNixosConfig},
 		},
 	}
 }
