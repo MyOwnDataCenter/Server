@@ -17,6 +17,8 @@ import os from 'node:os'
 import {basename, join} from 'node:path'
 
 import {checkLink, fileNameFor, listDownloads, startDownload} from './download.mjs'
+import {connectorKind} from './guest-install.mjs'
+import {installLxcConnector} from './lxc-install.mjs'
 import {RpcError} from './rpc.mjs'
 
 const NAME = /^[a-z]([a-z0-9-]{0,61}[a-z0-9])?$/
@@ -202,7 +204,7 @@ export function execIncus(bin, args, {timeout = 60_000, input, binary = false, o
  * @param {string} [o.backupsDir] where container backups are kept
  * @param {{resolve: (virtual: string, o: {mustExist: boolean}) => Promise<{real: string}>}} [o.files] the server's Files, to copy files in and out
  */
-export function createContainers({run = defaultRun, reservedPorts = [], user = os.userInfo().username, backupsDir = null, files = null, now = Date.now} = {}) {
+export function createContainers({run = defaultRun, reservedPorts = [], user = os.userInfo().username, backupsDir = null, files = null, now = Date.now, connector = null, connectorEnrollTimeoutMs = 10 * 60_000} = {}) {
 	// Containers that don't exist yet (being created, cloned or restored), and work on existing ones
 	// (backing up, saving as a template, first-time setup). A failure stays visible for 10 minutes.
 	const pending = new Map() // name -> {what, from?, error?, at}
@@ -844,6 +846,34 @@ export function createContainers({run = defaultRun, reservedPorts = [], user = o
 		return {ok: true}
 	}
 
+	/** Install the Linux connector inside a running system container (owner; via incus exec). */
+	async function installConnector(input = {}) {
+		if (!connector?.pair || !connector?.list) throw new RpcError('PRECONDITION_FAILED', 'The local swarm isn’t ready yet.')
+		const n = name(input.name)
+		const c = (await list()).find((x) => x.name === n)
+		if (!c) throw new RpcError('NOT_FOUND', 'No such container')
+		if (c.status !== 'running') throw new RpcError('PRECONDITION_FAILED', 'Start the container first.')
+		const os = connectorKind(c.os)
+		if (os === 'unsupported') return {status: 'unsupported', os: 'other', message: 'This operating system can’t run the connector. It runs on Linux with systemd or Alpine OpenRC.'}
+		const username = String(input?.username ?? '').trim()
+		if (!username) throw new RpcError('PRECONDITION_FAILED', 'Give the container account to install as.')
+		notBusy(n)
+		background(jobs, n, 'installing connector', () =>
+			installLxcConnector({
+				name: n,
+				username,
+				osId: c.os,
+				run,
+				pair: (body) => connector.pair(body),
+				listAgents: () => connector.list(),
+				caCertificate: () => connector.caCertificate(),
+				excludeAddresses: (c.addresses ?? []).map((a) => a.address),
+				enrollTimeoutMs: connectorEnrollTimeoutMs,
+			}),
+		)
+		return {status: 'started'}
+	}
+
 	return {
 		shellFor,
 		readFile,
@@ -877,6 +907,7 @@ export function createContainers({run = defaultRun, reservedPorts = [], user = o
 			'containers.deleteBackup': {kind: 'mutation', run: deleteBackup},
 			'containers.copyToServer': {kind: 'mutation', run: copyToServer},
 			'containers.setRootPassword': {kind: 'mutation', run: setRootPassword},
+			'containers.installConnector': {kind: 'mutation', run: installConnector},
 			'containers.templateFiles': {kind: 'query', run: templateFiles},
 			'containers.importTemplate': {kind: 'mutation', run: importTemplate},
 			'containers.downloadTemplate': {kind: 'mutation', run: downloadTemplate},

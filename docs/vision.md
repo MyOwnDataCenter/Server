@@ -31,9 +31,13 @@ Two states are part of the product:
 - Without a connector, the host can power the guest and open its screen while it is running. Gauges use the host's measurements. The guest's files and shell are not invented.
 - With a connector, the guest is managed like a joined computer, plus the host controls above. The connector is the same Linux connector a physical computer uses, tied to that virtual machine. It runs on Linux with systemd or Alpine OpenRC. Windows, macOS, and Home Assistant do not run it.
 
+### System containers
+
+A system container (LXC/Incus) is a machine that runs on this server and shares its kernel. It sits in the same Machines list as this server, joined computers, and virtual machines. Online means the instance is running; Offline means it is shut off; Paused means it is frozen. The page keeps Incus controls: power, resources, ports, snapshots, export backups, templates, and options. Without a connector, host-mediated Files and Terminal stay useful. With a connector, Files, Terminal, Apps, Pin, and folder backups follow the grants, the same way they do for a joined computer. Desktop, Storage (host disks), and nested virtual machines are not offered. Home nests its load under the host so CPU and memory are not counted twice.
+
 ### Applications
 
-An application is a container on one machine. It is installed, started, stopped, and opened there. It has a name, a state, and an address when it serves one. It is not a computer: it has no drives of its own, no connector, and no row in the machine list. Its data and its updates belong to that container. The catalog asks which machine receives an install, and it only offers this server or a machine whose connector is online. A virtual machine can take an application while its connector is online and the machine is running. That install is sent to the connector and runs on that machine. A machine with no connector, or a connector that is offline, is not offered.
+An application is an application container on one machine. It is installed, started, stopped, and opened there. It has a name, a state, and an address when it serves one. It is not a computer: it has no drives of its own, no connector, and no row in the machine list. Its data and its updates belong to that container. The catalog asks which machine receives an install, and it only offers this server or a machine whose connector is online. A virtual machine or a system container can take an application while its connector is online and the machine is running. That install is sent to the connector and runs on that machine. A machine with no connector, or a connector that is offline, is not offered.
 
 ### Storage
 
@@ -107,7 +111,7 @@ Until those exist, the product still tells the truth about health, access, and w
 
 ## What this is not
 
-A replacement operating system. A different application for virtual machines than for computers. A container treated as a computer. A dashboard that invents readings so a gauge looks full.
+A replacement operating system. A different application for virtual machines than for computers. An application container treated as a computer. A dashboard that invents readings so a gauge looks full.
 
 ## Who may change this
 

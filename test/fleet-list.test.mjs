@@ -7,7 +7,7 @@ import {hostedVms} from '../web/src/fleet/hostedVms.ts'
 import {computerParent, computerPlacePath, filePlaces, filesParent, guestPlacePath, parseComputerPlace, parseGuestPlace, scopeRoot, SERVER_FILES, withinScope} from '../web/src/fleet/filePlaces.ts'
 import {fittingCrumbCount} from '../web/src/fleet/fittingCrumbs.ts'
 import {groupApps} from '../web/src/fleet/groupApps.ts'
-import {computerFleetInput, fleetAbility, fleetList, guestFleetInput, SERVER_FLEET_ID} from '../web/src/fleet/list.ts'
+import {computerFleetInput, containerFleetInput, fleetAbility, fleetList, guestFleetInput, SERVER_FLEET_ID} from '../web/src/fleet/list.ts'
 import {hasPin, loadPins, togglePin} from '../web/src/fleet/pins.ts'
 
 test('the fleet list is online names, then offline names', () => {
@@ -56,6 +56,44 @@ test('the fleet list is online names, then offline names', () => {
 	assert.equal(fleetAbility(haos, 'storage').granted, false)
 	assert.equal(fleetAbility(members.find((m) => m.id === 'ubuntu'), 'apps').granted, true)
 	assert.equal(fleetAbility(members[0], 'apps').granted, true)
+})
+
+test('fleetList includes containers hosted on this server', () => {
+	const members = fleetList({
+		server: {name: 'Den'},
+		computers: [],
+		guests: [],
+		containers: [containerFleetInput({id: 'web', name: 'web', state: 'running', connector: true})],
+	})
+	const c = members.find((m) => m.kind === 'container')
+	assert.ok(c)
+	assert.equal(c.id, 'web')
+	assert.equal(c.online, true)
+	assert.equal(c.hostId, SERVER_FLEET_ID)
+	assert.match(c.meta, /Container/i)
+	assert.match(c.meta, /online/)
+	assert.equal(fleetAbility(c, 'desktop').granted, false)
+	assert.equal(fleetAbility(c, 'storage').granted, false)
+	assert.equal(fleetAbility(c, 'vms').granted, false)
+	assert.equal(fleetAbility(c, 'files').granted, true)
+	assert.equal(fleetAbility(c, 'terminal').granted, true)
+	assert.equal(fleetAbility(c, 'apps').granted, true)
+	assert.equal(fleetAbility(c, 'backups').granted, true)
+	const paused = fleetList({
+		server: {name: 'Den'},
+		computers: [],
+		guests: [],
+		containers: [containerFleetInput({id: 'db', name: 'db', state: 'frozen'})],
+	}).find((m) => m.kind === 'container')
+	assert.equal(paused?.online, false)
+	assert.match(paused?.meta ?? '', /paused/)
+	const starting = fleetList({
+		server: {name: 'Den'},
+		computers: [],
+		guests: [],
+		containers: [containerFleetInput({id: 'app', name: 'app', state: 'starting'})],
+	}).find((m) => m.kind === 'container')
+	assert.match(starting?.meta ?? '', /Starting/)
 })
 
 test('vms is granted only when the computer is online, allowed, on, and libvirt is there', () => {

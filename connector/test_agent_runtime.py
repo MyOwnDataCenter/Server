@@ -283,4 +283,4 @@ class MacReadings(unittest.TestCase):
         everything = {k: True for k in agent.ABILITY_NAMES}
         got = agent.supported_abilities(everything, windows=False, mac=True)
         self.assertEqual(sorted(k for k, v in got.items() if v), ["files", "manage", "terminal"])
-        self.assertEqual(agent.supported_abilities(everything, windows=False, mac=False), everything)
+        self.assertEqual(agent.supported_abilities(everything, windows=False, mac=False, lxc=False), everything)

@@ -749,11 +749,12 @@ def host_posture(read_file=read, list_dir=os.listdir, exists=os.path.exists, ker
     }
 
 
-def info(abilities=None):
+def info(abilities=None, environment=None):
     rel = os_release()
     pkg = package_manager()
     om = omarchy_facts()
-    return {
+    env = environment if environment is not None else ("lxc" if in_lxc() else "")
+    out = {
         "hostname": socket.gethostname(),
         "os": rel.get("PRETTY_NAME") or rel.get("NAME") or "Linux",
         "osId": rel.get("ID", ""),
@@ -772,6 +773,9 @@ def info(abilities=None):
         **om,
         "libvirt": _info_libvirt(abilities),
     }
+    if env:
+        out["environment"] = env
+    return out
 
 
 _cpu_last = None
@@ -3093,17 +3097,43 @@ def update_self(args, cfg, cafile=None, target_path=None, on_restart=None, fetch
 
 
 # What a Windows computer or a Mac can do so far: its terminal, its files and power. The rest
-# (screen, disks, backups, services) needs Linux.
+# (screen, disks, backups, services) needs Linux. An LXC system container keeps those, but has
+# no desktop, host disks, or nested virtual machines.
 WINDOWS_ABILITIES = ("terminal", "files", "manage")
 MAC_ABILITIES = ("terminal", "files", "manage")
+LXC_ABILITIES = ("terminal", "files", "manage", "backup", "services")
 MAC_LABEL = "org.myowndatacenter.connector"  # its LaunchAgent (connector/install.sh)
+LXC_MARKERS = ("/dev/incus/sock", "/dev/lxd/sock")
 
 
-def supported_abilities(abilities, windows=None, mac=None):
+def in_lxc(environ=None, exists=None, data_dir=None):
+    """True inside an Incus/LXC system container (or when install left a flag file)."""
+    root = data_dir if data_dir is not None else DATA_DIR
+    if os.path.isfile(os.path.join(root, "lxc")):
+        return True
+    check = exists or os.path.exists
+    for path in LXC_MARKERS:
+        if check(path):
+            return True
+    if environ is not None:
+        raw = environ if isinstance(environ, (bytes, bytearray)) else str(environ).encode("utf-8", "replace")
+    elif IS_WINDOWS or IS_MAC:
+        raw = b""
+    else:
+        try:
+            with open("/proc/1/environ", "rb") as f:
+                raw = f.read()
+        except OSError:
+            raw = b""
+    return b"container=lxc" in raw.split(b"\0")
+
+
+def supported_abilities(abilities, windows=None, mac=None, lxc=None):
     windows = IS_WINDOWS if windows is None else windows
     mac = IS_MAC if mac is None else mac
+    lxc = in_lxc() if lxc is None else lxc
     abilities = dict(abilities or {})
-    only = WINDOWS_ABILITIES if windows else MAC_ABILITIES if mac else None
+    only = WINDOWS_ABILITIES if windows else MAC_ABILITIES if mac else LXC_ABILITIES if lxc else None
     if only is not None:
         for k in ABILITY_NAMES:
             if k not in only:

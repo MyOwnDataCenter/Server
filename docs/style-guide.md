@@ -49,7 +49,7 @@ The layout named Desktop is the windowed layout of this application. That layout
 
 Internal paths, CSS classes, protocol names, and developer logs may still say console. That does not make console a product name. User-facing copy follows this guide even when the code behind it still says console.
 
-A machine's status is Online or Offline. Online means this server is up, a joined computer's connector answers, or a virtual machine is running. Offline means that computer's connector does not answer, or the virtual machine is shut off. Do not show stopped or running as that status. Paused, Hibernated, Installing, Starting, Stopping, Restarting, and Error stay, because those are neither Online nor Offline. A count of machines uses the same word, such as "3 of 4 online".
+A machine's status is Online or Offline. Online means this server is up, a joined computer's connector answers, a virtual machine is running, or a system container (LXC) is running. Offline means that computer's connector does not answer, or the virtual machine or system container is shut off. Do not show stopped or running as that status. Paused, Hibernated, Installing, Starting, Stopping, Restarting, and Error stay, because those are neither Online nor Offline. A count of machines uses the same word, such as "3 of 4 online".
 
 Power buttons may say Start, Shut down, Reboot, Pause, Hibernate, Resume, and Stop. Stop is the action that cuts power. It is not a status.
 
@@ -59,7 +59,7 @@ Terminal and Desktop are one row: the primary Terminal button, the Desktop butto
 
 A row that opens a machine shows the disclosure chevron. The row is the control. The chevron is not its own button. The machine list and a host's list of virtual machines both show it.
 
-Build a new component when the behavior is different. A container is different from a machine. A confirm is different from a page. Those differences earn a component. A new visual for the same action does not.
+Build a new component when the behavior is different. An application container is different from a machine. A confirm is different from a page. Those differences earn a component. A new visual for the same action does not. A system container (LXC) is a machine in the fleet; it is not an application container.
 
 ## Machines
 
@@ -73,6 +73,10 @@ Start from the physical machine page. Add a control only when the host or the gu
 
 Leave out what cannot be done. A virtual machine does not host another virtual machine. The control is absent there, and the page still looks like a machine.
 
+### System containers
+
+A system container is a Machines row hosted on this server. Add says Container. Status is Online, Offline, or Paused. The page keeps Incus power, resources, ports, snapshots, export backups, templates, and options. Incus export backups are named as what they are; they are not connector folder backups. Offer Install connector when the image can run Linux with systemd or Alpine OpenRC. With a connector online, Terminal, Pin, Files, Apps, and folder backups follow the grants. Desktop is never offered. Storage (host disks) and nested virtual machines are never offered.
+
 ### Without a connector
 
 The host can power the guest and can open its screen while it is running. Show gauges only from measurements the host actually has. An unreadable guest is not listed in the file manager, and the machine page does not invent files. Terminal stays unavailable until a shell exists. Offer Install connector when the guest can run Linux with systemd or Alpine OpenRC. When the operating system cannot run the connector, say that on the machine. Do not offer the guest as a place to install an application until its connector is online and the guest is running.
@@ -83,12 +87,12 @@ The connector is the Linux connector, tied to that virtual machine. Files, termi
 
 ### Applications
 
-An application is a container on one machine.
+An application is an application container on one machine.
 
 - Show it as an app: icon, name, state, and address when it has one.
 - Keep it out of the machine list. It has no drives, no connector, and no desktop of its own.
 - Open the application in the product when it allows that. When it refuses to be embedded, open it in a browser tab.
-- The store names the machine that will receive the install. Opened from a machine, the install targets that machine. Only this server, or a machine whose connector is online, is offered. A virtual machine can receive an application while its connector is online and the machine is running. The install is sent to that connector. An offline connector is not offered.
+- The store names the machine that will receive the install. Opened from a machine, the install targets that machine. Only this server, or a machine whose connector is online, is offered. A virtual machine or a system container can receive an application while its connector is online and the machine is running. The install is sent to that connector. An offline connector is not offered.
 - When the same application runs on more than one machine, show one application and a count.
 
 ## Where a control lives
@@ -111,7 +115,7 @@ The fleet at a glance. Gauges, then the machines and applications the person pin
 
 ### Machines
 
-Every physical machine, with a host's virtual machines available from that host. One row opens one machine. Terminal and Desktop are on the machine, for this server, a joined computer, and a virtual machine alike. On the desktop, a wide window keeps the list beside the open machine.
+Every physical machine, with a host's virtual machines and system containers available from that host. One row opens one machine. Terminal and Desktop are on the machine, for this server, a joined computer, and a virtual machine alike. A system container offers Terminal when granted and never Desktop. On the desktop, a wide window keeps the list beside the open machine.
 
 ### Machine page
 
@@ -222,7 +226,7 @@ Reduced motion is respected. A transition does not hide a change of state. After
 - Terminal and Desktop use the shared action row, with Pin on that row.
 - A row that opens a machine shows the disclosure chevron.
 - A virtual machine differs only where the host, the guest operating system, or the connector makes a real difference.
-- An application is presented as a container on a machine.
+- An application is presented as an application container on a machine. A system container (LXC) is presented as a machine.
 - The screen works by touch on a phone and in a window on the desktop, in both the floating shell and the tiled shell.
 - Body text is on a card. The picture is still the page background.
 - The phone list and the desktop window are the same component. The list is a card only on the phone.

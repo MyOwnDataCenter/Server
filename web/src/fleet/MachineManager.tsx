@@ -6,7 +6,7 @@ import {query, type Machine} from '../api'
 import {Icon, type IconName} from '../icons'
 import {useStats} from '../machines/api'
 import {usePowerActions} from '../machines/panels'
-import {guestAgent, hostGuestMetrics, isGuestAgent} from '../swarm/guestLink'
+import {containerAgent, guestAgent, hostGuestMetrics, isContainerAgent, isGuestAgent} from '../swarm/guestLink'
 import {swarmGaugeItems, type SwarmMetrics} from '../swarm/gauges'
 import {agentMay, useSwarmAction, type Agent} from '../swarm/Swarm'
 import {FilterBar} from '../FilterBar'
@@ -14,6 +14,7 @@ import {StatusPill, haptic, useConfirm} from '../ui'
 import {MACHINES_FILTER_TIP, type TutorialId} from '../tutorials'
 import {PinButton} from './PinButton'
 import {SERVER_FLEET_ID, type FleetMember} from './list'
+import {containerPill, containerState, NewContainerSheet, osColor, type Container, useContainerAction} from '../containers/Containers'
 import {
 	filterLabel,
 	filterSlot,
@@ -40,8 +41,6 @@ import {
 } from './machineManagerLogic'
 import {LiveStats} from './StatRegion'
 import {useServerGaugeMetrics} from './serverGauges'
-import {ContainersInList, NewContainerSheet} from '../containers/Containers'
-
 const Console = lazy(() => import('../Console').then((m) => ({default: m.Console})))
 const TerminalScreen = lazy(() => import('../Terminal').then((m) => ({default: m.TerminalScreen})))
 
@@ -489,6 +488,75 @@ function GuestRow({
 	)
 }
 
+function ContainerFleetRow({
+	c,
+	health,
+	open,
+	lines,
+	selected,
+	onToggle,
+	onManage,
+	onTerminal,
+}: {
+	c: Container
+	health: ManagerHealth
+	open: boolean
+	lines: boolean
+	selected: boolean
+	onToggle: () => void
+	onManage: () => void
+	onTerminal?: () => void
+}) {
+	const action = useContainerAction()
+	const state = containerState(c)
+	const reach = reachLabel('container', c.status === 'running', state)
+	const busy = action.isPending || containerPill(c).kind === 'busy'
+	const run = (path: string, done: string) => action.mutate({path, input: {name: c.name}, done})
+	if (lines) return <LineButton name={c.name} icon="category" iconBg={osColor(c.os)} reach={reach} selected={selected} onSelect={onManage} />
+	return (
+		<RowFrame open={open} name={c.name} icon="category" iconBg={osColor(c.os)} reach={reach} health={healthPill(health)} onToggle={onToggle}>
+			<div className="mm-panel">
+				<p className="quiet" style={{margin: 0, overflowWrap: 'anywhere'}}>
+					{c.progress ||
+						[c.os ? c.os[0].toUpperCase() + c.os.slice(1) : '', c.addresses.find((a) => a.family === 'IPv4')?.address, c.memoryUsedGiB !== null ? `${c.memoryUsedGiB} GB memory in use` : null]
+							.filter(Boolean)
+							.join(' · ') ||
+						'Container'}
+				</p>
+				{!c.pending && (
+					<div style={{display: 'flex', gap: 8, flexWrap: 'wrap'}}>
+						{c.status !== 'running' ? (
+							<button type="button" className="btn small" disabled={busy} onClick={() => run('containers.start', `${c.name} is starting`)}>
+								<Icon name="play" size={14} /> Start
+							</button>
+						) : (
+							<>
+								{onTerminal && (
+									<button type="button" className="btn small" aria-label="Terminal" onClick={() => (haptic(8), onTerminal())}>
+										<Icon name="terminal" size={18} />
+									</button>
+								)}
+								<button type="button" className="btn small" disabled={busy} onClick={() => run('containers.restart', `${c.name} is restarting`)}>
+									<Icon name="restart" size={14} /> Restart
+								</button>
+								<button type="button" className="btn small" disabled={busy} onClick={() => run('containers.stop', `${c.name} is shut down`)}>
+									<Icon name="power" size={14} /> Shut down
+								</button>
+							</>
+						)}
+					</div>
+				)}
+				<div className="mm-foot">
+					<span />
+					<button type="button" className="btn small" onClick={() => (haptic(6), onManage())}>
+						Manage
+					</button>
+				</div>
+			</div>
+		</RowFrame>
+	)
+}
+
 export function MachineManager({
 	owner,
 	serverTerminal,
@@ -499,6 +567,7 @@ export function MachineManager({
 	swarmProblem,
 	members,
 	machines,
+	containers = [],
 	agents,
 	onManage,
 	onServerTerminal,
@@ -524,6 +593,7 @@ export function MachineManager({
 	swarmProblem: string | null
 	members: readonly FleetMember[]
 	machines: readonly Machine[]
+	containers?: readonly Container[]
 	agents: readonly Agent[]
 	onManage: (kind: ManagerKind, id: string) => void
 	onServerTerminal: () => void
@@ -581,7 +651,8 @@ export function MachineManager({
 		}
 	}, [addOpen])
 	const machineById = new Map(machines.map((m) => [m.id, m]))
-	const agentById = new Map(agents.filter((a) => !isGuestAgent(a)).map((a) => [a.id, a]))
+	const containerById = new Map(containers.map((c) => [c.name, c]))
+	const agentById = new Map(agents.filter((a) => !isGuestAgent(a) && !isContainerAgent(a)).map((a) => [a.id, a]))
 	const listed: (FleetMember & {offline: boolean; online: boolean; health: ManagerHealth})[] = []
 	for (const member of members) {
 		if (member.kind === 'server') {
@@ -602,6 +673,21 @@ export function MachineManager({
 				offline: isOffline('computer', agent.online),
 				online: isOnline('computer', agent.online),
 				health: managerHealth({kind: 'computer', online: agent.online, connectorOnline: agent.online, alert, gauges: snaps(agent.metrics)}),
+			})
+			continue
+		}
+		if (member.kind === 'container') {
+			const c = containerById.get(member.id)
+			if (!c) continue
+			const state = containerState(c)
+			const agent = containerAgent(agents, c.name)
+			const connectorOnline = !!agent?.online
+			const alert = worstAlert(alerts.filter((a) => agent && a.agentId === agent.id).map((a) => a.severity))
+			listed.push({
+				...member,
+				offline: isOffline('container', c.status === 'running', state),
+				online: isOnline('container', c.status === 'running', state),
+				health: managerHealth({kind: 'container', online: c.status === 'running', connectorOnline, alert, gauges: connectorOnline ? snaps(agent?.metrics) : []}),
 			})
 			continue
 		}
@@ -790,6 +876,25 @@ export function MachineManager({
 							</MotionSlot>
 						)
 					}
+					if (member.kind === 'container') {
+						const c = containerById.get(member.id)
+						if (!c) return null
+						const agent = containerAgent(agents, c.name)
+						return (
+							<MotionSlot key={slot.id} phase={slot.phase}>
+								<ContainerFleetRow
+									c={c}
+									health={member.health}
+									open={open}
+									lines={lines}
+									selected={selected}
+									onToggle={() => toggle(member.id)}
+									onManage={() => onManage('container', member.id)}
+									onTerminal={agent?.online && agentMay(agent, 'terminal') ? () => setTerm({id: agent.id, name: c.name}) : undefined}
+								/>
+							</MotionSlot>
+						)
+					}
 					const machine = machineById.get(member.id)
 					if (!machine) return null
 					return (
@@ -811,7 +916,6 @@ export function MachineManager({
 				})}
 			</div>
 			{!loading && rows.length === 0 && <p className="quiet mm-empty">No machines match.</p>}
-			<ContainersInList owner={owner} filterText={queryText} Frame={RowFrame} />
 			{term && (
 				<Suspense fallback={null}>
 					<TerminalScreen agent={term} onClose={() => setTerm(null)} />

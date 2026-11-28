@@ -182,22 +182,37 @@ test('the terminal opens a root shell only in a running container', async () => 
 	await assert.rejects(ct.shellFor('../etc'), /lowercase/)
 })
 
-test('omarchyd: containers are owner-only, and the web app passes them through', async () => {
-	const {mkdtemp, rm} = await import('node:fs/promises')
+test('omarchyd: members can list containers; Incus mutations stay owner-only', async () => {
+	const {mkdtemp, readFile, rm, writeFile} = await import('node:fs/promises')
 	const os = await import('node:os')
 	const {join} = await import('node:path')
 	const {openAccounts} = await import('../omarchyd/accounts.mjs')
 	const {startOmarchyd} = await import('../omarchyd/server.mjs')
 	const {ALLOWED} = await import('../server/app.mjs')
-	for (const name of ['containers.status', 'containers.list', 'containers.images', 'containers.create', 'containers.delete', 'containers.addPort']) assert.ok(ALLOWED[name], name)
+	for (const name of ['containers.status', 'containers.list', 'containers.images', 'containers.create', 'containers.delete', 'containers.addPort', 'containers.installConnector']) assert.ok(ALLOWED[name], name)
 	const root = await mkdtemp(join(os.tmpdir(), 'omarchy-ct-'))
-	const accounts = await openAccounts(join(root, 'd'))
+	const data = join(root, 'd')
+	const accounts = await openAccounts(data)
 	await accounts.createOwner({name: 'Chris', password: 'correct horse'})
-	const d = await startOmarchyd({port: 0, dataDir: join(root, 'd'), home: root, containerOptions: {run: fakeIncus({list: [{name: 'web', type: 'container', status: 'Running'}]}).run}})
+	const state = JSON.parse(await readFile(join(data, 'accounts.json'), 'utf8'))
+	state.users.push({...state.users[0], userId: 'member', name: 'Pat', role: 'member'})
+	await writeFile(join(data, 'accounts.json'), JSON.stringify(state, null, '\t'))
+	const d = await startOmarchyd({port: 0, dataDir: data, home: root, containerOptions: {run: fakeIncus({list: [{name: 'web', type: 'container', status: 'Running'}]}).run}})
 	try {
-		const login = await (await fetch(`${d.url}/trpc/user.loginNative`, {method: 'POST', headers: {'content-type': 'application/json'}, body: JSON.stringify({userId: 'owner', password: 'correct horse', client: {id: 's'}})})).json()
-		const res = await (await fetch(`${d.url}/trpc/containers.list`, {headers: {authorization: `Bearer ${login.result.data.accessToken}`}})).json()
-		assert.equal(res.result.data[0].name, 'web')
+		const login = async (userId) => {
+			const body = await (await fetch(`${d.url}/trpc/user.loginNative`, {method: 'POST', headers: {'content-type': 'application/json'}, body: JSON.stringify({userId, password: 'correct horse', client: {id: 's'}})})).json()
+			return `Bearer ${body.result.data.accessToken}`
+		}
+		const owner = await login('owner')
+		const member = await login('member')
+		const ownerList = await (await fetch(`${d.url}/trpc/containers.list`, {headers: {authorization: owner}})).json()
+		assert.equal(ownerList.result.data[0].name, 'web')
+		const memberList = await (await fetch(`${d.url}/trpc/containers.list`, {headers: {authorization: member}})).json()
+		assert.equal(memberList.result.data[0].name, 'web')
+		const memberStatus = await (await fetch(`${d.url}/trpc/containers.status`, {headers: {authorization: member}})).json()
+		assert.equal(memberStatus.result.data.available, true)
+		const start = await (await fetch(`${d.url}/trpc/containers.start`, {method: 'POST', headers: {authorization: member, 'content-type': 'application/json'}, body: JSON.stringify({name: 'web'})})).json()
+		assert.match(start.error?.json?.message || start.error?.message || JSON.stringify(start), /owner|manage containers/i)
 	} finally {
 		await d.close()
 		await rm(root, {recursive: true, force: true})

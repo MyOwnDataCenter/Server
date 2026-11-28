@@ -234,6 +234,8 @@ test('read tools are the curated list and members do not get swarm_list', () => 
 		'machines_details',
 		'machines_osImages',
 		'machines_capabilities',
+		'containers_status',
+		'containers_list',
 		'usb_list',
 		'swarm_list',
 		'swarm_alerts',
@@ -277,6 +279,14 @@ test('read tools are the curated list and members do not get swarm_list', () => 
 	assert.match(disks.description, /unmounted|mount state/i)
 	assert.equal(READ_TOOLS.find((t) => t.name === 'appStore_app').parameters.properties.appId.type, 'string')
 	assert.equal(READ_TOOLS.find((t) => t.name === 'machines_details').parameters.properties.id.type, 'string')
+	assert.equal(READ_TOOLS.find((t) => t.name === 'containers_list').rpc, 'containers.list')
+	assert.equal(READ_TOOLS.find((t) => t.name === 'containers_list').ownerOnly, false)
+	assert.equal(READ_TOOLS.find((t) => t.name === 'containers_status').rpc, 'containers.status')
+	assert.equal(WRITE_TOOLS.find((t) => t.name === 'containers_start').ownerOnly, true)
+	assert.equal(WRITE_TOOLS.find((t) => t.name === 'containers_installConnector').rpc, 'containers.installConnector')
+	assert.equal(toolsFor('member').some((t) => t.name === 'containers_list'), true)
+	assert.equal(toolsFor('member').some((t) => t.name === 'containers_start'), false)
+	assert.equal(toolsFor('owner').some((t) => t.name === 'containers_installConnector'), true)
 	assert.ok(READ_TOOLS.find((t) => t.name === 'omarchy_plugins').parameters.properties.q)
 	assert.ok(READ_TOOLS.find((t) => t.name === 'appStore_search').parameters.properties.limit)
 	assert.equal(READ_TOOLS.find((t) => t.name === 'omarchy_listBackgrounds').rpc, 'omarchy.backgrounds')
